@@ -23,15 +23,15 @@ from .emit_holes import (
     OVERLAY_STRETCH_MEASURED, Hole, HoleSlide, SlideDict, fit_overlay, hole_neighbours_of, hole_offset_of,
     hole_slide_dicts, mark_drifts_of, slide_holes_of, text_right_limit,
 )
-from .emit_metrics import LINE_EM, PAD_X, SYMBOL_ADVANCE_EM, FontMapper, rgb, u16
+from .emit_metrics import LINE_EM, PAD_X, SYMBOL_ADVANCE_EM, FontMapper, u16
 from .emit_model import Anchored, JsonMap, Place, SetText, block_of, box_of, json_number, objects_of, point_of, text_of
 from .emit_pptx import api_error, batch, template_key
 from .emit_text import box_lines_of, hole_runs_of, hugs_of, in_sentence_of, text_box_requests_of
 from .emit_widths import paragraph_dict, set_runs_of
 from .gapi import HttpError
 from .google_auth import credentials_for_threads, fetcher_for_threads, shared_service, slides_service
-from .google_types import SlidesService
-from .gslides import per_thread
+from .google_types import SlidesRequest, SlidesService
+from .gslides import per_thread, text_color
 from .ir_types import Box, Mark
 from .json_types import Json, JsonObject
 
@@ -415,7 +415,7 @@ def _measured(holes: HoleSlide) -> tuple[list[Hole], list[Anchored]]:
 
 
 def measure_jobs(deck: JsonMap, scale: float, fonts: FontMapper, placed: Callable[[JsonObject, int], JsonObject],
-                 page_slide: Mapping[int, str]) -> tuple[list[JsonObject], list[ScratchJob]]:
+                 page_slide: Mapping[int, str]) -> tuple[list[SlidesRequest], list[ScratchJob]]:
     """`measure_jobs_of` a deck dict, its pictures placed by `placed` (DeckPlan.placed)."""
     slides: list[ScratchSlide] = []
     for slide in objects_of(deck["slides"], "slides"):
@@ -436,9 +436,9 @@ def measure_jobs(deck: JsonMap, scale: float, fonts: FontMapper, placed: Callabl
 
 
 def measure_jobs_of(slides: Sequence[ScratchSlide], scale: float, fonts: FontMapper, page_slide: Mapping[int, str]
-                    ) -> tuple[list[JsonObject], list[ScratchJob]]:
+                    ) -> tuple[list[SlidesRequest], list[ScratchJob]]:
     """The scratch slides of measure_places: their requests, and what each is read for."""
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     jobs: list[ScratchJob] = []
     for slide in slides:
         holes, overlays = _measured(slide.holes)
@@ -469,7 +469,7 @@ def measure_jobs_of(slides: Sequence[ScratchSlide], scale: float, fonts: FontMap
                                                      for p in t.text.paragraphs))
             reqs += text_box_requests_of(plain, sid, oid, scale, fonts, None, page_slide, t.bar, t.right_limit, colours)
             reqs.append({"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "fields": "foregroundColor",
-                                             "style": {"foregroundColor": rgb("#000000")}}})
+                                             "style": {"foregroundColor": text_color("#000000")}}})
             top, bottom = t.bbox[1] * scale - 4, t.bbox[3] * scale + 4
             for h, colour in zip(mine, colours):
                 if h.picture is not None:
@@ -494,7 +494,7 @@ def measure_jobs_of(slides: Sequence[ScratchSlide], scale: float, fonts: FontMap
                     words.append(WordToFind(range=w.range, marks=w.marks, width=w.width, colour=colour, x0=x0, top=top,
                                             bottom=bottom))
                     reqs.append({"updateTextStyle": {"objectId": oid, "fields": "backgroundColor",
-                                                     "style": {"backgroundColor": rgb(colour)},
+                                                     "style": {"backgroundColor": text_color(colour)},
                                                      "textRange": {"type": "FIXED_RANGE", "startIndex": w.range[0],
                                                                    "endIndex": w.range[1]}}})
                 measured.append(OverlayToFit(picture=o, box=(a0, a1), drifts=tuple(mark_drifts_of(o.marks, scale, fonts)),

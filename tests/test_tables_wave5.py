@@ -6,9 +6,10 @@ from beamer2slides import emit as E
 from beamer2slides.emit import FontMapper
 from beamer2slides.emit_model import JsonMap
 from beamer2slides.emit_tables import TableLayout
+from beamer2slides.google_types import part_json
 from beamer2slides.ir import TableElement
 
-from .json_reads import jarr, jint, jnum, jobj, jobjs
+from .json_reads import jarr, jint, jnum, jobjs
 from .test_tables_hunt import W, Page, as_json, some, tables
 from .test_tables_wave4 import overfull_table
 
@@ -55,7 +56,7 @@ def test_a_squeezed_columns_words_move_with_it():
         q = r.get("updateParagraphStyle")
         if not q:
             continue
-        style = jobj(q)
+        style = part_json(q, "updateParagraphStyle")
         if "cellLocation" in style:
             indents[(jint(style, "cellLocation", "rowIndex"), jint(style, "cellLocation", "columnIndex"))] = \
                 jnum(style, "style", "indentStart", "magnitude")

@@ -23,8 +23,8 @@ Everything it creates is deleted. Usage: python tools/probe_subscripts.py
 
 import io
 import json
-from collections.abc import Mapping
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from PIL import Image
@@ -36,24 +36,27 @@ from beamer2slides.google_types import (
     Dimension,
     DriveService,
     Presentation,
+    SlidesRequest,
     SlidesService,
+    SlidesTextStyle,
     file_id,
     object_id,
     part,
     parts,
     presentation_id,
 )
-from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 from beamer2slides.json_types import JsonObject, as_object
 
-Formula = list[tuple[str, float, bool, str | None]]  # (text, size, italic, offset) in Lato
-Segments = list[tuple[str, str, float, bool, str | None]]  # (text, font, size, italic, offset)
+Offset = Literal["SUBSCRIPT", "SUPERSCRIPT"]   # (a text style's baselineOffset, NONE left out)
+Formula = list[tuple[str, float, bool, Offset | None]]  # (text, size, italic, offset) in Lato
+Segments = list[tuple[str, str, float, bool, Offset | None]]  # (text, font, size, italic, offset)
 Ink = dict[str, float | bool]
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "out" / "probe_subscripts"
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-SUB = "SUBSCRIPT"
+SUB: Offset = "SUBSCRIPT"
 SOFT = chr(11)
 
 BIG = 40
@@ -99,8 +102,28 @@ CROWDING: list[tuple[str, Formula, float]] = [  # (label, segments of line 1, li
 ]
 
 
-def style(oid: str, font: str, size: float, start: int, end: int, italic: bool, offset: str | None) -> dict[str, object]:
-    st: dict[str, object] = {"fontFamily": font, "fontSize": pt(round(size, 2)), "italic": italic,
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
+    """`gslides.text_box` as a request."""
+    return {"createShape": {
+        "objectId": object_id,
+        "shapeType": "TEXT_BOX",
+        "elementProperties": {
+            "pageObjectId": page_id,
+            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
+                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
+        },
+    }}
+
+
+def style(oid: str, font: str, size: float, start: int, end: int, italic: bool, offset: Offset | None) -> SlidesRequest:
+    st: SlidesTextStyle = {"fontFamily": font, "fontSize": pt(round(size, 2)), "italic": italic,
                              "foregroundColor": {"opaqueColor": {"rgbColor": {}}}, "baselineOffset": offset or "NONE"}
     return {"updateTextStyle": {"objectId": oid, "textRange": {"type": "FIXED_RANGE", "startIndex": start,
                                                                "endIndex": end},
@@ -163,8 +186,8 @@ def run(slides: SlidesService, pres: Presentation) -> dict[str, object]:
     pid = presentation_id(pres)
     first_slide = pres.get("slides", [])[0]
     first = object_id(first_slide)
-    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}}
-                                        for e in first_slide.get("pageElements", [])]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": object_id(e)}}
+                                 for e in first_slide.get("pageElements", [])]
     pages = [first, "page_uni", "page_crowd"]
     reqs += [{"createSlide": {"objectId": p}} for p in pages[1:]]
     boxes: dict[str, tuple[str, float, float, float, float]] = {}  # label -> (page, x, y, w, h)

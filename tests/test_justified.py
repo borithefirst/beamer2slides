@@ -10,6 +10,7 @@ from beamer2slides import emit
 from beamer2slides.classify import Line, PageClassifier, Span, new_line, new_paragraph
 from beamer2slides.emit_model import JsonMap
 from beamer2slides.json_types import Json, JsonObject
+from beamer2slides.google_types import slides_json
 
 from .json_reads import jarr, jnum, jobj, jobjs
 from .test_columns import span
@@ -121,7 +122,7 @@ def quote(stretch: float) -> JsonObject:
 
 
 def styles(el: JsonMap, scale: float) -> list[JsonObject]:
-    return [jobj(r, "updateParagraphStyle", "style") for r in emit.text_box_requests(el, "b2s_s003", "b2s_s003_t1", scale, FONTS)
+    return [jobj(r, "updateParagraphStyle", "style") for r in map(slides_json, emit.text_box_requests(el, "b2s_s003", "b2s_s003_t1", scale, FONTS))
             if "updateParagraphStyle" in r]
 
 
@@ -194,7 +195,7 @@ def test_a_word_tex_hyphenated_does_not_cost_a_line() -> None:
                           "lines": [{"baseline": 150.0, "x0": centre - w1 / 2, "x1": centre + w1 / 2},
                                     {"baseline": 161.0, "x0": centre - w2 / 2, "x1": centre + w2 / 2}]}]}
     assert emit.pdf_line_breaks(jobj(el, "paragraphs", 0), None, None) is None  # (the hyphen: not measured line by line)
-    props = next(jobj(r, "createShape") for r in emit.text_box_requests(el, "s", "b", scale, FONTS) if "createShape" in r)
+    props = next(jobj(r, "createShape") for r in map(slides_json, emit.text_box_requests(el, "s", "b", scale, FONTS)) if "createShape" in r)
     width = pt_of(jobj(props, "elementProperties", "size", "width")) - 2 * emit.PAD_X
     assert width >= slides_w([text_run("Robots deployed", 8.97)], scale) + emit.LINE_MARGIN
     assert width <= w2 * scale + 8.97 * scale + 4  # (an em at most past the room it had)

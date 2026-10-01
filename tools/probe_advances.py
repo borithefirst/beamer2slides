@@ -15,15 +15,14 @@ Usage: python tools/probe_advances.py   (writes src/beamer2slides/calibration/ad
 """
 
 import json
-from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from beamer2slides.google_auth import drive_service, slides_service
-from beamer2slides.google_types import object_id, presentation_id
-from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.google_types import Dimension, SlidesRequest, object_id, presentation_id
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "out" / "probe_advances"
@@ -38,13 +37,33 @@ PER_COLUMN = 23
 COLUMN_W = 143
 
 
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
+    """`gslides.text_box` as a request."""
+    return {"createShape": {
+        "objectId": object_id,
+        "shapeType": "TEXT_BOX",
+        "elementProperties": {
+            "pageObjectId": page_id,
+            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
+                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
+        },
+    }}
+
+
 def main() -> None:
     slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe advances"}))
     pid = presentation_id(pres)
     slide = pres.get("slides", [])[0]
     first = object_id(slide)
-    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in slide.get("pageElements", [])]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": object_id(e)}} for e in slide.get("pageElements", [])]
     jobs = [(font, style) for font in FONTS for style in STYLES]
     pages = [first] + [f"page_{i}" for i in range(1, len(jobs))]
     reqs += [{"createSlide": {"objectId": p}} for p in pages[1:]]
@@ -55,14 +74,14 @@ def main() -> None:
         for i, ch in enumerate(rows):
             oid = f"adv_{j}_{i}"
             x, y = 4 + (i // PER_COLUMN) * COLUMN_W, 2 + (i % PER_COLUMN) * ROW
-            reqs += [
+            reqs.extend([
                 text_box(oid, page, x, y, COLUMN_W - 2, ROW + 6),
                 {"insertText": {"objectId": oid, "text": "|  " + ch * N + "  |"}},
                 {"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"},
                                      "fields": "fontFamily,fontSize,bold,italic,foregroundColor",
                                      "style": {"fontFamily": font, "fontSize": pt(SIZE), "bold": bold, "italic": italic,
                                                "foregroundColor": {"opaqueColor": {"rgbColor": {}}}}}},
-            ]
+            ])
             boxes.setdefault((font, style), []).append((ch, x, y))
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
 

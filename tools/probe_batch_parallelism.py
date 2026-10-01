@@ -25,19 +25,18 @@ Run it with `.venv\\Scripts\\python.exe tools/probe_batch_parallelism.py`.
 """
 
 import time
-from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 
 from beamer2slides.google_auth import credentials, drive_service, slides_service
-from beamer2slides.google_types import object_id, presentation_id
+from beamer2slides.google_types import SlidesRequest, object_id, presentation_id
 from beamer2slides.gslides import execute, per_thread
 
 BATCHES = 8
 PER_BATCH = 100  # requests are 2 per shape, so ~200 each, the size of a real content batch
 
 
-def shape_requests(page: str, tag: str, n: int) -> list[Mapping[str, object]]:
-    reqs: list[Mapping[str, object]] = []
+def shape_requests(page: str, tag: str, n: int) -> list[SlidesRequest]:
+    reqs: list[SlidesRequest] = []
     for i in range(n):
         oid = f"{tag}_{i:03}"
         reqs.append({"createShape": {"objectId": oid, "shapeType": "TEXT_BOX", "elementProperties": {

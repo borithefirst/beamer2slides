@@ -17,6 +17,7 @@ from beamer2slides.devtools.render_torture import MEDIA, Form, pdf_bytes
 from beamer2slides.ir import deck_json, slide_json
 from beamer2slides.json_types import JsonObject, as_array, as_objects, as_str
 from beamer2slides.raw_types import RawDoc
+from beamer2slides.google_types import slides_json
 
 from .json_reads import jarr, jnum, jobj, jobjs, jstr
 from .test_classify import given, images, paragraph_text, shapes_of, tables_of
@@ -229,7 +230,7 @@ def test_an_adopted_shape_slides_has_no_preset_for_is_uploaded_as_its_picture(tm
     assert line[0] < 120 and line[2] > 180  # (with the stroke's ink)
     planned = emit.plan_offline(deck)
     assert planned["plan"].keys == []
-    reqs = [r for _, _, parts, _ in planned["slides"] for _, rs in parts for r in rs]
+    reqs = [slides_json(r) for _, _, parts, _ in planned["slides"] for _, rs in parts for r in rs]
     assert [jstr(r, "createShape", "shapeType") for r in reqs if "createShape" in r] == ["RECTANGLE"]
     props = next(jobj(r, "updateShapeProperties", "shapeProperties") for r in reqs if "updateShapeProperties" in r)
     assert jstr(props, "outline", "propertyState") == "RENDERED" and jnum(props, "outline", "weight", "magnitude") > 0
@@ -264,7 +265,7 @@ def test_an_adopted_table_carries_the_layout_emit_writes_it_by(tmp_path: Path, b
     assert borders == [(0, 0, "BOTTOM"), (0, 1, "BOTTOM")] or borders == [(1, 0, "TOP"), (1, 1, "TOP")]
     fonts = emit.FontMapper()
     assert len(pptx_table(table, 1.0, fonts, SLIDE_W / 1.0)["heights"]) == 2
-    reqs = table_requests(table, "s", "tab", 1.0, fonts, imported=True, page_w=SLIDE_W / 1.0)
+    reqs = [slides_json(r) for r in table_requests(table, "s", "tab", 1.0, fonts, imported=True, page_w=SLIDE_W / 1.0)]
     assert [jstr(r, "insertText", "text") for r in reqs if "insertText" in r] == ["Name", "Value", "alpha", "42"]
 
 
@@ -287,7 +288,7 @@ def test_a_marked_table_of_empty_cells_and_a_centred_merge_are_laid_out(tmp_path
     assert [(m["row"], m["col"], m["cols"], m["align"]) for m in given(table.get("merges"))] == [(0, 0, 2, "center")]
     merge_x = given(table.get("merge_x"))
     assert len(merge_x) == 1 and 55 < merge_x[0][0] < merge_x[0][1] < 145
-    reqs = table_requests(table, "s", "tab", 1.0, fonts, imported=True, page_w=SLIDE_W / 1.0)
+    reqs = [slides_json(r) for r in table_requests(table, "s", "tab", 1.0, fonts, imported=True, page_w=SLIDE_W / 1.0)]
     head_align = [jstr(r, "updateParagraphStyle", "style", "alignment") for r in reqs if "updateParagraphStyle" in r
                   and jobj(r, "updateParagraphStyle", "cellLocation") == {"rowIndex": 0, "columnIndex": 0}]
     assert head_align and set(head_align) == {"CENTER"}

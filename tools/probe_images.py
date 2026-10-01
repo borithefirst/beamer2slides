@@ -31,7 +31,6 @@ import struct
 import sys
 import time
 import zipfile
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
@@ -46,10 +45,11 @@ from pptx.oxml.ns import qn
 
 from beamer2slides.arrays import Floats32
 from beamer2slides.deck_ir import fetch_url
-from beamer2slides.gapi import HttpError, message_within, status_of
+from beamer2slides.gapi import HttpError, message_within, resumable_media_upload, status_of
 from beamer2slides.google_auth import credentials, drive_service, slides_service
-from beamer2slides.google_types import (AffineTransform, Dimension, DriveService, MediaBody, Page, PageElement,
-                                        Size, as_json, file_id, image_url, object_id, part)
+from beamer2slides.google_types import (AffineTransform, Dimension, DriveService, Page, PageElement, Size,
+                                        SlidesImageProperties, SlidesRequest, as_json, file_id, image_url,
+                                        object_id, part)
 from beamer2slides.gslides import EMU_PER_PT, execute
 from beamer2slides.json_types import Json, JsonObject, as_object, as_str
 
@@ -505,14 +505,7 @@ Findings = TypedDict("Findings", {
 }, total=False)
 
 
-def resumable_upload(data: io.BytesIO) -> MediaBody:
-    """The staging .pptx as a resumable upload (a 3000 px photo in several formats is well over
-    what a simple upload takes)."""
-    from googleapiclient.http import MediaIoBaseUpload
-    return MediaIoBaseUpload(data, mimetype=PPTX_MIME, resumable=True)
-
-
-def image_request(oid: str, url: str, x: float, y: float) -> Mapping[str, object]:
+def image_request(oid: str, url: str, x: float, y: float) -> SlidesRequest:
     """createImage of `url` as a 150 x 100 pt picture at (x, y) pt on the probe slide."""
     return {"createImage": {"objectId": oid, "url": url, "elementProperties": {
         "pageObjectId": SLIDE_ID, "size": {"width": {"magnitude": 150 * EMU_PER_PT, "unit": "EMU"},
@@ -554,7 +547,9 @@ def main() -> None:
     t = time.time()
     fid = file_id(execute(drive.files().create(body={"name": "beamer2slides image probe staging (temporary)",
                                                      "mimeType": "application/vnd.google-apps.presentation"},
-                                               media_body=resumable_upload(staging_pptx(work)),
+                                               # (resumable: a 3000 px photo in several formats is well
+                                               # over what a simple upload takes)
+                                               media_body=resumable_media_upload(staging_pptx(work), PPTX_MIME),
                                                fields="id")), "the staging deck")
     findings["staging_upload_s"] = round(time.time() - t, 1)
     try:
@@ -612,7 +607,7 @@ def main() -> None:
 
         # ---- the converted probe deck: createImage from the staging URLs, then API edits
         pres = execute(slides.presentations().get(presentationId=pid, fields="slides(objectId)"))
-        reqs: list[Mapping[str, object]] = []
+        reqs: list[SlidesRequest] = []
         if any(object_id(s) == SLIDE_ID for s in pres.get("slides", [])):
             reqs.append({"deleteObject": {"objectId": SLIDE_ID}})
         reqs.append({"createSlide": {"objectId": SLIDE_ID, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
@@ -629,7 +624,9 @@ def main() -> None:
             edit_targets[name] = oid
             reqs.append(image_request(oid, content_url(imported["plain"]), 20, 270))
         execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
-        api_edits: dict[str, JsonObject] = {
+        # crop, transparency, brightness, contrast and recolor are read-only in slides.v1.json: asked
+        # anyway, since what the API says of each is the probe's finding
+        api_edits: dict[str, SlidesImageProperties] = {
             "crop": {"cropProperties": {"leftOffset": CROP.left, "rightOffset": CROP.right, "topOffset": CROP.top,
                                         "bottomOffset": CROP.bottom}},
             "transparency": {"transparency": 0.5},

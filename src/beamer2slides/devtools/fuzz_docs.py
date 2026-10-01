@@ -52,7 +52,7 @@ from .. import doc_ir, doc_merge, doc_sync
 from ..doc_ir import Block, Ir, Kind, Mark, Measures, NamedDefault, Run, Style
 from ..doc_sync import SyncReport, Written
 from ..google_types import (DocsBatchUpdateResponse, DocsLocation, DocsNamedStyle,
-                            DocsParagraphStyle, DocsRangeWrite, DocsRequest,
+                            DocsNamedStyleType, DocsParagraphStyle, DocsRangeWrite, DocsRequest,
                             DocsTableCellLocation, DocsTabProperties, DocsTextStyle)
 from ..typing_compat import assert_never
 from . import doc_loss_oracle as oracle
@@ -180,7 +180,7 @@ def _shapes() -> dict[str, list[Block]]:
 #: The named styles the `themed` shape's world carries. No request writes one — the
 #: API has none — so this is fixed for the life of a round, and every difference it
 #: makes is a difference in what a paragraph *inherits*.
-THEME: dict[str, DocsNamedStyle] = {
+THEME: dict[DocsNamedStyleType, DocsNamedStyle] = {
     "HEADING_1": {"paragraphStyle": {"alignment": "CENTER"}, "textStyle": {"bold": True}}}
 
 
@@ -672,7 +672,8 @@ def read_heading(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     if not blocks:
         return [], []
     block = rng.choice(blocks)
-    named = rng.choice(["HEADING_3", "TITLE", "SUBTITLE", "NORMAL_TEXT"])
+    styles: list[DocsNamedStyleType] = ["HEADING_3", "TITLE", "SUBTITLE", "NORMAL_TEXT"]
+    named = rng.choice(styles)
     low, high = _ends(block)
     return [[{"updateParagraphStyle": {
         "range": _span(low, high, tab),

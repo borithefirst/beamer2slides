@@ -13,7 +13,7 @@ from beamer2slides import identity, merge, refit, snapshot
 from beamer2slides.extract import frame_labels
 from beamer2slides.google_types import Page, PageElement, Presentation, object_id
 from beamer2slides.json_types import Json, JsonObject, as_optional_str
-from beamer2slides.sync import Built, InPlace, Recovery, Refilled, SlideWork, Sync, TableFill, letterbox_fix, rename
+from beamer2slides.sync import Built, InPlace, Recovery, Refilled, SlideWork, Sync, TableFill, api_text_style, letterbox_fix, rename
 
 from . import sync_work
 from .json_reads import jarr, jat, jint, jnum, jnums, jobj, jobjs, jstr, jstrs
@@ -369,6 +369,23 @@ def test_uniform_style_changes():
     assert merge.uniform_changes(base, red, False) == {"foregroundColor": "#cc0000"}
     one_word = base + [{"fontFamily": "Lato", "fontSize": 18.0, "italic": True}]
     assert merge.uniform_changes(base, one_word, False) is None
+
+
+def test_a_uniform_weight_change_carries_its_family():
+    """A person set every word of a box to Lato Medium: only the weight differs from the base, but
+    the API writes a weight in a weightedFontFamily, whose family it requires (sync sent
+    `fontFamily: None`, which Google refuses with the whole batch)."""
+    base: list[JsonObject] = [{"fontFamily": "Lato", "weight": 400, "fontSize": 18.0}]
+    medium: list[JsonObject] = [{**s, "weight": 500} for s in base]
+    change = merge.uniform_changes(base, medium, False)
+    assert change == {"weight": 500, "fontFamily": "Lato"}
+    assert change is not None
+    style, fields = api_text_style(change)
+    assert style == {"weightedFontFamily": {"fontFamily": "Lato", "weight": 500}}
+    assert fields == ["weightedFontFamily"]
+    # Two families at one new weight: no one family to write it with.
+    two: list[JsonObject] = [{"fontFamily": "Lato", "weight": 400}, {"fontFamily": "Roboto", "weight": 400}]
+    assert merge.uniform_changes(two, [{**s, "weight": 700} for s in two], False) is None
 
 
 # ---------------------------------------------------------------- diff3 and text edits

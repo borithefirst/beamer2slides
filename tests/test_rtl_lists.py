@@ -13,6 +13,7 @@ from beamer2slides.gslides import EMU_PER_PT
 from beamer2slides.ir import slide_json
 from beamer2slides.json_types import JsonObject
 from beamer2slides.raw_types import RawImage, RawPage, RawSpan
+from beamer2slides.google_types import slides_json
 
 from .json_reads import jnum, jnums, jobj, jobjs, jstr
 from .test_emit_requests import BODY, FONTS, SCALE, text_run
@@ -146,7 +147,7 @@ def test_a_nested_hebrew_item_is_one_level_down():
 
 def box_extent(el: JsonObject) -> tuple[float, float]:
     """The text box emit creates for `el`, in PDF x."""
-    reqs = emit.text_box_requests(el, "b2s_s001", "b2s_s001_t0", SCALE, FONTS)
+    reqs = [slides_json(r) for r in emit.text_box_requests(el, "b2s_s001", "b2s_s001_t0", SCALE, FONTS)]
     props = next(jobj(r, "createShape", "elementProperties") for r in reqs if "createShape" in r)
     x = jnum(props, "transform", "translateX") / EMU_PER_PT / SCALE
     return x, x + jnum(props, "size", "width", "magnitude") / EMU_PER_PT / SCALE

@@ -11,27 +11,48 @@ would end up as pictures), the thumbnail says which edge the ink sits on.
 Usage: python tools/probe_rtl.py
 """
 
-from collections.abc import Mapping
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from PIL import Image
 
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import object_id, part, presentation_id
-from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.google_types import (Dimension, SlidesParagraphStyle, SlidesRequest, object_id, part,
+                                        presentation_id)
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 from beamer2slides.json_types import Json, as_objects
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 WORD = "בסיפור"  # the word the whole bidi story was measured on
 BOX_W, BOX_H = 300, 40
 # (name, text, alignment, direction)
-CASES = [
+CASES: list[tuple[str, str, Literal["START", "END"], Literal["RIGHT_TO_LEFT"] | None]] = [
     ("rtl-start", WORD, "START", "RIGHT_TO_LEFT"),
     ("rtl-end", WORD, "END", "RIGHT_TO_LEFT"),
     ("hebrew-untold", WORD, "START", None),
     ("latin-start", "besipur", "START", None),
 ]
+
+
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
+    """`gslides.text_box` as a request."""
+    return {"createShape": {
+        "objectId": object_id,
+        "shapeType": "TEXT_BOX",
+        "elementProperties": {
+            "pageObjectId": page_id,
+            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
+                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
+        },
+    }}
 
 
 def main() -> None:
@@ -40,24 +61,24 @@ def main() -> None:
     pid = presentation_id(pres)
     first = pres.get("slides", [])[0]
     page = object_id(first)
-    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
     boxes = []
     for i, (name, text, alignment, direction) in enumerate(CASES):
         oid = f"rtl_{i}"
         x, y = 40, 20 + i * (BOX_H + 20)
-        style = {"alignment": alignment, "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0),
+        style: SlidesParagraphStyle = {"alignment": alignment, "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0),
                  "indentStart": pt(0), "indentFirstLine": pt(0)}
         fields = "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine"
         if direction:
             style["direction"], fields = direction, fields + ",direction"
-        reqs += [
+        reqs.extend([
             text_box(oid, page, x, y, BOX_W, BOX_H),
             {"insertText": {"objectId": oid, "text": text}},
             {"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "fields": "fontFamily,fontSize",
                                  "style": {"fontFamily": "Arial", "fontSize": pt(24)}}},
             {"updateParagraphStyle": {"objectId": oid, "textRange": {"type": "ALL"},
                                       "fields": fields, "style": style}},
-        ]
+        ])
         boxes.append((name, oid, x, y))
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
 

@@ -9,19 +9,21 @@ and the tests hold: `diagram_requests`, `element_template_keys`, `label_inside`,
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from typing import Literal
 
 from . import ir_types
-from .emit_metrics import PAD_X, FontMapper, rgb, u16
+from .emit_metrics import PAD_X, FontMapper, u16
 from .emit_model import (
     JsonMap, NodeLook, Template, TemplateKey, box_of, node_look, node_look_of, node_site_of, set_card, set_runs,
     template_of,
 )
 from .emit_pptx import template_key
 from .emit_text import in_sentence_of, text_box_requests_of
-from .gslides import EMU_PER_PT, emu, pt
+from .google_types import LineConnection, LineProperties, ShapeProperties, SlidesRequest, slides_text_style
+from .gslides import EMU_PER_PT, emu, pt, rgb_color, text_color
 from .ir import Arrow, Bend, TemplateKind
 from .ir_types import Box, DiagramElement, DiagramLine, Point
-from .json_types import Json, JsonObject
+from .json_types import Json
 from .typing_compat import assert_never
 
 
@@ -130,17 +132,17 @@ def _object(value: Json) -> JsonMap:
     raise TypeError(f"{value!r} is not an object")
 
 
-def connection(point: Sequence[float], nodes: Sequence[JsonMap], oids: Sequence[str]) -> JsonObject | None:
+def connection(point: Sequence[float], nodes: Sequence[JsonMap], oids: Sequence[str]) -> LineConnection | None:
     """`connection_of` node dicts (the tests')."""
     x, y = point
     return connection_of((x, y), [node_site_of(n) for n in nodes], oids)
 
 
 def connection_of(point: Point, nodes: Sequence[tuple[Box, TemplateKind | None]],
-                  oids: Sequence[str]) -> JsonObject | None:
+                  oids: Sequence[str]) -> LineConnection | None:
     """The node connection site a line end sits on (PDF pt, within 1.5 pt), if any. `nodes`: each
     node's box and shape."""
-    best: tuple[float, JsonObject] | None = None
+    best: tuple[float, LineConnection] | None = None
     for (bbox, shape), oid in zip(nodes, oids):
         if not shape or shape not in CONNECTION_SITES:
             continue
@@ -152,12 +154,12 @@ def connection_of(point: Point, nodes: Sequence[tuple[Box, TemplateKind | None]]
     return best[1] if best else None
 
 
-def arrow_style(arrow: Arrow | None) -> str:
+def arrow_style(arrow: Arrow | None) -> Arrow | Literal["NONE"]:
     return "NONE" if arrow is None else arrow
 
 
 def diagram_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                     template: Callable[[TemplateKey], JsonMap] | None) -> list[JsonObject]:
+                     template: Callable[[TemplateKey], JsonMap] | None) -> list[SlidesRequest]:
     """`diagram_requests_of` a diagram dict (the tests'), `template(key)` giving a dict ({"id",
     "w", "h"})."""
     typed = ir_types.parse_element(el, "diagram")
@@ -168,26 +170,26 @@ def diagram_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, f
                                None if tpl is None else (lambda key: template_of(tpl(key))))
 
 
-def _transform(oid: str, sx: float, sy: float, x: float, y: float) -> JsonObject:
+def _transform(oid: str, sx: float, sy: float, x: float, y: float) -> SlidesRequest:
     """An ABSOLUTE transform of a copied template: from its origin along +size (PDF pt x scale)."""
     return {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE", "transform": {
         "scaleX": sx, "scaleY": sy, "unit": "EMU", "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}}}
 
 
-def _copied(template: Template, oid: str, sx: float, sy: float, x: float, y: float) -> list[JsonObject]:
+def _copied(template: Template, oid: str, sx: float, sy: float, x: float, y: float) -> list[SlidesRequest]:
     return [{"duplicateObject": {"objectId": template.id, "objectIds": {template.id: oid}}},
             _transform(oid, sx, sy, x, y),
             {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
 
 
 def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                        template: Callable[[TemplateKey], Template] | None) -> list[JsonObject]:
+                        template: Callable[[TemplateKey], Template] | None) -> list[SlidesRequest]:
     """Nodes become shapes, edges become lines with arrow heads; the parts are grouped so the
     diagram moves as one piece but stays editable. A label that fits goes inside its node (a
     template shape without text padding, see label_inside); one that doesn't gets a text box
     grouped with its node. Line ends on a node's connection site are connected to it, so edges
     follow nodes moved in Slides. `template(key)` gives this slide's template shape for a key."""
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     children: list[str] = []
     node_oids = [f"{object_id}_n{j}" for j in range(len(el.nodes))]
     # (object id, from, to, line): elbows without a template fall back to two lines
@@ -213,7 +215,7 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                               "translateX": round(x1 * scale * EMU_PER_PT), "translateY": round(y1 * scale * EMU_PER_PT)}}}})
         reqs.append({"updateLineProperties": {"objectId": oid, "fields": "lineFill.solidFill.color,weight,startArrow,endArrow",
                                               "lineProperties": {
-                                                  "lineFill": {"solidFill": {"color": rgb(ln.stroke)["opaqueColor"]}},
+                                                  "lineFill": {"solidFill": {"color": rgb_color(ln.stroke)}},
                                                   "weight": pt(round(max(0.5, ln.width * scale), 2)),
                                                   "startArrow": arrow_style(ln.arrow_from),
                                                   "endArrow": arrow_style(ln.arrow_to)}}})
@@ -228,11 +230,11 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
         members: list[str] = []
         if node.shape is not None:  # free labels (edge labels, captions) have no shape, only the text box below
             fill, stroke = node.fill, node.stroke
-            props: JsonObject = {
+            props: ShapeProperties = {
                 "contentAlignment": "MIDDLE", "autofit": {"autofitType": "NONE"},
-                "shapeBackgroundFill": ({"solidFill": {"color": rgb(fill)["opaqueColor"]}} if fill
+                "shapeBackgroundFill": ({"solidFill": {"color": rgb_color(fill)}} if fill
                                         else {"propertyState": "NOT_RENDERED"}),
-                "outline": ({"outlineFill": {"solidFill": {"color": rgb(stroke)["opaqueColor"]}},
+                "outline": ({"outlineFill": {"solidFill": {"color": rgb_color(stroke)}},
                              "weight": pt(round(max(0.5, (node.width or 0.4) * scale), 2))}
                             if stroke else {"propertyState": "NOT_RENDERED"})}
             fields = ["contentAlignment", "autofit.autofitType",
@@ -260,7 +262,7 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                 # gets its own wider text box, centred on the node and grouped with it.
                 target = f"{object_id}_x{j}"
                 cx, w = (x0 + x1) / 2, (x1 - x0) + 2 * PAD_X + 40
-                made: list[JsonObject] = [
+                made: list[SlidesRequest] = [
                     {"createShape": {"objectId": target, "shapeType": "TEXT_BOX", "elementProperties": {
                         "pageObjectId": slide_id, "size": {"width": emu(w), "height": emu(y1 - y0)},
                         "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
@@ -282,8 +284,9 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                         piece = piece.lstrip()
                     if not piece:
                         continue
-                    style, sfields = fonts.style_of(run, scale)
-                    style["foregroundColor"] = rgb(run.color)
+                    font, sfields = fonts.style_of(run, scale)
+                    style = slides_text_style(font, "a diagram label's font (FontMapper.style_of)")
+                    style["foregroundColor"] = text_color(run.color)
                     reqs.append({"updateTextStyle": {  # (UTF-16 units: u16)
                         "objectId": target, "style": style, "fields": ",".join(sfields + ["foregroundColor"]),
                         "textRange": {"type": "FIXED_RANGE", "startIndex": start + offset,
@@ -292,7 +295,8 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                 start += u16(line_text) + 1
             reqs.append({"updateParagraphStyle": {
                 "objectId": target, "textRange": {"type": "ALL"}, "fields": "alignment,lineSpacing,spaceAbove,spaceBelow",
-                "style": {"alignment": "CENTER", "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0)}}})
+                "style": {"alignment": "CENTER", "lineSpacing": 100, "spaceAbove": pt(0),
+                          "spaceBelow": pt(0)}}})
         if len(members) >= 2:  # a node with its label (or card texts) outside: they move together
             reqs.append({"groupObjects": {"groupObjectId": f"{object_id}_g{j}", "childrenObjectIds": list(members)}})
             members = [f"{object_id}_g{j}"]
@@ -300,7 +304,7 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
     # Edges follow the nodes they start or end on.
     sites = [(n.bbox, n.shape) for n in el.nodes]
     for oid, start_at, end_at, ln in segments:
-        ends: JsonObject = {}
+        ends: LineProperties = {}
         first = connection_of(start_at, sites, node_oids) if start_at == ln.from_ else None
         last = connection_of(end_at, sites, node_oids) if end_at == ln.to else None
         if first:

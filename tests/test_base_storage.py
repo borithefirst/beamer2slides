@@ -18,7 +18,7 @@ from googleapiclient.errors import HttpError
 
 from beamer2slides import snapshot
 from beamer2slides.google_types import (AffineTransform, BatchUpdateResponse, DriveFile, Files, Page, PageElement,
-                                        Presentation, Request, Size, all_elements, as_json, object_id)
+                                        Presentation, Request, Size, SlidesRequest, all_elements, as_json, object_id)
 from beamer2slides.json_types import JsonObject
 from beamer2slides.typing_compat import override
 
@@ -368,7 +368,7 @@ def element(oid: str) -> PageElement:
                        shape={"shapeType": "TEXT_BOX", "text": {"textElements": []}})
 
 
-def alt_text(oid: str, title: str) -> JsonObject:
+def alt_text(oid: str, title: str) -> SlidesRequest:
     return {"updatePageElementAltText": {"objectId": oid, "title": title}}
 
 
@@ -433,7 +433,7 @@ def test_only_the_tags_that_landed_are_put_into_the_read() -> None:
     slides = TaggingSlides("b")
     landed, revision = snapshot.write_tags(slides, PID, [alt_text("a", "b2s:one/text/0"),
                                                          alt_text("b", "b2s:one/image/0")])
-    assert [jat(r, "updatePageElementAltText", "objectId") for r in landed] == ["a"]
+    assert [tagged_id(r) for r in landed] == ["a"]
     assert titles_of(snapshot.tagged(read_deck(), landed, revision)) == {"a": "b2s:one/text/0", "g": None, "b": None}
     assert slides.batches == [2, 1, 1]                        # the batch, then one request at a time
 

@@ -24,50 +24,18 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Protocol, TypedDict, runtime_checkable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from beamer2slides.gapi import HttpError, media_upload  # noqa: E402
 from beamer2slides.google_auth import drive_service, slides_service  # noqa: E402
-from beamer2slides.google_types import Request, file_id, json_object, object_id, part  # noqa: E402
+from beamer2slides.google_types import file_id, json_object, object_id, part  # noqa: E402
 from beamer2slides.gslides import execute  # noqa: E402
 from beamer2slides.json_types import Json, JsonObject, as_str  # noqa: E402
 from tools.deck_backup import download, revisions  # noqa: E402
 
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 SLIDES_MIME = "application/vnd.google-apps.presentation"
-
-
-# Drive's `revisions` resource, which google_types' DriveService does not list yet: described
-# here, after a runtime check, until it does.
-class Revision(TypedDict, total=False):
-    id: str
-    modifiedTime: str
-    keepForever: bool
-    exportLinks: dict[str, str]
-
-
-class RevisionBody(TypedDict, total=False):
-    keepForever: bool
-
-
-class Revisions(Protocol):
-    def get(self, *, fileId: str, revisionId: str, fields: str) -> Request[Revision]: ...
-    def update(self, *, fileId: str, revisionId: str, body: RevisionBody, fields: str) -> Request[Revision]: ...
-
-
-@runtime_checkable
-class DriveRevisions(Protocol):
-    """The Drive client, as far as reading and keeping a revision calls it."""
-
-    def revisions(self) -> Revisions: ...
-
-
-def with_revisions(drive: object) -> DriveRevisions:
-    if not isinstance(drive, DriveRevisions):
-        raise TypeError(f"{type(drive).__name__} is no Drive client")
-    return drive
 
 
 def pptx_with(text: str) -> io.BytesIO:
@@ -155,7 +123,7 @@ def main() -> int:
         report["edit_survives_the_rebuild"] = bool(holds_edit)
         if holds_edit:
             rid = holds_edit[-1]
-            drive_revisions = with_revisions(drive).revisions()
+            drive_revisions = drive.revisions()
             try:
                 kept = execute(drive_revisions.update(fileId=pid, revisionId=rid, body={"keepForever": True},
                                                       fields="id,keepForever"))

@@ -1357,7 +1357,9 @@ def test_checker_controls():
         with PDFIUM:
             caught["moved formula picture"] = sc.alignment_compare(fresh_folder, broken, fresh, run.deck.pid, [MERGING],
                                                                    run.out / "check")
-        run.deck.batch([{"ungroupObjects": {"objectIds": [formula.parent]}}])
+        parent = formula.parent
+        assert parent is not None, "the formula picture is grouped with its words"
+        run.deck.batch([{"ungroupObjects": {"objectIds": [parent]}}])
         caught["ungrouped formula"] = [p for p in sc.integrity_alone(run.deck.read()) if "not grouped" in p]
         problems += [f"not caught: {k}" for k, found in caught.items() if not any(found)]
     finally:

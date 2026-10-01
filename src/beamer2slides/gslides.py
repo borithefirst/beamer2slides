@@ -11,14 +11,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from .gapi import HttpError, is_transient, patient_http, status_of
-from .google_types import Request, SlidesService
+from .google_types import Dimension, OpaqueColor, Request, SlidesOptionalColor, SlidesRequest, SlidesService
 from .json_types import JsonObject
 
 if TYPE_CHECKING:
     from .net import Fetch
 
-__all__ = ["EMU_PER_PT", "SLOW_EXPORT", "STATS", "HttpError", "count_thread", "emu", "execute",
-           "execute_with", "per_thread", "pt", "save_thumbnail", "status_of", "text_box"]
+__all__ = ["EMU_PER_PT", "SLOW_EXPORT", "STATS", "HttpError", "count_thread", "emu", "emu_json", "execute",
+           "execute_with", "per_thread", "pt", "pt_json", "rgb_color", "save_thumbnail", "status_of",
+           "text_box", "text_color"]
 
 EMU_PER_PT = 12700
 
@@ -48,12 +49,36 @@ def per_thread(make: Callable[[], T]) -> Callable[[], T]:
     return client
 
 
-def pt(v: float) -> JsonObject:
+def pt(v: float) -> Dimension:
+    """A length in points, as a request's Dimension."""
     return {"magnitude": v, "unit": "PT"}
 
 
-def emu(v_pt: float) -> JsonObject:
+def emu(v_pt: float) -> Dimension:
+    """A length in points, as a request's Dimension in whole EMU."""
     return {"magnitude": round(v_pt * EMU_PER_PT), "unit": "EMU"}
+
+
+def pt_json(v: float) -> JsonObject:
+    """`pt` as JSON, for a caller that still builds its requests or read-backs as JSON."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def emu_json(v_pt: float) -> JsonObject:
+    """`emu` as JSON, for a caller that still builds its requests or read-backs as JSON."""
+    return {"magnitude": round(v_pt * EMU_PER_PT), "unit": "EMU"}
+
+
+def rgb_color(hex_color: str) -> OpaqueColor:
+    """A `#rrggbb` colour as a request's OpaqueColor (`emit_metrics.rgb`'s `opaqueColor`)."""
+    h = hex_color.lstrip("#")
+    return {"rgbColor": {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255,
+                         "blue": int(h[4:6], 16) / 255}}
+
+
+def text_color(hex_color: str) -> SlidesOptionalColor:
+    """A `#rrggbb` colour as a text style's colour (`emit_metrics.rgb`, typed)."""
+    return {"opaqueColor": rgb_color(hex_color)}
 
 
 # What `execute` did, for a harness to read (devtools/fuzz_sync.py): calls (attempts), retries, the
@@ -127,7 +152,7 @@ def execute_with(request: Request[T], *, retries: int, timeout: float | None) ->
         attempt += 1
 
 
-def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> dict[str, object]:
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
     return {"createShape": {
         "objectId": object_id,
         "shapeType": "TEXT_BOX",

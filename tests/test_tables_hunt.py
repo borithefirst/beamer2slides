@@ -16,6 +16,7 @@ from beamer2slides.emit_model import SetRun, table_of
 from beamer2slides.emit_tables import TableLayout, pptx_table_of
 from beamer2slides.emit_widths import wrap_joins_of, wrap_window_of, wrapped_width_of
 from beamer2slides.fonts import font_info
+from beamer2slides.google_types import part_json
 from beamer2slides.ir import (
     DiagramElement, DiagramLine, Element, Family, Node, Run, TableElement, TextElement, deck_json, element_json,
     slide_of,
@@ -237,9 +238,9 @@ def alignments(t: TableElement) -> dict[tuple[int, int], tuple[str, float, float
         u = r.get("updateParagraphStyle")
         if not u:
             continue
-        style = jobj(u, "style")
+        style = jobj(part_json(u, "updateParagraphStyle"), "style")
         if "alignment" in style:
-            loc = jobj(u, "cellLocation")
+            loc = jobj(part_json(u, "updateParagraphStyle"), "cellLocation")
             out[(jint(loc, "rowIndex"), jint(loc, "columnIndex"))] = (
                 jstr(style, "alignment"), jnum(style, "indentStart", "magnitude"), jnum(style, "indentEnd", "magnitude"))
     return out

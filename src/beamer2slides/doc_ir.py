@@ -26,8 +26,9 @@ from html import escape
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Final, Literal, NamedTuple, NewType, TypedDict, TypeVar
 
-from .google_types import (DocsDimension, DocsDocumentTab, DocsInlineObject, DocsList,
-                           DocsNamedRanges, DocsParagraph, DocsParagraphBorder,
+from .google_types import (DocsAlignment, DocsBaselineOffset, DocsDashStyle, DocsDimension,
+                           DocsDocumentTab, DocsInlineObject, DocsList, DocsNamedRanges,
+                           DocsNamedStyleType, DocsParagraph, DocsParagraphBorder,
                            DocsParagraphElement, DocsParagraphStyle, DocsRequest, DocsRgbColor,
                            DocsStructuralElement, DocsTab, DocsTable, DocsTextStyle, Document)
 from .json_types import (Json, JsonObject, JsonShapeError, as_array, as_int, as_object,
@@ -194,7 +195,7 @@ class Unimported(TypedDict):
     """What a plan asked for that the document has not got (`doc_merge.carry_unimported`)."""
     paragraph: Measures
     runs: list[StyledRange]
-    named: str | None
+    named: DocsNamedStyleType | None
     bullet: BulletFix | None
     whole: WholeStyle | None
 
@@ -696,22 +697,25 @@ MARK_FIELDS: Final[tuple[tuple[Mark, MarkApi], ...]] = (
 # and "none" is the third value rather than the absence of the other two — a theme
 # could raise a whole named style, and a reader who puts one word back on the
 # baseline must be able to say so (the `data-off` reasoning, one value wider).
-SCRIPTS: Final[dict[str, Script]] = {"SUPERSCRIPT": "super", "SUBSCRIPT": "sub", "NONE": "none"}
-TO_SCRIPT: Final[dict[Script, str]] = {v: k for k, v in SCRIPTS.items()}
+TO_SCRIPT: Final[dict[Script, DocsBaselineOffset]] = {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT",
+                                                     "none": "NONE"}
+SCRIPTS: Final[dict[str, Script]] = {api: script for script, api in TO_SCRIPT.items()}
 SCRIPT_TAGS: Final[dict[Script, str]] = {"super": "sup", "sub": "sub"}
 # What `<code>` has always meant on the write side, and goes on meaning.
 CODE_FAMILY = "Courier New"
 # A named style is a block kind; everything else is a paragraph.
 HEADINGS: Final[dict[str, int]] = {f"HEADING_{n}": n for n in range(1, 7)}
-NAMED_STYLE: Final[dict[int, str]] = {n: f"HEADING_{n}" for n in range(1, 7)} | {0: "NORMAL_TEXT"}
+NAMED_STYLE: Final[dict[int, DocsNamedStyleType]] = {
+    1: "HEADING_1", 2: "HEADING_2", 3: "HEADING_3", 4: "HEADING_4", 5: "HEADING_5", 6: "HEADING_6",
+    0: "NORMAL_TEXT"}
 # The two named styles that are not a heading level. They are a block kind of their
 # own rather than a level, because that is what they are: Docs has NORMAL_TEXT,
 # TITLE, SUBTITLE and HEADING_1..6, and nothing else. `namedStyleType` is a field the
 # merge owns (`doc_merge.MANAGED_PARAGRAPH`), so a style it cannot name is one it
 # writes NORMAL_TEXT over: before these were modelled, a document's Title that the
 # source moved, rewrote or restyled came back as body text, and nothing said so.
-NAMED_KINDS: Final[dict[str, Kind]] = {"TITLE": "title", "SUBTITLE": "subtitle"}
-KIND_STYLE: Final[dict[Kind, str]] = {kind: style for style, kind in NAMED_KINDS.items()}
+KIND_STYLE: Final[dict[Kind, DocsNamedStyleType]] = {"title": "TITLE", "subtitle": "SUBTITLE"}
+NAMED_KINDS: Final[dict[str, Kind]] = {style: kind for kind, style in KIND_STYLE.items()}
 # Every kind that is one paragraph of text.
 TEXT_KINDS: Final[tuple[Kind, ...]] = ("paragraph", "heading", "item", *NAMED_KINDS.values())
 # And every kind that is a structural element and not a paragraph. Docs' index rules
@@ -720,11 +724,11 @@ TEXT_KINDS: Final[tuple[Kind, ...]] = ("paragraph", "heading", "item", *NAMED_KI
 # beside it, and one is deleted by its own span. `doc_merge._structural` is the test.
 STRUCTURAL: Final[tuple[Kind, ...]] = ("table", "toc")
 KINDS: Final[tuple[Kind, ...]] = (*TEXT_KINDS, *STRUCTURAL)
-ALIGNMENTS: Final[dict[str, Align]] = {"START": "left", "CENTER": "center", "END": "right",
-                                       "JUSTIFIED": "justify"}
+TO_ALIGNMENT: Final[dict[Align, DocsAlignment]] = {"left": "START", "center": "CENTER", "right": "END",
+                                                   "justify": "JUSTIFIED"}
+ALIGNMENTS: Final[dict[str, Align]] = {api: align for align, api in TO_ALIGNMENT.items()}
 ALIGNS: Final[tuple[Align, ...]] = tuple(ALIGNMENTS.values())
 SCRIPT_NAMES: Final[tuple[Script, ...]] = tuple(SCRIPTS.values())
-TO_ALIGNMENT: Final[dict[Align, str]] = {v: k for k, v in ALIGNMENTS.items()}
 # Paragraph properties the importer keeps, and the CSS each is written as (measured,
 # docs/google-docs.md: "Paragraph CSS: `text-align` (incl. justify), `margin-left`,
 # `text-indent`, `line-height`"). A length is always written in points.
@@ -763,8 +767,8 @@ PARAGRAPH_FLAGS: Final[dict[FlagMeasure, FlagApi]] = {"page_break": "pageBreakBe
 # Docs' dash styles, spelled as CSS spells them, since the file says a border the
 # way CSS says one: `<width> <style> <colour>`, and `pad <n>pt` after it when Docs
 # leaves a gap between the rule and the text.
-DASH_STYLES: Final[dict[str, str]] = {"SOLID": "solid", "DOT": "dotted", "DASH": "dashed"}
-TO_DASH_STYLE: Final[dict[str, str]] = {css: api for api, css in DASH_STYLES.items()}
+TO_DASH_STYLE: Final[dict[str, DocsDashStyle]] = {"solid": "SOLID", "dotted": "DOT", "dashed": "DASH"}
+DASH_STYLES: Final[dict[str, str]] = {api: css for css, api in TO_DASH_STYLE.items()}
 BORDER_RE = re.compile(r"\s*(-?\d+(?:\.\d+)?)pt\s+(solid|dotted|dashed)\s+"
                        r"(#[0-9a-fA-F]{6})(?:\s+pad\s+(-?\d+(?:\.\d+)?)pt)?\s*$")
 # What Docs paints a link with when nobody asked: the import's blue, and the editor's.

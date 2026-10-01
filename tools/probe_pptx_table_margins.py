@@ -25,7 +25,6 @@ Usage: python tools/probe_pptx_table_margins.py [--keep]
 import io
 import json
 import sys
-from collections.abc import Mapping
 from pathlib import Path
 
 from lxml import etree
@@ -37,8 +36,9 @@ from pptx.util import Emu, Pt
 
 from beamer2slides import gapi
 from beamer2slides.google_auth import drive_service, slides_service
-from beamer2slides.google_types import PageElement, SlidesService, file_id, object_id, part
-from beamer2slides.gslides import EMU_PER_PT, emu, execute, pt, save_thumbnail
+from beamer2slides.google_types import (Dimension, PageElement, SlidesRequest, SlidesService,
+                                        SlidesTableCellLocation, file_id, object_id, part)
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_object, as_objects
 
 Margins = tuple[float, float, float, float]  # l, t, r, b (pt)
@@ -70,6 +70,16 @@ IMPORTED: dict[str, tuple[Margins | None, float, float, bool, Point]] = {
 DUP: tuple[str, Point] = ("dup_m0", (10, 220))
 GROWN: tuple[str, Point] = ("grown_t0", (380, 220))
 API: tuple[str, Point] = ("api_10", (158, 220))
+
+
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def emu(v_pt: float) -> Dimension:
+    """`gslides.emu` as a request's dimension."""
+    return {"magnitude": round(v_pt * EMU_PER_PT), "unit": "EMU"}
 
 
 def _table(slide: Slide, name: str, margins: Margins | None, size: float, spacing: float, text: bool, xy: Point,
@@ -122,13 +132,13 @@ def build() -> io.BytesIO:
     return buf
 
 
-def fill_requests(oid: str, rows: int, size: float, cols: int) -> list[Mapping[str, object]]:
+def fill_requests(oid: str, rows: int, size: float, cols: int) -> list[SlidesRequest]:
     """What emit.table_requests does to a cell with text."""
-    reqs: list[Mapping[str, object]] = []
+    reqs: list[SlidesRequest] = []
     for r in range(rows):
         for c in range(cols):
-            loc = {"rowIndex": r, "columnIndex": c}
-            reqs += [
+            loc: SlidesTableCellLocation = {"rowIndex": r, "columnIndex": c}
+            reqs.extend([
                 {"insertText": {"objectId": oid, "cellLocation": loc, "text": TEXT}},
                 {"updateTextStyle": {"objectId": oid, "cellLocation": loc, "textRange": {"type": "ALL"},
                                      "style": {"fontFamily": "Lato", "fontSize": pt(size)}, "fields": "fontFamily,fontSize"}},
@@ -136,13 +146,13 @@ def fill_requests(oid: str, rows: int, size: float, cols: int) -> list[Mapping[s
                                           "style": {"alignment": "START", "lineSpacing": 100, "spaceAbove": pt(0),
                                                     "spaceBelow": pt(0), "indentStart": pt(0), "indentFirstLine": pt(0)},
                                           "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine"}},
-            ]
+            ])
     reqs.append({"updateTableRowProperties": {"objectId": oid, "rowIndices": list(range(rows)),
                                               "tableRowProperties": {"minRowHeight": emu(1)}, "fields": "minRowHeight"}})
     return reqs
 
 
-def borders(oid: str, rows: int, cols: int) -> dict[str, object]:
+def borders(oid: str, rows: int, cols: int) -> SlidesRequest:
     return {"updateTableBorderProperties": {
         "objectId": oid, "borderPosition": "ALL",
         "tableRange": {"location": {"rowIndex": 0, "columnIndex": 0}, "rowSpan": rows, "columnSpan": cols},
@@ -151,7 +161,7 @@ def borders(oid: str, rows: int, cols: int) -> dict[str, object]:
         "fields": "tableBorderFill.solidFill.color,tableBorderFill.solidFill.alpha,weight"}}
 
 
-def move(oid: str, xy: Point) -> dict[str, object]:
+def move(oid: str, xy: Point) -> SlidesRequest:
     return {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE", "transform": {
         "scaleX": 1, "scaleY": 1, "unit": "EMU",
         "translateX": round(xy[0] * EMU_PER_PT), "translateY": round(xy[1] * EMU_PER_PT)}}}
@@ -230,7 +240,7 @@ def run(slides: SlidesService, pid: str) -> None:
     oid = {name: object_id(pe) for name, pe in by_name.items()}
     dup_id, grown_id, api_id = "probe_dup_m0", "probe_grown_t0", "probe_api_10"
     sid = object_id(page)
-    reqs: list[Mapping[str, object]] = [
+    reqs: list[SlidesRequest] = [
         {"duplicateObject": {"objectId": oid["tpl_m0"], "objectIds": {oid["tpl_m0"]: dup_id}}},
         move(dup_id, DUP[1]),
         *fill_requests(dup_id, ROWS, 10, 1),

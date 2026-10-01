@@ -15,7 +15,6 @@ thumbnail (out/probe_bullets.png).
 Usage: python tools/probe_bullets.py
 """
 
-from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -23,18 +22,38 @@ from PIL import Image
 
 from beamer2slides.emit import PAD_X
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import SlidesRange, object_id, presentation_id
-from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
-from beamer2slides.json_types import JsonObject
+from beamer2slides.google_types import (BulletPreset, Dimension, SlidesOptionalColor, SlidesRange, SlidesRequest,
+                                        object_id, presentation_id)
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 
 OUT = Path(__file__).resolve().parents[1] / "out"
-GLYPHS = [("●", "BULLET_DISC_CIRCLE_SQUARE", 0), ("○", "BULLET_DISC_CIRCLE_SQUARE", 1), ("■", "BULLET_DISC_CIRCLE_SQUARE", 2),
+GLYPHS: list[tuple[str, BulletPreset, int]] = [("●", "BULLET_DISC_CIRCLE_SQUARE", 0), ("○", "BULLET_DISC_CIRCLE_SQUARE", 1), ("■", "BULLET_DISC_CIRCLE_SQUARE", 2),
           ("➢", "BULLET_ARROW3D_CIRCLE_SQUARE", 0), ("★", "BULLET_STAR_CIRCLE_SQUARE", 0),
           ("◆", "BULLET_DIAMOND_CIRCLE_SQUARE", 0), ("◇", "BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE", 1),
           ("❏", "BULLET_CHECKBOX", 0)]
 SIZES, TEXT, FIRST, START, PITCH = (24, 12), 24, 60, 90, 44
-BLUE: JsonObject = {"opaqueColor": {"rgbColor": {"blue": 1}}}
-BLACK: JsonObject = {"opaqueColor": {"rgbColor": {}}}
+BLUE: SlidesOptionalColor = {"opaqueColor": {"rgbColor": {"blue": 1}}}
+BLACK: SlidesOptionalColor = {"opaqueColor": {"rgbColor": {}}}
+
+
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
+    """`gslides.text_box` as a request."""
+    return {"createShape": {
+        "objectId": object_id,
+        "shapeType": "TEXT_BOX",
+        "elementProperties": {
+            "pageObjectId": page_id,
+            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
+                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
+        },
+    }}
 
 
 def fixed(s: int, e: int) -> SlidesRange:
@@ -46,17 +65,17 @@ def main() -> None:
     pres = execute(slides.presentations().create(body={"title": "b2s probe bullets"}))
     first = pres.get("slides", [])[0]
     pid, page = presentation_id(pres), object_id(first)
-    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
     boxes = []
     for c, size in enumerate(SIZES):
         for r, (_, preset, level) in enumerate(GLYPHS):
             oid, x, y = f"probe_g{c}_{r}", 10 + c * 300, 8 + r * PITCH
             text = "x\n" + "\t" * level + "HH"  # the dummy "x" paragraph makes the level absolute
-            reqs += [text_box(oid, page, x, y, 250, 40), {"insertText": {"objectId": oid, "text": text}},
-                     {"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "fields": "fontFamily,fontSize,foregroundColor",
-                                          "style": {"fontFamily": "Lato", "fontSize": pt(size), "foregroundColor": BLUE}}},
-                     {"createParagraphBullets": {"objectId": oid, "bulletPreset": preset, "textRange": fixed(0, len(text))}},
-                     {"deleteText": {"objectId": oid, "textRange": fixed(0, 2)}}]
+            reqs.extend([text_box(oid, page, x, y, 250, 40), {"insertText": {"objectId": oid, "text": text}},
+                         {"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "fields": "fontFamily,fontSize,foregroundColor",
+                                              "style": {"fontFamily": "Lato", "fontSize": pt(size), "foregroundColor": BLUE}}},
+                         {"createParagraphBullets": {"objectId": oid, "bulletPreset": preset, "textRange": fixed(0, len(text))}},
+                         {"deleteText": {"objectId": oid, "textRange": fixed(0, 2)}}])
             reqs += [{"updateTextStyle": {"objectId": oid, "textRange": fixed(k, k + 1), "fields": "fontSize,foregroundColor",
                                           "style": {"fontSize": pt(TEXT), "foregroundColor": BLACK}}} for k in (0, 1)]
             reqs.append({"updateParagraphStyle": {"objectId": oid, "textRange": fixed(0, 2), "fields": "indentFirstLine,indentStart",

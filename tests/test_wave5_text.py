@@ -8,6 +8,7 @@ from beamer2slides import emit, emit_text
 from beamer2slides.classify import Span
 from beamer2slides.emit import SLIDE_W
 from beamer2slides.json_types import JsonObject, as_str
+from beamer2slides.google_types import slides_json
 
 from .json_reads import jint, jnum, jobj, jobjs, jstr
 from .test_columns import paragraphs, span, text
@@ -167,7 +168,7 @@ def holes_box() -> JsonObject:
 
 def written(el: JsonObject) -> tuple[str, list[tuple[str, int, int]]]:
     from .test_emit_requests import SCALE
-    reqs = emit.text_box_requests(el, "s", "t", SCALE, FONTS)
+    reqs = [slides_json(r) for r in emit.text_box_requests(el, "s", "t", SCALE, FONTS)]
     text = "".join(jstr(r, "insertText", "text") for r in reqs if "insertText" in r)
     fonts: list[tuple[str, int, int]] = []
     for r in reqs:

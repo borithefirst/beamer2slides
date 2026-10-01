@@ -11,7 +11,7 @@ from typing import TypedDict
 
 from .emit_model import BulletFace, JsonMap, SetBullet, SetRun, bullet_of, run_of
 from .fonts import font_info, google_font
-from .gslides import pt
+from .gslides import pt_json as pt
 from .json_types import JsonObject
 
 

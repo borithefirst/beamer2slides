@@ -16,6 +16,7 @@ from beamer2slides.ir import (Bullet, Deck, DiagramElement, ImageElement, Merge,
                               ShapeElement, Slide, TableElement, TextElement, deck_json)
 from beamer2slides.json_types import JsonObject
 from beamer2slides.notes import prepare
+from beamer2slides.google_types import slides_json
 
 from .json_reads import jnum, jobj, jstr
 
@@ -969,7 +970,7 @@ def test_bullet_requests_keep_bullet_style():
                         "lines": [{"baseline": 97.63, "x0": 35.15, "x1": 77.65}], "runs": [run]}
     para2: JsonObject = {**para, "runs": [second]}
     el: JsonObject = {"id": "t", "kind": "text", "role": "body", "paragraphs": [para, para2]}
-    reqs = text_box_requests(el, "s", "b", 1.5, FontMapper())
+    reqs = [slides_json(r) for r in text_box_requests(el, "s", "b", 1.5, FontMapper())]
     assert jstr(reqs[1], "insertText", "text") == "-\n" + "\t" * 5 + "First part\n" + "\t" * 5 + "Second"
     kinds_ = [next(iter(r)) for r in reqs]
     assert kinds_.index("createParagraphBullets") + 1 == kinds_.index("deleteText"), "the dummy goes right after"

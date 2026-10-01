@@ -18,15 +18,17 @@ from typing import Literal, TypedDict
 import numpy as np
 
 from .arrays import RGB, RGBA
-from .emit_metrics import ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, PPTX_TITLE_DY, SLIDE_W, FontMapper, rgb
+from .emit_metrics import ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, PPTX_TITLE_DY, SLIDE_W, FontMapper
 from .emit_model import (
     JsonMap, ObjectMap, SetRun, align_of, box_of, json_number, maps_of, objects_of, point_of, run_of,
 )
 from .emit_pptx import THEME_VARIANTS, VARIANT, api_error
 from .emit_text import text_box_requests
 from .gapi import HttpError, media_upload
-from .google_types import DriveService, SlidesService, as_json, file_id
-from .gslides import EMU_PER_PT, execute
+from .google_types import (
+    DriveService, SlidesRequest, SlidesService, SlidesTextStyle, as_json, file_id, part_json, slides_text_style,
+)
+from .gslides import EMU_PER_PT, execute, text_color
 from .ir_types import Box, Color
 from .json_types import Json, JsonObject, as_int, as_object, as_objects, as_optional_str, as_str
 from .typing_compat import assert_never
@@ -333,7 +335,7 @@ def write_layout_texts(slides: SlidesService, pid: str, texts: Sequence[JsonMap]
         presentationId=pid, fields="layouts(objectId,layoutProperties,pageElements(objectId))")), "the layouts")
     layouts = as_objects(pres.get("layouts", []), "layouts")  # all of them: slides added later in Slides get the footer too
     # All old ones first: object IDs are unique across the whole presentation.
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     for layout in layouts:
         for e in as_objects(layout.get("pageElements", []), "pageElements"):
             oid = as_str(e["objectId"], "objectId")
@@ -384,7 +386,7 @@ class PlaceholderStyle:
     """What `style_layout_placeholders` writes into one kind of placeholder."""
     box: Box | None
     """(x, y, w, h), slide pt; None for the body, whose box is left alone."""
-    style: JsonObject
+    style: SlidesTextStyle
     """The TextStyle, written over the whole placeholder."""
     fields: str
     align: Alignment
@@ -406,19 +408,22 @@ def placeholder_style_json(entry: PlaceholderStyle) -> JsonObject:
     if entry.box is not None:
         x, y, w, h = entry.box
         box = [x, y, w, h]
-    return {"box": box, "style": copy.deepcopy(entry.style), "fields": entry.fields, "align": entry.align}
+    return {"box": box, "style": part_json(copy.deepcopy(entry.style), "a placeholder's style"), "fields": entry.fields,
+            "align": entry.align}
 
 
 def placeholder_style_of(d: JsonMap) -> PlaceholderStyle:
     """A `layout_style_spec` entry as a base holds it."""
     box = d.get("box")
-    return PlaceholderStyle(box=None if box is None else box_of(box, "box"), style=as_object(d["style"], "style"),
+    return PlaceholderStyle(box=None if box is None else box_of(box, "box"),
+                            style=slides_text_style(as_object(d["style"], "style"), "a placeholder's style"),
                             fields=as_str(d["fields"], "fields"), align=_alignment(d["align"]))
 
 
-def _styled(run: SetRun, scale: float, fonts: FontMapper) -> tuple[JsonObject, str]:
-    style, fields = fonts.style_of(run, scale)
-    style["foregroundColor"] = rgb(run.color)
+def _styled(run: SetRun, scale: float, fonts: FontMapper) -> tuple[SlidesTextStyle, str]:
+    font, fields = fonts.style_of(run, scale)
+    style = slides_text_style(font, "a placeholder's font (FontMapper.style_of)")
+    style["foregroundColor"] = text_color(run.color)
     if "bold" not in fields:  # a weighted family: the layout's own bold (section header) would add to it
         style["bold"], fields = False, fields + ["bold"]
     return style, ",".join(fields + ["foregroundColor"])
@@ -512,15 +517,15 @@ def _placeholder_kind(pe: JsonMap) -> PlaceholderKind | None:
     return None
 
 
-def layout_placeholder_requests(entry: JsonMap, pe: JsonMap) -> list[JsonObject]:
+def layout_placeholder_requests(entry: JsonMap, pe: JsonMap) -> list[SlidesRequest]:
     """`placeholder_requests` from a `layout_style_spec` entry as a base holds it (theme_sync)."""
     return placeholder_requests(placeholder_style_of(entry), pe)
 
 
-def placeholder_requests(entry: PlaceholderStyle, pe: JsonMap) -> list[JsonObject]:
+def placeholder_requests(entry: PlaceholderStyle, pe: JsonMap) -> list[SlidesRequest]:
     """The requests `style_layout_placeholders` sends for one placeholder `pe` (a layout or master
     page element as presentations.get gives it)."""
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     oid = as_str(pe["objectId"], "objectId")
     if entry.box is not None:
         x, y, w, h = entry.box
@@ -549,7 +554,7 @@ def style_layout_placeholders(slides: SlidesService, pid: str, deck: JsonMap, sc
     page_fields = "objectId,pageElements(objectId,size,transform,shape(placeholder/type,text/textElements))"
     pres = as_json(execute(slides.presentations().get(presentationId=pid, fields=f"masters({page_fields}),layouts({page_fields})")),
                    "the masters and layouts")
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     # The master too: layout placeholders inherit whatever style they don't set themselves.
     for page in as_objects(pres.get("masters", []), "masters") + as_objects(pres.get("layouts", []), "layouts"):
         for pe in as_objects(page.get("pageElements", []), "pageElements"):

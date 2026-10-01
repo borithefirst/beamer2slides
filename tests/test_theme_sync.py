@@ -179,6 +179,11 @@ def target(r: JsonObject) -> str | None:
     return oid
 
 
+def requests(p: ThemeMerge) -> list[JsonObject]:
+    """The plan's requests as the JSON sent."""
+    return [google_types.slides_json(r) for r in p.requests]
+
+
 def ops(reqs: Sequence[JsonObject]) -> list[tuple[str, str | None]]:
     return sorted((next(iter(r)), target(r)) for r in reqs)
 
@@ -262,14 +267,14 @@ def test_the_same_theme_writes_nothing(talk: Talk) -> None:
 def test_a_retheme_nobody_edited_writes_the_decoration_and_the_title_style(talk: Talk) -> None:
     p = retheme_plan(talk, talk.pres)
     assert p.conflicts == [] and p.warnings == []
-    names = ops(p.requests)
+    names = ops(requests(p))
     # the frames' decoration on every layout of that group, the title page's left alone
     assert [x for x in names if x[0] == "replaceImage"] == [("replaceImage", "LB_d"), ("replaceImage", "LO_d")]
     assert ("updatePageElementAltText", "LO_d") in names
     # the frame title style on the master and the TITLE_ONLY layout; the title page's is the same
     assert {x[1] for x in names if x[0] == "updateTextStyle"} == {"M_t", "LO_t"}
     assert not any(x[1] and x[1].startswith("LT") for x in names)
-    style = next(r for r in p.requests if "updateTextStyle" in r and jat(r, "updateTextStyle", "objectId") == "LO_t")
+    style = next(r for r in requests(p) if "updateTextStyle" in r and jat(r, "updateTextStyle", "objectId") == "LO_t")
     assert jnum(style, "updateTextStyle", "style", "fontSize", "magnitude") > 25  # (\huge)
     assert set(p.stage) == {side_picture(talk.side2, "*").path}
     assert {jstr(a, "slide") for a in p.applied} == {"master", "layout Blank", "layout Title Only"}
@@ -314,9 +319,9 @@ def test_a_restyled_master_leaves_the_slides_titles_that_inherited_it_as_they_we
     assert google_types.is_page_element(master_title)
     jobj(base, "theme", "pages", "M", "placeholders", "M_t", "readback")["style"] = theme_sync.style_hash(master_title)
     p = plan(base, talk.side2, talk.retheme, pres)
-    pins = [r for r in p.requests if (target(r) or "").startswith(("S0", "S1", "MINE"))]
+    pins = [r for r in requests(p) if (target(r) or "").startswith(("S0", "S1", "MINE"))]
     # after the layouts change (Slides drops a run property equal to the inherited one)
-    assert pins and pins == p.requests[-len(pins):]
+    assert pins and pins == requests(p)[-len(pins):]
     s0 = [jobj(r, "updateTextStyle") for r in pins if "updateTextStyle" in r and jat(r, "updateTextStyle", "objectId") == "S0_t"]
     assert len(s0) == 1 and jat(s0[0], "style", "fontSize") == {"magnitude": 20.7, "unit": "PT"}
     assert "foregroundColor" not in jstr(s0[0], "fields").split(",")                  # (its own white stays its own)
@@ -334,7 +339,7 @@ def test_a_layout_the_person_edited_is_a_conflict_and_is_left_alone(talk: Talk) 
     jarr(layout_page(pres, "LO"), "pageElements")[1] = placeholder("LO_t", "TITLE", {"green": 0.5}, 10.0)   # recoloured
     jarr(layout_page(pres, "LB"), "pageElements")[0] = picture("LB_d", DECO_A, 30)                        # moved
     p = retheme_plan(talk, pres)
-    names = ops(p.requests)
+    names = ops(requests(p))
     assert ("replaceImage", "LB_d") not in names and ("replaceImage", "LO_d") in names
     assert {x[1] for x in names if x[0] == "updateTextStyle"} == {"M_t"}
     conflicts = {where(c): c for c in p.conflicts}
@@ -351,7 +356,7 @@ def test_a_layout_edit_the_source_did_not_touch_is_nobodys_business(talk: Talk) 
     lt[1] = placeholder("LT_t", "CENTERED_TITLE", {"red": 0.5}, 10.0)
     p = retheme_plan(talk, pres)
     assert not any(c["slide"] == "layout Title" for c in p.conflicts)
-    assert not any(x[1] and x[1].startswith("LT") for x in ops(p.requests))
+    assert not any(x[1] and x[1].startswith("LT") for x in ops(requests(p)))
 
 
 def test_a_deleted_decoration_is_a_conflict_and_nothing_is_created_for_it(talk: Talk) -> None:
@@ -360,25 +365,25 @@ def test_a_deleted_decoration_is_a_conflict_and_nothing_is_created_for_it(talk: 
     lo["pageElements"] = jarr(lo, "pageElements")[1:]
     p = retheme_plan(talk, pres)
     assert ("layout Title Only", "LO_d", "theme decoration") in {where(c) for c in p.conflicts}
-    assert not any("createImage" in r for r in p.requests)
+    assert not any("createImage" in r for r in requests(p))
 
 
 def test_a_theme_without_decoration_removes_the_pictures_last(talk: Talk) -> None:
     side = replace(talk.side2, pictures={})
     p = plan(talk.base, side, talk.retheme, talk.pres)
     assert sorted(p.cleanup) == ["LB_d", "LO_d", "LT_d"]
-    assert not any("deleteObject" in r for r in p.requests)
+    assert not any("deleteObject" in r for r in requests(p))
 
 
 def test_a_new_master_fill_is_written_unless_the_person_changed_it(talk: Talk) -> None:
     side = replace(talk.side2, fill="color:#fff0f0")
     p = plan(talk.base, side, talk.retheme, talk.pres)
-    fill = [r for r in p.requests if "updatePageProperties" in r]
+    fill = [r for r in requests(p) if "updatePageProperties" in r]
     assert len(fill) == 1 and jat(fill[0], "updatePageProperties", "objectId") == "M"
     pres = copy.deepcopy(talk.pres)
     jobj(pres, "masters", 0, "pageProperties", "pageBackgroundFill", "solidFill", "color")["rgbColor"] = {"red": 0.2}
     p = plan(talk.base, side, talk.retheme, pres)
-    assert not any("updatePageProperties" in r for r in p.requests)
+    assert not any("updatePageProperties" in r for r in requests(p))
     assert [c["field"] for c in p.conflicts] == ["master background"]
 
 
@@ -426,7 +431,7 @@ def test_a_placeholder_an_interrupted_sync_wrote_is_its_own(talk: Talk) -> None:
     base: JsonObject = {**talk.base, "pending": {"theme": {"LO_t": talk.side2.spec["TITLE"]}}}
     p = plan(base, talk.side2, talk.retheme, pres)
     assert p.conflicts == [] and "LO_t" in p.written
-    assert "LO_t" not in {x[1] for x in ops(p.requests)}
+    assert "LO_t" not in {x[1] for x in ops(requests(p))}
 
 
 # ---------------------------------------------------------------- the header and footer words
@@ -492,12 +497,12 @@ def test_a_new_date_nobody_edited_rewrites_the_footer_on_every_layout(talk: Talk
     """The edit hunt's h5a: `\\date` changed, and the footline showed the old date on every slide."""
     p = footer_plan(talk, footers.pres, footers.base, footers.side)
     assert p.conflicts == [] and p.warnings == []
-    deleted = {jstr(r, "deleteObject", "objectId") for r in p.requests if "deleteObject" in r}
+    deleted = {jstr(r, "deleteObject", "objectId") for r in requests(p) if "deleteObject" in r}
     assert deleted == set(jobj(footers.base, "theme", "texts", "objects"))
-    created = [jobj(r, "createShape") for r in p.requests if "createShape" in r]
+    created = [jobj(r, "createShape") for r in requests(p) if "createShape" in r]
     assert sorted(jstr(c, "objectId") for c in created) == sorted(deleted)   # (convert's ids, one batch)
     assert {jstr(c, "elementProperties", "pageObjectId") for c in created} == {"LT", "LO", "LB"}
-    inserted = [jstr(r, "insertText", "text") for r in p.requests if "insertText" in r]
+    inserted = [jstr(r, "insertText", "text") for r in requests(p) if "insertText" in r]
     assert inserted.count("October 2026") == 3 and "September 2026" not in inserted
     assert {"slide": "layouts", "element": None, "fields": ["header and footer"]} in p.applied
     assert p.pending["header and footer"] == theme_sync.texts_digest(footers.side.texts)
@@ -507,7 +512,7 @@ def test_the_same_footer_writes_nothing(talk: Talk, footers: Footers) -> None:
     same = replace(footers.side, texts=jobjs(talk.v1.deck, "layout_texts"))
     p = footer_plan(talk, footers.pres, footers.base, same)
     assert not any("deleteObject" in r and jstr(r, "deleteObject", "objectId").startswith(emit.LAYOUT_TEXT_PREFIX)
-                   for r in p.requests)
+                   for r in requests(p))
     assert p.applied == [] and p.conflicts == []
 
 
@@ -609,7 +614,7 @@ def test_placeholders_whose_parents_name_each_other_end_the_chain() -> None:
                             placeholder_shape("l_title", "m_title", [("\n", {"fontSize": {"magnitude": 30, "unit": "PT"}})])]}],
                         "masters": [{"objectId": "M1", "pageElements": [
                             placeholder_shape("m_title", "l_title", [("\n", {"fontSize": {"magnitude": 20, "unit": "PT"}})])]}]}
-    answer: list[tuple[list[JsonObject], list[str]]] = []
+    answer: list[tuple[list[google_types.SlidesRequest], list[str]]] = []
 
     def pins() -> None:
         answer.append(theme_sync.inherited_pins(as_presentation(pres), {"m_title": {"fields": "fontSize"}}, {"S1"}))
@@ -620,4 +625,4 @@ def test_placeholders_whose_parents_name_each_other_end_the_chain() -> None:
     reqs, touched = answer[0]
     assert touched == ["s1_title"]
     # The nearest placeholder's size, as the slide showed it before the sync.
-    assert jat(reqs[0], "updateTextStyle", "style") == {"fontSize": {"magnitude": 30, "unit": "PT"}}
+    assert jat(google_types.slides_json(reqs[0]), "updateTextStyle", "style") == {"fontSize": {"magnitude": 30, "unit": "PT"}}

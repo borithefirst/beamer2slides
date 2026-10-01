@@ -60,10 +60,11 @@ from ..doc_ir import Block, Ir, Mark, MarkApi, Measures, Run, Script, Style
 from ..google_types import (AddDocumentTabRequest, CreateNamedRangeRequest,
                             CreateParagraphBulletsRequest, DeleteContentRangeRequest,
                             DeleteNamedRangeRequest, DeleteParagraphBulletsRequest,
-                            DeleteTabRequest, DeleteTableLineRequest, DocsBatchUpdateResponse,
-                            DocsDimension, DocsDocumentTab, DocsEmbeddedObject,
-                            DocsInlineObject, DocsList, DocsLocation, DocsNamedRanges,
-                            DocsNamedStyle, DocsNestingLevel, DocsParagraph,
+                            DeleteTabRequest, DeleteTableLineRequest, DocsAlignment,
+                            DocsBaselineOffset, DocsBatchUpdateResponse, DocsDimension,
+                            DocsDocumentTab, DocsEmbeddedObject, DocsInlineObject, DocsList,
+                            DocsLocation, DocsNamedRanges, DocsNamedStyle, DocsNamedStyleType,
+                            DocsNestingLevel, DocsParagraph,
                             DocsParagraphElement, DocsParagraphStyle, DocsRangeWrite,
                             DocsRequest, DocsStructuralElement, DocsTab, DocsTableCell,
                             DocsTableCellLocation, DocsTableRow, DocsTabProperties,
@@ -142,8 +143,8 @@ class Para:
     whatever the document's named style says, and saying it out loud is the only way
     this world can hold a theme (`fuzz_docs.THEME`).
     """
-    named: str
-    align: str | None
+    named: DocsNamedStyleType
+    align: DocsAlignment | None
     bullet: Bullet | None
     measures: Measures
 
@@ -455,7 +456,7 @@ class World:
         # (there is none in the API), so nothing here ever changes it — it is here so
         # that a paragraph *inheriting* a property can be represented at all, which is
         # the one thing a document's look is made of. Empty for most corpus shapes.
-        self.theme: dict[str, DocsNamedStyle] = {}
+        self.theme: dict[DocsNamedStyleType, DocsNamedStyle] = {}
         self.revision = 1
         # A plain counter, not itertools.count: a world is copied all the time (the
         # campaign tries a second sync on a copy), and copying an iterator is deprecated.
@@ -1177,7 +1178,7 @@ def _api_style(style: Style) -> DocsTextStyle:
 
 # What `documents.get` says for each raised or lowered run: the world's own table, not
 # `doc_ir.TO_SCRIPT`, so a reader that misread one would not be agreed with here.
-SCRIPT_API: dict[Script, str] = {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT", "none": "NONE"}
+SCRIPT_API: dict[Script, DocsBaselineOffset] = {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT", "none": "NONE"}
 
 
 def nest(world: World, span: DocsRangeWrite, level: int) -> bool:
@@ -1306,9 +1307,10 @@ def _object_json(o: Chip, at: int, objects: dict[str, DocsInlineObject]) -> Docs
     elif isinstance(o, Person):
         out["person"] = {"personProperties": {"name": o.name, "email": o.email}}
     elif isinstance(o, DateChip):
+        # No `dateFormat`: the world does not model one, and the "" it once wrote here is
+        # no value of Docs' enum (a read takes an absent one as "" all the same).
         out["dateElement"] = {"dateElementProperties": {
-            "displayText": o.display, "timestamp": o.timestamp,
-            "dateFormat": "", "locale": ""}}
+            "displayText": o.display, "timestamp": o.timestamp, "locale": ""}}
     elif isinstance(o, Picture):
         embedded: DocsEmbeddedObject = {"imageProperties": {"contentUri": o.uri}}
         if o.size_pt:

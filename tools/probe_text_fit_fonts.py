@@ -18,7 +18,6 @@ Usage: python tools/probe_text_fit_fonts.py
 """
 
 import json
-from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -26,10 +25,11 @@ from PIL import Image
 
 from beamer2slides.arrays import Floats
 from beamer2slides.google_auth import drive_service, slides_service
-from beamer2slides.google_types import Presentation, SlidesService, object_id, presentation_id
-from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.google_types import (Dimension, Presentation, SlidesRange, SlidesRequest, SlidesService,
+                                        SlidesTextStyle, object_id, presentation_id)
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 
-Style = Mapping[str, object]
+Style = SlidesTextStyle
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "out" / "probe_text_fit_fonts"
@@ -91,17 +91,37 @@ def reps(text: str) -> int:
     return N if len(text) == 1 else 1
 
 
-def style_request(oid: str, font: str, size: float, extra: Style, rng: Mapping[str, object]) -> dict[str, object]:
-    style: dict[str, object] = {"fontFamily": font, "fontSize": pt(size),
-                                "foregroundColor": {"opaqueColor": {"rgbColor": {}}}, **extra}
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
+    """`gslides.text_box` as a request."""
+    return {"createShape": {
+        "objectId": object_id,
+        "shapeType": "TEXT_BOX",
+        "elementProperties": {
+            "pageObjectId": page_id,
+            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
+                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
+        },
+    }}
+
+
+def style_request(oid: str, font: str, size: float, extra: Style, rng: SlidesRange) -> SlidesRequest:
+    style: SlidesTextStyle = {"fontFamily": font, "fontSize": pt(size),
+                              "foregroundColor": {"opaqueColor": {"rgbColor": {}}}, **extra}
     return {"updateTextStyle": {"objectId": oid, "textRange": rng, "fields": ",".join(style), "style": style}}
 
 
-def style_all(oid: str, font: str, size: float, extra: Style) -> dict[str, object]:
+def style_all(oid: str, font: str, size: float, extra: Style) -> SlidesRequest:
     return style_request(oid, font, size, extra, {"type": "ALL"})
 
 
-def style_range(oid: str, font: str, size: float, extra: Style, start: int, end: int) -> dict[str, object]:
+def style_range(oid: str, font: str, size: float, extra: Style, start: int, end: int) -> SlidesRequest:
     return style_request(oid, font, size, extra, {"type": "FIXED_RANGE", "startIndex": start, "endIndex": end})
 
 
@@ -118,8 +138,8 @@ def run(slides: SlidesService, pres: Presentation) -> None:
     pid = presentation_id(pres)
     first_slide = pres.get("slides", [])[0]
     first = object_id(first_slide)
-    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}}
-                                        for e in first_slide.get("pageElements", [])]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": object_id(e)}}
+                                 for e in first_slide.get("pageElements", [])]
     per_page = PER_COLUMN * (720 // COLUMN_W)
     fonts = list(dict.fromkeys(font for _, font, _, _ in ADVANCE_CASES))
     # the bars' own spaces are in the row's font: one reference row per font
@@ -133,9 +153,9 @@ def run(slides: SlidesService, pres: Presentation) -> None:
         x, y = 4 + (slot // PER_COLUMN) * COLUMN_W, 2 + (slot % PER_COLUMN) * ROW
         oid = f"adv_{i}"
         body = ch * reps(ch) if ch else ""
-        reqs += [text_box(oid, page, x, y, COLUMN_W - 2, ROW + 6),
-                 {"insertText": {"objectId": oid, "text": "|  " + body + "  |"}},
-                 style_all(oid, font, SIZE, PLAIN)]
+        reqs.extend([text_box(oid, page, x, y, COLUMN_W - 2, ROW + 6),
+                     {"insertText": {"objectId": oid, "text": "|  " + body + "  |"}},
+                     style_all(oid, font, SIZE, PLAIN)])
         if extra and body:
             reqs.append(style_range(oid, font, SIZE, extra, 3, 3 + len(body)))
         placed.append((label, font, reps(ch) if ch else 1, page, x, y))
@@ -145,8 +165,8 @@ def run(slides: SlidesService, pres: Presentation) -> None:
     for i, (label, text, font, size, extra) in enumerate(VERTICAL_CASES):
         oid = f"ver_{i}"
         x, y = 4 + (i % per_row) * VBOX_W, 20 + (i // per_row) * (VBOX_H + 20)
-        reqs += [text_box(oid, vpage, x, y, VBOX_W - 4, VBOX_H), {"insertText": {"objectId": oid, "text": text}},
-                 style_all(oid, font, size, extra)]
+        reqs.extend([text_box(oid, vpage, x, y, VBOX_W - 4, VBOX_H), {"insertText": {"objectId": oid, "text": text}},
+                     style_all(oid, font, size, extra)])
         vplaced.append((label, x, y))
     lpage = "page_lines"
     pages.append(lpage)
@@ -155,8 +175,8 @@ def run(slides: SlidesService, pres: Presentation) -> None:
     for i, (label, segments) in enumerate(LINE_CASES):
         oid = f"line_{i}"
         x, y = 4 + (i % 3) * (LBOX_W + 4), 10 + (i // 3) * (LBOX_H + 10)
-        reqs += [text_box(oid, lpage, x, y, LBOX_W, LBOX_H),
-                 {"insertText": {"objectId": oid, "text": "".join(s[0] for s in segments)}}]
+        reqs.extend([text_box(oid, lpage, x, y, LBOX_W, LBOX_H),
+                     {"insertText": {"objectId": oid, "text": "".join(s[0] for s in segments)}}])
         start = 0
         for text, font, size, extra in segments:
             reqs.append(style_range(oid, font, size, extra, start, start + len(text)))

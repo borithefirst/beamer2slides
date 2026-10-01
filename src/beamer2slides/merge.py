@@ -611,6 +611,15 @@ def uniform_changes(base_styles: Sequence[JsonMap], theirs_styles: Sequence[Json
         values = {repr(s.get(key)) for s in theirs_styles}
         if len(values) == 1 and key in theirs_styles[0] and {repr(s.get(key)) for s in base_styles} != values:
             out[key] = theirs_styles[0][key]
+    # A family and its weight are written together (a weightedFontFamily without its family is a
+    # 400 that refuses the whole batch), as `deck_attributes` pairs them: the other one goes along
+    # when it too is one value, or the change cannot be written.
+    if "weight" in out or "fontFamily" in out:
+        for key in ("fontFamily", "weight"):
+            if key not in out and any(key in s for s in theirs_styles):
+                if len({repr(s.get(key)) for s in theirs_styles}) != 1:
+                    return None
+                out[key] = theirs_styles[0][key]
     # Everything else must be as before: re-applying only these attributes gives theirs.
     if not out or canon([{**s, **out} for s in base_styles]) != canon(theirs_styles):
         return None

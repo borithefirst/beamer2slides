@@ -31,7 +31,7 @@ from .doc_ir import (Aligned, Block, BulletFix, Dropped, GridLine, GridOp, Ir, K
                      MarkApi, Measure, MeasureValue, Measures, Run, Size, Style, StyledRange,
                      TableLines, U16, WholeStyle)
 from .google_types import (DocsBulletPreset, DocsDimension, DocsEndOfSegmentLocation, DocsLocation,
-                           DocsParagraphBorder, DocsParagraphStyle,
+                           DocsNamedStyleType, DocsParagraphBorder, DocsParagraphStyle,
                            DocsRangeWrite, DocsRequest, DocsRgbColor, DocsTabProperties,
                            DocsTableCellLocation, DocsTextStyle, InsertInlineImageRequest,
                            docs_request_kind)
@@ -1525,7 +1525,7 @@ def carry_unimported(live: Ir, planned: list[Block]) -> int:
         # safe against a reader who demoted a heading in the browser for the reason
         # the rest of this is: `mine` is the merged plan, and `_take_shape` gives it
         # the source's shape only where the document kept the base's.
-        named: str | None = named_style(mine)
+        named: DocsNamedStyleType | None = named_style(mine)
         if named == named_style(block):
             named = None
         # And the bullet, which no named style carries: a list item and a plain
@@ -2887,7 +2887,7 @@ def paragraph_style(block: Block) -> tuple[DocsParagraphStyle, str]:
     return style, ",".join(fields)
 
 
-def named_style(block: Block) -> str:
+def named_style(block: Block) -> DocsNamedStyleType:
     """Which of Docs' named styles a block is. `namedStyleType` is named on every
     paragraph the merge writes, so a kind missing from here is silently written as
     body text: that is what happened to Title and Subtitle (`doc_ir.NAMED_KINDS`)."""

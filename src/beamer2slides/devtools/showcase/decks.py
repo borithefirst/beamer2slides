@@ -48,7 +48,10 @@ from beamer2slides.typing_compat import assert_never
 if TYPE_CHECKING:
     from typing_extensions import Unpack
 
-    from beamer2slides.google_types import SlidesService
+    from beamer2slides.google_types import (BulletPreset, LayoutPlaceholderIdMapping, LineProperties,
+                                            PlaceholderType, PredefinedLayout, ShapeProperties, ShapeType,
+                                            SlidesOptionalColor, SlidesRange, SlidesRequest, SlidesRgbColor,
+                                            SlidesService, SlidesTableCellLocation, SlidesTextStyle)
 
 W, H = 720, 405
 MANIFEST = Path(__file__).with_name("decks.json")
@@ -1044,7 +1047,7 @@ class TextLook(TypedDict, total=False):
     """What one `updateTextStyle` of `hashing` sets."""
     font: str
     size: float
-    color: JsonObject
+    color: SlidesRgbColor
     bold: bool
     italic: bool
 
@@ -1054,28 +1057,28 @@ def hashing(slides: SlidesService, pid: str) -> None:
     from beamer2slides.google_types import object_id
     from beamer2slides.gslides import execute, pt
     pres = execute(slides.presentations().get(presentationId=pid))
-    reqs: list[JsonObject] = [{"deleteObject": {"objectId": object_id(s)}} for s in pres.get("slides", [])]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": object_id(s)}} for s in pres.get("slides", [])]
     serif, sans, mono = "Merriweather", "Lato", "Roboto Mono"
-    navy: JsonObject = {"red": 0.10, "green": 0.18, "blue": 0.32}
-    teal: JsonObject = {"red": 0.0, "green": 0.47, "blue": 0.47}
+    navy: SlidesRgbColor = {"red": 0.10, "green": 0.18, "blue": 0.32}
+    teal: SlidesRgbColor = {"red": 0.0, "green": 0.47, "blue": 0.47}
 
-    def colour(c: JsonObject) -> JsonObject:
+    def colour(c: SlidesRgbColor) -> SlidesOptionalColor:
         return {"opaqueColor": {"rgbColor": c}}
 
-    def whole() -> JsonObject:
+    def whole() -> SlidesRange:
         return {"type": "ALL"}
 
-    def span(a: int, b: int) -> JsonObject:
+    def span(a: int, b: int) -> SlidesRange:
         return {"type": "FIXED_RANGE", "startIndex": a, "endIndex": b}
 
-    def new(sid: str, layout: str, roles: Sequence[str]) -> None:
-        mappings: list[Json] = [{"layoutPlaceholder": {"type": r, "index": 0}, "objectId": f"{sid}_{r.lower()}"}
-                                for r in roles]
+    def new(sid: str, layout: PredefinedLayout, roles: Sequence[PlaceholderType]) -> None:
+        mappings: list[LayoutPlaceholderIdMapping] = [
+            {"layoutPlaceholder": {"type": r, "index": 0}, "objectId": f"{sid}_{r.lower()}"} for r in roles]
         reqs.append({"createSlide": {"objectId": sid, "slideLayoutReference": {"predefinedLayout": layout},
                                      "placeholderIdMappings": mappings}})
 
-    def style(oid: str, rng: JsonObject, look: TextLook) -> None:
-        st: JsonObject = {}
+    def style(oid: str, rng: SlidesRange, look: TextLook) -> None:
+        st: SlidesTextStyle = {}
         f: list[str] = []
         font = look.get("font")
         if font:
@@ -1099,32 +1102,33 @@ def hashing(slides: SlidesService, pid: str) -> None:
             f.append("italic")
         reqs.append({"updateTextStyle": {"objectId": oid, "style": st, "fields": ",".join(f), "textRange": rng}})
 
-    def put(oid: str, txt: str, *, font: str, size: float, color: JsonObject, bold: bool) -> None:
+    def put(oid: str, txt: str, *, font: str, size: float, color: SlidesRgbColor, bold: bool) -> None:
         reqs.append({"insertText": {"objectId": oid, "text": txt, "insertionIndex": 0}})
         style(oid, whole(), {"font": font, "size": size, "color": color, "bold": bold})
 
-    def box(sid: str, oid: str, kind: str, x: float, y: float, w: float, h: float, *, fill: JsonObject,
-            line: JsonObject) -> None:
+    def box(sid: str, oid: str, kind: ShapeType, x: float, y: float, w: float, h: float, *, fill: SlidesRgbColor,
+            line: SlidesRgbColor) -> None:
         reqs.append({"createShape": {"objectId": oid, "shapeType": kind, "elementProperties": {
             "pageObjectId": sid, "size": {"width": pt(w), "height": pt(h)},
             "transform": {"scaleX": 1, "scaleY": 1, "translateX": x, "translateY": y, "unit": "PT"}}}})
-        props: JsonObject = {"shapeBackgroundFill": {"solidFill": {"color": {"rgbColor": fill}}},
-                             "outline": {"outlineFill": {"solidFill": {"color": {"rgbColor": line}}}, "weight": pt(1.0)}}
+        props: ShapeProperties = {
+            "shapeBackgroundFill": {"solidFill": {"color": {"rgbColor": fill}}},
+            "outline": {"outlineFill": {"solidFill": {"color": {"rgbColor": line}}}, "weight": pt(1.0)}}
         reqs.append({"updateShapeProperties": {"objectId": oid, "shapeProperties": props,
                                                "fields": "shapeBackgroundFill,outline"}})
 
-    def arrow_line(sid: str, oid: str, x1: float, y1: float, x2: float, y2: float, color: JsonObject) -> None:
+    def arrow_line(sid: str, oid: str, x1: float, y1: float, x2: float, y2: float, color: SlidesRgbColor) -> None:
         """A 1.5 pt line from (x1, y1) to (x2, y2) ending in a filled arrow."""
         reqs.append({"createLine": {"objectId": oid, "lineCategory": "STRAIGHT", "elementProperties": {
             "pageObjectId": sid, "size": {"width": pt(abs(x2 - x1) or 0.01), "height": pt(abs(y2 - y1) or 0.01)},
             "transform": {"scaleX": 1, "scaleY": 1, "translateX": min(x1, x2), "translateY": min(y1, y2),
                           "unit": "PT"}}}})
-        lp: JsonObject = {"lineFill": {"solidFill": {"color": {"rgbColor": color}}}, "weight": pt(1.5),
-                          "endArrow": "FILL_ARROW"}
+        lp: LineProperties = {"lineFill": {"solidFill": {"color": {"rgbColor": color}}}, "weight": pt(1.5),
+                              "endArrow": "FILL_ARROW"}
         reqs.append({"updateLineProperties": {"objectId": oid, "lineProperties": lp,
                                               "fields": "lineFill,weight,endArrow"}})
 
-    def bullets(oid: str, txt: str, *, preset: str, size: float) -> str:
+    def bullets(oid: str, txt: str, *, preset: BulletPreset, size: float) -> str:
         reqs.append({"insertText": {"objectId": oid, "text": txt}})
         style(oid, whole(), {"font": sans, "size": size, "color": {"red": 0.13, "green": 0.13, "blue": 0.13}})
         reqs.append({"createParagraphBullets": {"objectId": oid, "bulletPreset": preset,
@@ -1140,7 +1144,8 @@ def hashing(slides: SlidesService, pid: str) -> None:
             "pageObjectId": sid, "size": {"width": pt(w), "height": pt(h)},
             "transform": {"scaleX": 1, "scaleY": 1, "translateX": x, "translateY": y, "unit": "PT"}}}})
 
-    disc, numbered = "BULLET_DISC_CIRCLE_SQUARE", "NUMBERED_DIGIT_ALPHA_ROMAN"
+    disc: BulletPreset = "BULLET_DISC_CIRCLE_SQUARE"
+    numbered: BulletPreset = "NUMBERED_DIGIT_ALPHA_ROMAN"
 
     # 1. title
     new("hash01", "TITLE", ["CENTERED_TITLE", "SUBTITLE"])
@@ -1164,7 +1169,7 @@ def hashing(slides: SlidesService, pid: str) -> None:
     new("hash03", "TITLE_ONLY", ["TITLE"])
     put("hash03_title", "Separate chaining", font=serif, size=28, color=navy, bold=True)
     chains: dict[int, list[str]] = {0: [], 1: ["ada", "kai"], 2: [], 3: ["lin"], 4: ["moe", "ian", "zoe"]}
-    grey: JsonObject = {"red": 0.93, "green": 0.95, "blue": 0.96}
+    grey: SlidesRgbColor = {"red": 0.93, "green": 0.95, "blue": 0.96}
     for b, keys in chains.items():
         y = 110 + b * 50
         box("hash03", f"hash03_b{b}", "RECTANGLE", 50, y, 44, 36, fill=grey, line=navy)
@@ -1221,10 +1226,10 @@ def hashing(slides: SlidesService, pid: str) -> None:
     reqs.append({"createTable": {"objectId": "hash05_t", "rows": 5, "columns": 3, "elementProperties": {
         "pageObjectId": "hash05", "size": {"width": pt(420), "height": pt(200)},
         "transform": {"scaleX": 1, "scaleY": 1, "translateX": 40, "translateY": 100, "unit": "PT"}}}})
-    white: JsonObject = {"red": 1, "green": 1, "blue": 1}
+    white: SlidesRgbColor = {"red": 1, "green": 1, "blue": 1}
     for i, row in enumerate(data):
         for j, val in enumerate(row):
-            loc: JsonObject = {"rowIndex": i, "columnIndex": j}
+            loc: SlidesTableCellLocation = {"rowIndex": i, "columnIndex": j}
             reqs.append({"insertText": {"objectId": "hash05_t", "cellLocation": loc, "text": val}})
             reqs.append({"updateTextStyle": {"objectId": "hash05_t", "cellLocation": loc, "textRange": {"type": "ALL"},
                                              "style": {"fontFamily": sans, "fontSize": pt(15), "bold": i == 0,

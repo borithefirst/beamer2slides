@@ -15,7 +15,7 @@ from dataclasses import replace
 
 from .emit_metrics import (
     ASCENT_EM, BASELINE_A, DESCENT_EM, LINE_EM, MIDDLE_BASELINE_EM, PAD_X, PX_PT, SOFT_BREAK, FontMapper,
-    bullet_extent_of, bullet_level_of, bullet_preset_of, bullet_size_of, rgb, u16,
+    bullet_extent_of, bullet_level_of, bullet_preset_of, bullet_size_of, u16,
 )
 from .emit_model import (
     ElementDict, JsonMap, Placeholder, SetParagraph, SetRun, SetText, block_of, box_of, json_number, number_box,
@@ -25,7 +25,11 @@ from .emit_widths import (
     SCRIPT_SIZE, SMALL_CAPS_SIZE, paragraph_dict, runs_between, set_runs_of, slides_lines_of, slides_width_of,
 )
 from .fonts import cjk_font, font_info, google_font
-from .gslides import EMU_PER_PT, emu, pt
+from .google_types import (
+    AffineTransform, BulletPreset, SlidesParagraphStyle, SlidesRequest, SlidesTextStyle, bullet_preset,
+    slides_text_style,
+)
+from .gslides import EMU_PER_PT, emu, pt, text_color
 from .ir import Align
 from .ir_types import Number, TextElement
 from .json_types import Json, JsonObject
@@ -584,7 +588,7 @@ def flowed_lines(p: SetParagraph, scale: float, fonts: FontMapper, right: float,
     return count
 
 
-def text_box_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[JsonObject]:
+def text_box_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[SlidesRequest]:
     """`text_box_requests_of` a text dict in a box of its own (no placeholder, no internal links, no
     block bar, right limit or marks): a layout's text (theme), the tests' texts."""
     return text_box_requests_of(text_of(el), slide_id, object_id, scale, fonts, None, None, None, None, None)
@@ -593,7 +597,7 @@ def text_box_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, 
 def text_element_requests(el: TextElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                           placeholder: Placeholder | None, page_slide: Mapping[int, str] | None,
                           bar: Sequence[float] | None, right_limit: float | None,
-                          marks: Sequence[str] | None) -> list[JsonObject]:
+                          marks: Sequence[str] | None) -> list[SlidesRequest]:
     """The text box of a parsed text element (either stage)."""
     return text_box_requests_of(set_text(el), slide_id, object_id, scale, fonts, placeholder, page_slide, bar,
                                 right_limit, marks)
@@ -602,7 +606,7 @@ def text_element_requests(el: TextElement, slide_id: str, object_id: str, scale:
 def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                          placeholder: Placeholder | None, page_slide: Mapping[int, str] | None,
                          bar: Sequence[float] | None, right_limit: float | None,
-                         marks: Sequence[str] | None) -> list[JsonObject]:
+                         marks: Sequence[str] | None) -> list[SlidesRequest]:
     """A text box for a text element. With `bar` (the PDF box of a block's title bar that this
     one-line text sits on) the box fills the bar and centres its text vertically, so the
     title stays in the middle of the bar when the block is resized. `right_limit` (PDF x) is
@@ -697,7 +701,7 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
         if aligns == {"left"}:
             w = max(w, (bar[2] - 1) * scale - x)  # to the bar's end: the title wraps with the block
 
-    reqs: list[JsonObject]
+    reqs: list[SlidesRequest]
     if placeholder is not None:
         # An existing layout placeholder (the slide title): its size is fixed at creation, so
         # it is resized through the transform's scale. Text is not scaled by that.
@@ -711,8 +715,8 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
                                                            "autofit": {"autofitType": "NONE"}}}},
         ]
     else:
-        transform: JsonObject = {"scaleX": 1, "scaleY": 1, "unit": "EMU",
-                                 "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}
+        transform: AffineTransform = {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                                      "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}
         if text.rotation:
             # Laid out in the text's own frame (classify.rotated_texts): turn the box onto the page.
             turn = 1 if text.rotation > 0 else -1
@@ -735,9 +739,9 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
     # leading tabs and sets nesting levels relative to the range's shallowest paragraph, so a
     # range whose levels start above 0 begins with a dummy paragraph, deleted right after.
     levels = [bullet_level_of(p.bullet, p.level) if p.bullet is not None else 0 for p in paras]
-    ranges: list[tuple[int, int, str]] = []  # (first paragraph, last paragraph, preset)
+    ranges: list[tuple[int, int, BulletPreset]] = []  # (first paragraph, last paragraph, preset)
     for i, p in enumerate(paras):
-        preset = bullet_preset_of(p.bullet) if p.bullet is not None else None
+        preset = bullet_preset(bullet_preset_of(p.bullet), "a bullet") if p.bullet is not None else None
         if preset and ranges and ranges[-1][2] == preset and ranges[-1][1] == i - 1:
             ranges[-1] = (ranges[-1][0], i, preset)
         elif preset:
@@ -760,12 +764,12 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
     for i, (p, start, level, size, cap) in enumerate(zip(paras, starts_tabbed, levels, base_sizes, bullet_caps)):
         family = fonts.size_of(p.runs[0], scale)[0] if p.runs else "Lato"
         length = level + u16("".join(r.text for r in p.runs))
-        style: JsonObject = {"fontFamily": family, "fontSize": pt(size)}
+        style: SlidesTextStyle = {"fontFamily": family, "fontSize": pt(size)}
         if p.bullet is not None:
             style["fontSize"] = pt(bullet_size_of(p.bullet, cap, scale))
             color = p.bullet.color or (p.runs[0].color if p.runs else None)
             if color:
-                style["foregroundColor"] = rgb(color)
+                style["foregroundColor"] = text_color(color)
         if length:
             reqs.append({"updateTextStyle": {
                 "objectId": object_id, "fields": ",".join(style), "style": style,
@@ -793,22 +797,26 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
         for run, z in zip(p.runs, zs):
             if not run.text:
                 continue
-            style, fields = fonts.style_of(run, scale)
+            font, fields = fonts.style_of(run, scale)
+            style = slides_text_style(font, "a run's font (FontMapper.style_of)")
             if "fontSize" in style:
                 style["fontSize"] = pt(z)  # (a subscript no larger than its text: run_sizes)
             if run.hole_size:
-                style = {"fontFamily": HOLE_FONT, "fontSize": pt(run.hole_size), "bold": False, "italic": False}
+                style = {"fontFamily": HOLE_FONT, "fontSize": pt(run.hole_size), "bold": False,
+                         "italic": False}
                 fields = ["fontFamily", "fontSize", "bold", "italic"]
-            style.update({"smallCaps": run.smallcaps, "foregroundColor": rgb(run.color),
-                          "underline": run.underline, "strikethrough": run.strike,
-                          "baselineOffset": "NONE" if run.script is None else
-                          {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}[run.script]})
+            style["smallCaps"] = run.smallcaps
+            style["foregroundColor"] = text_color(run.color)
+            style["underline"] = run.underline
+            style["strikethrough"] = run.strike
+            style["baselineOffset"] = "NONE" if run.script is None else \
+                "SUPERSCRIPT" if run.script == "super" else "SUBSCRIPT"
             fields = fields + ["smallCaps", "foregroundColor", "underline", "strikethrough", "baselineOffset"]
             if run.highlight:
-                style["backgroundColor"] = rgb(run.highlight)
+                style["backgroundColor"] = text_color(run.highlight)
                 fields.append("backgroundColor")
             if run.hole_size and marks_left:
-                style["backgroundColor"] = rgb(marks_left.pop(0))
+                style["backgroundColor"] = text_color(marks_left.pop(0))
                 fields.append("backgroundColor")
             written = ",".join(dict.fromkeys(fields))
             if run.link and run.link.startswith("#page="):
@@ -862,18 +870,22 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
         # line ragged, as TeX does. A paragraph whose breaks need an edge short of the box's
         # keeps the difference free (indentEnd), written only where there is one.
         end = round(indent_end, 2)
+        paragraph: SlidesParagraphStyle = {
+            "alignment": "JUSTIFIED" if justify else "CENTER" if edge == "center" else
+                         "START" if (edge == "right") == rtl else "END",
+            "lineSpacing": round(100 * ratio, 1),
+            "spaceAbove": pt(round(above, 2)), "spaceBelow": pt(0),
+            "indentStart": pt(round(text_indent, 2)),
+            "indentFirstLine": pt(round(first_indent, 2)),
+        }
+        if end > 0.01:
+            paragraph["indentEnd"] = pt(end)
+        if rtl:
+            paragraph["direction"] = "RIGHT_TO_LEFT"
         reqs.append({"updateParagraphStyle": {
             "objectId": object_id,
             "textRange": {"type": "FIXED_RANGE", "startIndex": p_start, "endIndex": max(p_end, p_start + 1)},
-            "style": {
-                "alignment": "JUSTIFIED" if justify else "CENTER" if edge == "center" else
-                             "START" if (edge == "right") == rtl else "END",
-                "lineSpacing": round(100 * ratio, 1),
-                "spaceAbove": pt(round(above, 2)), "spaceBelow": pt(0),
-                "indentStart": pt(round(text_indent, 2)), "indentFirstLine": pt(round(first_indent, 2)),
-                **({"indentEnd": pt(end)} if end > 0.01 else {}),
-                **({"direction": "RIGHT_TO_LEFT"} if rtl else {}),
-            },
+            "style": paragraph,
             "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine" +
                       (",indentEnd" if end > 0.01 else "") + (",direction" if rtl else ""),
         }})
@@ -881,30 +893,31 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
 
 
 def number_box_requests(number: JsonMap, slide_id: str, object_id: str, scale: float,
-                        fonts: FontMapper) -> list[JsonObject]:
+                        fonts: FontMapper) -> list[SlidesRequest]:
     """`number_requests` of a ball's number dict."""
     run, center, height = number_box_of(number)
     return number_box_requests_of(run, center, height, slide_id, object_id, scale, fonts)
 
 
-def number_requests(number: Number, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[JsonObject]:
+def number_requests(number: Number, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[SlidesRequest]:
     """The box of a parsed ball's number."""
     run, center, height = number_box(number)
     return number_box_requests_of(run, center, height, slide_id, object_id, scale, fonts)
 
 
 def number_box_requests_of(run: SetRun, center: tuple[float, float], height: float, slide_id: str, object_id: str,
-                           scale: float, fonts: FontMapper) -> list[JsonObject]:
+                           scale: float, fonts: FontMapper) -> list[SlidesRequest]:
     """A literal list number (`run`) centred on its ball picture (classify.literal_list_numbers),
     `height` PDF pt tall around `center`: a box around the ball's centre with centred text and
     contentAlignment MIDDLE. Lato digits are 0.72 em tall, so a baseline 0.362 em below the middle
     puts them in the middle too."""
-    style, fields = fonts.style_of(run, scale)
+    font, fields = fonts.style_of(run, scale)
+    style = slides_text_style(font, "a number's font (FontMapper.style_of)")
     size = fonts.size_of(run, scale)[1]
     cx, cy = center[0] * scale, center[1] * scale
     w = height * scale + 2 * PAD_X + len(run.text) * size  # never wraps "(iv)"
     h = max(height * scale, LINE_EM * size + 2)
-    style["foregroundColor"] = rgb(run.color)
+    style["foregroundColor"] = text_color(run.color)
     return [
         {"createShape": {"objectId": object_id, "shapeType": "TEXT_BOX", "elementProperties": {
             "pageObjectId": slide_id, "size": {"width": emu(w), "height": emu(h)},
@@ -916,8 +929,9 @@ def number_box_requests_of(run: SetRun, center: tuple[float, float], height: flo
         {"updateTextStyle": {"objectId": object_id, "style": style, "fields": ",".join(fields + ["foregroundColor"]),
                              "textRange": {"type": "ALL"}}},
         {"updateParagraphStyle": {"objectId": object_id, "textRange": {"type": "ALL"},
-                                  "style": {"alignment": "CENTER", "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0),
-                                            "indentStart": pt(0), "indentFirstLine": pt(0)},
+                                  "style": {"alignment": "CENTER", "lineSpacing": 100, "spaceAbove": pt(0),
+                                            "spaceBelow": pt(0), "indentStart": pt(0),
+                                            "indentFirstLine": pt(0)},
                                   "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine"}},
     ]
 

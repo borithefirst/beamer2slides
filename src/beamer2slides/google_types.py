@@ -1124,6 +1124,42 @@ def slides_json(request: SlidesRequest) -> JsonObject:
     return value
 
 
+# (emit's side: what its planners hand on as typed values)
+BULLET_PRESETS: frozenset[str] = frozenset(get_args(BulletPreset))
+
+
+def is_bullet_preset(value: str) -> TypeGuard[BulletPreset]:
+    return value in BULLET_PRESETS
+
+
+def bullet_preset(value: str, where: str) -> BulletPreset:
+    """`value` as a `createParagraphBullets` preset, or an error naming `where` (Slides refuses a
+    preset it does not know, with the whole batch)."""
+    if not is_bullet_preset(value):
+        raise JsonShapeError(f"{where}: {value!r} is no Slides bullet preset")
+    return value
+
+
+def part_json(value: Mapping[str, object], where: str) -> JsonObject:
+    """A typed part (a text style a record holds) as the JSON a file keeps it as: checked all the
+    way down, not copied (`slides_json` for a whole request)."""
+    found: object = value
+    if not _is_json_object(found):
+        raise JsonShapeError(f"{where}: not JSON")
+    return found
+
+
+def slides_request(o: JsonObject, where: str) -> SlidesRequest:
+    """A request built as JSON (a caller not typed yet) as a `SlidesRequest`: checked all the way
+    down, exactly one kind, not copied."""
+    request = typed_part(o, SlidesRequest, where)
+    try:
+        slides_request_kind(request)
+    except ValueError as e:
+        raise JsonShapeError(f"{where}: {e}") from e
+    return request
+
+
 # ------------------------------------------------------------------------------ Slides: calls
 
 
@@ -1479,7 +1515,7 @@ class DocsTextStyle(TypedDict, total=False):
     underline: bool
     strikethrough: bool
     smallCaps: bool
-    baselineOffset: str                  # (an enum: str until doc_ir's TO_SCRIPT says it, test_google_schema.EXEMPT)
+    baselineOffset: DocsBaselineOffset
     weightedFontFamily: DocsWeightedFontFamily
     fontSize: DocsDimension
     foregroundColor: DocsOptionalColor
@@ -1491,7 +1527,7 @@ class DocsParagraphBorder(TypedDict, total=False):
     color: DocsOptionalColor
     width: DocsDimension
     padding: DocsDimension
-    dashStyle: str                       # (an enum, as baselineOffset)
+    dashStyle: DocsDashStyle
 
 
 class DocsShading(TypedDict, total=False):
@@ -1503,8 +1539,8 @@ DocsNamedStyleType = Literal["NAMED_STYLE_TYPE_UNSPECIFIED", "NORMAL_TEXT", "TIT
 
 
 class DocsParagraphStyle(TypedDict, total=False):
-    namedStyleType: str                  # (DocsNamedStyleType, as baselineOffset)
-    alignment: str                       # (an enum, as baselineOffset)
+    namedStyleType: DocsNamedStyleType
+    alignment: DocsAlignment
     indentStart: DocsDimension
     indentFirstLine: DocsDimension
     lineSpacing: float
@@ -1529,7 +1565,7 @@ class DocsTextRun(TypedDict, total=False):
 class DocsDateElementProperties(TypedDict, total=False):
     displayText: str
     timestamp: str
-    dateFormat: str                      # (an enum; doc_world's read-back writes "")
+    dateFormat: DocsDateFormat
     timeFormat: Literal["TIME_FORMAT_UNSPECIFIED", "TIME_FORMAT_DISABLED", "TIME_FORMAT_HOUR_MINUTE",
                         "TIME_FORMAT_HOUR_MINUTE_TIMEZONE"]
     locale: str
@@ -1681,7 +1717,7 @@ class DocsInlineObject(TypedDict, total=False):
 
 
 class DocsNamedStyle(TypedDict, total=False):
-    namedStyleType: str                  # (DocsNamedStyleType once doc_world's theme names are)
+    namedStyleType: DocsNamedStyleType
     textStyle: DocsTextStyle
     paragraphStyle: DocsParagraphStyle
 
@@ -2068,8 +2104,23 @@ class DocsBatchUpdateResponse(TypedDict, total=False):
     writeControl: DocsWriteControl
 
 
+# The Docs enums a document's styles carry, as docs.v1.json lists them (read back and written
+# alike: `doc_ir`'s tables translate them to and from the dialect's words).
+DocsAlignment = Literal["ALIGNMENT_UNSPECIFIED", "START", "CENTER", "END", "JUSTIFIED"]
+DocsBaselineOffset = Literal["BASELINE_OFFSET_UNSPECIFIED", "NONE", "SUPERSCRIPT", "SUBSCRIPT"]
+DocsDashStyle = Literal["DASH_STYLE_UNSPECIFIED", "SOLID", "DOT", "DASH"]
+DocsDateFormat = Literal["DATE_FORMAT_UNSPECIFIED", "DATE_FORMAT_CUSTOM", "DATE_FORMAT_MONTH_DAY_ABBREVIATED",
+                         "DATE_FORMAT_MONTH_DAY_FULL", "DATE_FORMAT_MONTH_DAY_YEAR_ABBREVIATED", "DATE_FORMAT_ISO8601"]
+
+# Slides' predefined layouts, as slides.v1.json's LayoutReference.predefinedLayout lists them (the
+# decks the devtools make from Google's own layouts name one).
+PredefinedLayout = Literal["PREDEFINED_LAYOUT_UNSPECIFIED", "BLANK", "CAPTION_ONLY", "TITLE", "TITLE_AND_BODY",
+                           "TITLE_AND_TWO_COLUMNS", "TITLE_ONLY", "SECTION_HEADER", "SECTION_TITLE_AND_DESCRIPTION",
+                           "ONE_COLUMN_TEXT", "MAIN_POINT", "BIG_NUMBER"]
+
+
 class DocsBatchUpdateBody(TypedDict, total=False):
-    requests: Required[Sequence[Mapping[str, object]]]
+    requests: Required[Sequence[DocsRequest]]
     writeControl: DocsWriteControl
 
 

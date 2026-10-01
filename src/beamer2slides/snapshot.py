@@ -19,7 +19,7 @@ from .emit_state import EmitState, SlideState, emit_state_json
 from .deck_pictures import WORKERS as PICTURE_WORKERS, LivePictures
 from .gapi import HttpError
 from .google_types import (AffineTransform, DriveFile, DriveService, FileBody, LayoutProperties, Page, PageElement,
-                           Presentation, BatchUpdateResponse, Size, SlideProperties, SlidesService, WriteControl,
+                           Presentation, BatchUpdateResponse, Size, SlideProperties, SlidesRequest, SlidesService, WriteControl,
                            all_elements, background_fill, background_url,
                            children, file_id, image_url, object_id, part, parts, presentation_id)
 from .gslides import EMU_PER_PT, execute
@@ -1218,9 +1218,9 @@ def tag(slide_key: str, element_key: str) -> str:
     return f"{TAG_PREFIX}{slide_key}/{element_key}"
 
 
-def tag_requests(base: JsonObject) -> list[JsonObject]:
+def tag_requests(base: JsonObject) -> list[SlidesRequest]:
     """Alt-text titles naming each element's main object, so copies made in Slides are recognised."""
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     for s in as_objects(base["slides"], "base.slides"):
         skey = as_str(s["key"], "base slide key")
         for el in as_objects(s["elements"], f"base slide {skey}: elements"):
@@ -1235,7 +1235,7 @@ def tag_requests(base: JsonObject) -> list[JsonObject]:
     return reqs
 
 
-def write_tags(slides: SlidesService, pid: str, reqs: list[JsonObject]) -> tuple[list[JsonObject], str | None]:
+def write_tags(slides: SlidesService, pid: str, reqs: list[SlidesRequest]) -> tuple[list[SlidesRequest], str | None]:
     """Sends tag requests; the ones the API refuses (some placeholders) are skipped. Returns the
     ones that landed and the deck's revision afterwards, which the batch's own answer says
     (`writeControl.requiredRevisionId`), so nothing has to read the deck again to learn it."""
@@ -1249,7 +1249,7 @@ def write_tags(slides: SlidesService, pid: str, reqs: list[JsonObject]) -> tuple
         return reqs, revision(execute(slides.presentations().batchUpdate(
             presentationId=pid, body={"requests": reqs})))
     except HttpError:
-        sent: list[JsonObject] = []
+        sent: list[SlidesRequest] = []
         at: str | None = None
         for r in reqs:
             try:
@@ -1260,7 +1260,7 @@ def write_tags(slides: SlidesService, pid: str, reqs: list[JsonObject]) -> tuple
         return sent, at
 
 
-def tagged(pres: Presentation, reqs: list[JsonObject], revision: str | None) -> Presentation:
+def tagged(pres: Presentation, reqs: list[SlidesRequest], revision: str | None) -> Presentation:
     """A presentations.get with the alt-text titles `reqs` have just written put into it, and the
     revision the batch answered with.
 
@@ -1271,10 +1271,10 @@ def tagged(pres: Presentation, reqs: list[JsonObject], revision: str | None) -> 
     left to overlap it with)."""
     titles: dict[str, str] = {}
     for r in reqs:
-        if "updatePageElementAltText" in r:
-            alt = as_object(r["updatePageElementAltText"], "updatePageElementAltText")
-            titles[as_str(alt["objectId"], "updatePageElementAltText.objectId")] = \
-                as_str(alt["title"], "updatePageElementAltText.title")
+        alt = r.get("updatePageElementAltText")
+        title = None if alt is None else alt.get("title")
+        if alt is not None and title is not None:
+            titles[alt["objectId"]] = title
     if not titles:
         return pres
     out = copy.deepcopy(pres)

@@ -7,15 +7,34 @@ thumbnail to out/probe_tabs.png.
 Usage: python tools/probe_tabs.py
 """
 
-from collections.abc import Mapping
 from pathlib import Path
 
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import object_id, presentation_id
-from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.google_types import Dimension, SlidesRequest, object_id, presentation_id
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 CASES = [(0, 40), (0, 80), (20, 120), (0, 10)]
+
+
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
+    """`gslides.text_box` as a request."""
+    return {"createShape": {
+        "objectId": object_id,
+        "shapeType": "TEXT_BOX",
+        "elementProperties": {
+            "pageObjectId": page_id,
+            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
+                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
+        },
+    }}
 
 
 def main() -> None:
@@ -24,14 +43,14 @@ def main() -> None:
     pid = presentation_id(pres)
     first = pres.get("slides", [])[0]
     page = object_id(first)
-    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
     text = "\n".join("22:\tclassify p" for _ in CASES)
-    reqs += [
+    reqs.extend([
         text_box("probe_tabs", page, 50, 50, 500, 200),
         {"insertText": {"objectId": "probe_tabs", "text": text}},
         {"updateTextStyle": {"objectId": "probe_tabs", "textRange": {"type": "ALL"},
                              "style": {"fontFamily": "Lato", "fontSize": pt(20)}, "fields": "fontFamily,fontSize"}},
-    ]
+    ])
     start = 0
     for first, indent in CASES:
         end = start + len("22:\tclassify p") + 1

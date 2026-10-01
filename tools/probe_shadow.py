@@ -20,7 +20,7 @@ from pptx.util import Emu, Pt
 
 from beamer2slides.gapi import media_upload
 from beamer2slides.google_auth import drive_service, slides_service
-from beamer2slides.google_types import PageElement, file_id, object_id, part
+from beamer2slides.google_types import PageElement, SlidesRequest, file_id, object_id, part
 from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 from beamer2slides.json_types import Json, JsonObject
 
@@ -71,7 +71,7 @@ def main() -> None:
         print(object_id(pe), shape.get("shapeType"), shape.get("placeholder"), json.dumps(shadow_of(pe)))
     box = next(pe for pe in elements if "placeholder" not in shape_of(pe))
     title = next(pe for pe in elements if "placeholder" in shape_of(pe))
-    reqs = [
+    reqs: list[SlidesRequest] = [
         {"duplicateObject": {"objectId": object_id(tpl), "objectIds": {
             object_id(tpl): "probe_slide2", object_id(box): "probe_tpl2", object_id(title): "probe_title2"}}},
         {"duplicateObject": {"objectId": "probe_tpl2", "objectIds": {"probe_tpl2": "probe_copy"}}},

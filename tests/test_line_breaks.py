@@ -7,6 +7,7 @@ import pytest
 
 from beamer2slides.classify import classify
 from beamer2slides.extract import extract, select_overlays
+from beamer2slides.google_types import slides_json
 from beamer2slides.ir import Deck, Paragraph, Slide, TextElement, element_json
 
 from .json_reads import jnum, jobj
@@ -72,7 +73,7 @@ def test_justified_paragraph_is_written_justified_with_its_first_line_indent():
     from beamer2slides.emit import FontMapper, text_box_requests
 
     el = next(e for e in texts(lines_deck()["slides"][1]) if paragraph_text(e["paragraphs"][0]).startswith("Local"))
-    reqs = text_box_requests(element_json(el), "s", "b", 1.5, FontMapper())
+    reqs = [slides_json(r) for r in text_box_requests(element_json(el), "s", "b", 1.5, FontMapper())]
     styles = [jobj(r, "updateParagraphStyle", "style") for r in reqs if "updateParagraphStyle" in r]
     assert any(s.get("alignment") == "JUSTIFIED" for s in styles)
     firsts = [jnum(s, "indentFirstLine", "magnitude") for s in styles if "indentFirstLine" in s]

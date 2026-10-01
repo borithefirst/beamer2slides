@@ -25,6 +25,7 @@ from beamer2slides.emit_tables import pptx_table_of, table_requests_of
 from beamer2slides.emit_text import text_box_requests_of
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.fonts import font_info
+from beamer2slides.google_types import SlidesRequest, part_json, slides_json, slides_request_kind
 from beamer2slides.ir import deck_json
 from beamer2slides.ir_types import Mark
 from beamer2slides.json_types import Json, JsonObject, as_str
@@ -76,12 +77,14 @@ def run_text(runs: Sequence[Mapping[str, Json]]) -> str:
 
 def text_requests(el: JsonObject, scale: float) -> list[JsonObject]:
     """The requests of a text element's box, planned from its record (`text_box_requests_of`)."""
-    return text_box_requests_of(text_of(el), "b2s_s001", "b2s_s001_t0", scale, FONTS, None, None, None, None, None)
+    return [slides_json(r) for r in
+            text_box_requests_of(text_of(el), "b2s_s001", "b2s_s001_t0", scale, FONTS, None, None, None, None, None)]
 
 
 def table_requests(el: JsonObject, slide_id: str, object_id: str, scale: float, imported: bool) -> list[JsonObject]:
     """The requests of a table element on a deck SLIDE_W wide, planned from its record (`table_requests_of`)."""
-    return table_requests_of(table_of(el), slide_id, object_id, scale, FONTS, imported, SLIDE_W / scale)
+    return [slides_json(r) for r in table_requests_of(table_of(el), slide_id, object_id, scale, FONTS, imported,
+                                                      SLIDE_W / scale)]
 
 
 def slides_w(runs: Sequence[JsonObject], scale: float) -> float:
@@ -147,9 +150,9 @@ class Emitted:
                 for r in reqs:
                     self.apply(r, where)
 
-    def apply(self, request: JsonObject, where: str) -> None:
-        (kind, value), = request.items()
-        body = jobj(value)
+    def apply(self, request: SlidesRequest, where: str) -> None:
+        kind = slides_request_kind(request)
+        body = jobj(slides_json(request), kind)
         self.check_values(body, where)
         if kind == "createSlide":
             self.create(jstr(body, "objectId"), None, where)
@@ -273,7 +276,7 @@ class Emitted:
 
     def part_requests(self, slide_id: str, element_id: str) -> list[JsonObject]:
         _, _, parts, _ = next(s for s in self.result["slides"] if s[0] == slide_id)
-        return [r for el, reqs in parts if el and el["id"] == element_id for r in reqs]
+        return [slides_json(r) for el, reqs in parts if el and el["id"] == element_id for r in reqs]
 
     def title_oids(self, slide: JsonObject) -> set[str]:
         slide_id = f"b2s_s{jint(slide, 'page'):03}"
@@ -320,7 +323,7 @@ def element_parts(parts: Sequence[emit.Part], element_ids: Sequence[str]) -> lis
     out: list[tuple[JsonObject, list[JsonObject], str]] = []
     for (el, reqs), oid in zip(parts[1:], element_ids):
         assert el is not None, f"{oid}: an element's part names no element"
-        out.append((el, reqs, oid))
+        out.append((el, [slides_json(r) for r in reqs], oid))
     return out
 
 
@@ -739,7 +742,7 @@ def text_run(text: str, size: float, **extra: Json) -> JsonObject:
 @pytest.mark.parametrize("text", ["7", "12", "123"])
 def test_number_box_is_centred_on_the_ball(text: str) -> None:
     number: JsonObject = {**text_run(text, 8.0), "center": [40.3, 120.7], "height": 9.5, "baseline": 123.4, "x0": 37.0}
-    reqs = number_box_requests(number, "b2s_s001", "b2s_s001_f3n", SCALE, FONTS)
+    reqs = [slides_json(r) for r in number_box_requests(number, "b2s_s001", "b2s_s001_f3n", SCALE, FONTS)]
     props = jobj(reqs[0], "createShape", "elementProperties")
     w, h = pt_of(jat(props, "size", "width")), pt_of(jat(props, "size", "height"))
     x0, y0, x1, y1 = box_of(jobj(props, "transform"), w, h)
@@ -909,7 +912,8 @@ def braced_phrase() -> JsonObject:
 
 def test_overlay_words_are_highlighted_and_the_brace_fits_them() -> None:
     slide = braced_phrase()
-    reqs, jobs = measure_jobs({"slides": [slide]}, SCALE, FONTS, unplaced, {0: "b2s_s000"})
+    planned, jobs = measure_jobs({"slides": [slide]}, SCALE, FONTS, unplaced, {0: "b2s_s000"})
+    reqs = [slides_json(r) for r in planned]
     (job,) = jobs
     (o,) = job.overlays
     text = emit.slides_texts(jobj(slide, "elements", 0), SCALE, FONTS)[0]
@@ -953,8 +957,8 @@ def test_measured_overlay_move_keeps_the_left_edge_under_a_relative_scale(decks:
     parts, _ = d.plan.slide_parts(slide, d.result["page_elements"], d.result["speaker_notes"],
                                   {jstr(pic, "id"): Place(dx=4.0, dy=0.0, sx=1.2)}, templates, None)
     oid = f"b2s_s{jint(slide, 'page'):03}_f{i}"
-    t, = [jobj(r, "updatePageElementTransform") for _, reqs in parts for r in reqs
-          if "updatePageElementTransform" in r and jobj(r, "updatePageElementTransform").get("objectId") == oid]
+    t, = [part_json(move, "updatePageElementTransform") for _, reqs in parts for r in reqs
+          if (move := r.get("updatePageElementTransform")) is not None and move["objectId"] == oid]
     assert t["applyMode"] == "RELATIVE"
     moved = [jnum(t, "transform", "scaleX") * v + jnum(t, "transform", "translateX") / EMU_PER_PT for v in (x0, x1)]
     assert moved == pytest.approx([x0 + 4.0, x0 + 4.0 + 1.2 * (x1 - x0)], abs=0.01)

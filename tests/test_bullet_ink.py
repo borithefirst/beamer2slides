@@ -11,6 +11,7 @@ from beamer2slides.emit import BULLET_SHAPES, FontMapper, bullet_level, bullet_s
 from beamer2slides.ir import ImageBullet, Label, NumberBullet
 from beamer2slides.json_types import JsonObject
 from beamer2slides.pdf.api import Box, PdfDocument, PdfPage
+from beamer2slides.google_types import slides_json
 
 from .json_reads import jnum, jobj, jstr
 
@@ -111,7 +112,7 @@ def test_a_bullet_is_no_larger_than_its_items_text() -> None:
         **item, "runs": [run_of("Our sensor weighs 12 g, a tenfold reduction in mass over the last generation.", BODY, REGULAR)],
         "lines": [{"baseline": 128.0, "x0": 35.0, "x1": 300.0}], "bullet": {**ball, "bbox": [22.0, 123.0, 28.0, 129.0]}}
     el: JsonObject = {"id": "t", "kind": "text", "role": "body", "paragraphs": [item, plain]}
-    reqs = text_box_requests(el, "s", "b", SCALE, FontMapper())
+    reqs = [slides_json(r) for r in text_box_requests(el, "s", "b", SCALE, FontMapper())]
     # the bullets' own style: the first request over each whole paragraph, with its colour
     whole = [jnum(r, "updateTextStyle", "style", "fontSize", "magnitude") for r in reqs
              if "updateTextStyle" in r and "foregroundColor" in jobj(r, "updateTextStyle", "style")

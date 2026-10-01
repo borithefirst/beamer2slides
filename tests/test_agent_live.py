@@ -35,7 +35,7 @@ from .test_slides_alignment import MAIN, google_unavailable
 
 if TYPE_CHECKING:
     from beamer2slides.agent import AgentContext, Result
-    from beamer2slides.google_types import SlidesService
+    from beamer2slides.google_types import SlidesRequest, SlidesService
 
 OUT = Path(os.environ.get("B2S_AGENT_LIVE_OUT", MAIN / "out" / "agent-live"))
 #: Small on purpose - this suite is about the seam, not about conversion fidelity.
@@ -157,7 +157,7 @@ def _untype(ref: str) -> None:
 
     api = slides_service(credentials())
     ident = _id(url)
-    requests = []
+    requests: list[SlidesRequest] = []
     for _, element, text in _texts(api, ident):
         typed = 0
         while text.startswith(TYPED, typed):                    # several runs may have stacked

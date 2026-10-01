@@ -16,6 +16,7 @@ from beamer2slides.emit_model import JsonMap, table_of, text_of
 from beamer2slides.emit_tables import TableLayout, pptx_table_of, table_layout_of
 from beamer2slides.emit_text import text_box_requests_of
 from beamer2slides.json_types import Json, JsonObject
+from beamer2slides.google_types import SlidesRequest, slides_json
 
 from .json_reads import jarr, jat, jint, jnum, jobj, jobjs, jstr
 from .test_emit_requests import FONTS, SCALE, column_widths, pt_of, slides_w, table_requests, text_requests, text_run
@@ -42,9 +43,15 @@ def text_element(*paragraphs: list[JsonObject], bullet: JsonObject | None = None
     return text_element_of(paragraphs, bullet)
 
 
-def styled(reqs: Sequence[JsonObject]) -> list[tuple[str, JsonObject]]:
+def typed_text_requests(el: JsonObject, scale: float) -> list[SlidesRequest]:
+    """`text_requests` as emit plans them, before they are JSON."""
+    return text_box_requests_of(text_of(el), "b2s_s001", "b2s_s001_t0", scale, FONTS, None, None, None, None, None)
+
+
+def styled(planned: Sequence[SlidesRequest]) -> list[tuple[str, JsonObject]]:
     """(the text each updateTextStyle range covers, its style), ranges read as Slides reads them:
     UTF-16 code units of the inserted text."""
+    reqs = [slides_json(r) for r in planned]
     text = next(jstr(r, "insertText", "text") for r in reqs if "insertText" in r)
     units = text.encode("utf-16-le", "surrogatepass")
     out: list[tuple[str, JsonObject]] = []
@@ -89,7 +96,7 @@ def test_a_run_among_others_keeps_their_size() -> None:
     prose = FONTS(text_run("Monitor", BODY), SCALE)[1]
     assert FONTS(authors, SCALE)[1] != prose  # alone: sized to its width
     el = text_element_of([[authors, title], [text_run("J. Park, W. Zhang, et al. ", BODY)]], None)
-    sizes = [(t, pt_of(s["fontSize"])) for t, s in styled(text_requests(el, SCALE))]
+    sizes = [(t, pt_of(s["fontSize"])) for t, s in styled(typed_text_requests(el, SCALE))]
     assert sizes[0] == ("J. Park, W. Zhang, et al. ", prose)
     assert sizes[-1] == ("J. Park, W. Zhang, et al. ", FONTS(authors, SCALE)[1])  # its own paragraph: as before
     assert jobj(el, "paragraphs", 0, "runs", 0) is authors and "in_sentence" not in authors  # the IR is left alone
@@ -109,11 +116,11 @@ def test_a_math_letter_among_words_in_a_google_font_takes_that_font() -> None:
     beta_run = text_run("β", BODY, font="CMMI10", family="sans", italic=True)
     el = text_element_of([[text_run("The rate ", BODY, font="ABCDEF+Calibri", family="sans"), beta_run,
                            text_run(" is fitted per cohort", BODY, font="ABCDEF+Calibri", family="sans")]], None)
-    beta = next(style for text, style in styled(text_requests(el, SCALE)) if text == "β")
+    beta = next(style for text, style in styled(typed_text_requests(el, SCALE)) if text == "β")
     assert jstr(beta, "weightedFontFamily", "fontFamily") == "Carlito" and beta["italic"] is True
     # Among TeX words it keeps the substitute, as before.
     el = text_element_of([[text_run("The rate ", BODY), beta_run, text_run(" is fitted", BODY)]], None)
-    beta = next(style for text, style in styled(text_requests(el, SCALE)) if text == "β")
+    beta = next(style for text, style in styled(typed_text_requests(el, SCALE)) if text == "β")
     assert beta["fontFamily"] == "Lato"
 
 
@@ -147,7 +154,7 @@ def column_list_of() -> JsonObject:
 def box_right(el: JsonMap, scale: float) -> float:
     """Where the box's text ends (Slides pt): its right edge less the inset."""
     reqs = text_box_requests_of(text_of(el), "b2s_s003", "b2s_s003_t1", scale, FONTS, None, None, None, None, None)
-    props = jobj(next(r for r in reqs if "createShape" in r), "createShape", "elementProperties")
+    props = jobj(next(slides_json(r) for r in reqs if "createShape" in r), "createShape", "elementProperties")
     return jnum(props, "transform", "translateX") / EMU_PER_PT + pt_of(jat(props, "size", "width")) - emit.PAD_X
 
 
@@ -289,7 +296,7 @@ def test_text_ranges_count_utf16_units() -> None:
     el = text_element_of([runs, [text_run("ends on ", BODY), text_run("𝔼", BODY, font="MSBM10", family="math")]],
                          {"kind": "glyph", "text": "•", "color": "#000000"})
     reqs = text_requests(el, SCALE)
-    got = styled(reqs)
+    got = styled(typed_text_requests(el, SCALE))
     want = [jstr(r, "text") for r in runs] + ["ends on ", "𝔼"]
     assert [t for t, _ in got] == want
     assert [s["baselineOffset"] for t, s in got if t == "⊤"] == ["SUPERSCRIPT"]

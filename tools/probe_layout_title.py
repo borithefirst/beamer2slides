@@ -8,17 +8,20 @@ out/probe_layout_title.png. Prints the API errors, if any.
 Usage: python tools/probe_layout_title.py
 """
 
-from collections.abc import Mapping
 from pathlib import Path
 
-from googleapiclient.errors import HttpError
-
+from beamer2slides.gapi import HttpError
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import PageElement, object_id, part, presentation_id
-from beamer2slides.gslides import EMU_PER_PT, execute, pt, save_thumbnail
+from beamer2slides.google_types import Dimension, PageElement, SlidesRequest, object_id, part, presentation_id
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 from beamer2slides.json_types import JsonObject, as_array
 
 OUT = Path(__file__).resolve().parents[1] / "out"
+
+
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
 
 
 def shape_of(e: PageElement) -> JsonObject:
@@ -35,7 +38,7 @@ def main() -> None:
                  if part(shape_of(e).get("placeholder"), "placeholder").get("type") == "TITLE")
     tid = object_id(title)
     print("layout title placeholder", tid, title.get("size"), title.get("transform"))
-    attempts: dict[str, Mapping[str, object]] = {
+    attempts: dict[str, SlidesRequest] = {
         "transform": {"updatePageElementTransform": {"objectId": tid, "applyMode": "ABSOLUTE", "transform": {
             "scaleX": 1, "scaleY": 1, "unit": "EMU", "translateX": 30 * EMU_PER_PT, "translateY": 10 * EMU_PER_PT}}},
         "text style ALL": {"updateTextStyle": {"objectId": tid, "textRange": {"type": "ALL"},

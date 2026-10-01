@@ -26,7 +26,7 @@ from . import faults, google_types, identity, merge, refit, snapshot
 from .deck_pictures import WORKERS as PICTURE_WORKERS, LivePictures
 from .gapi import HttpError, status_of
 from .google_types import DriveFile, DriveService, Page, PageElement, Presentation, SlidesService, object_id
-from .gslides import EMU_PER_PT, execute, pt
+from .gslides import EMU_PER_PT, execute, pt_json as pt
 from .json_types import (Json, JsonArray, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects,
                          as_optional_str, as_str)
 from .paths import out_root
@@ -1304,7 +1304,7 @@ def emitted_elements(slide: JsonObject, names: Sequence[str], scale: float, font
     groups: list[list[list[Json]]] = [[] for _ in ids]
     at = {f"@{name}": i for i, name in enumerate(names)}
     for _, rs in e["parts"][1 + len(ids):]:
-        for r in rs:
+        for r in map(google_types.slides_json, rs):
             group = as_object(r.get("groupObjects", {}), "groupObjects")
             gid = as_str(group.get("groupObjectId", ""), "groupObjectId")
             kind = "block" if gid.startswith(f"{sid}_blk") else "rules" if gid.startswith(f"{sid}_rules") else None
@@ -1406,9 +1406,9 @@ def _renamed(value: str, mapping: Sequence[tuple[str, str]]) -> str:
     return value
 
 
-def rename_requests(reqs: Sequence[JsonObject], mapping: Sequence[tuple[str, str]]) -> list[JsonObject]:
+def rename_requests(reqs: Sequence[google_types.SlidesRequest], mapping: Sequence[tuple[str, str]]) -> list[JsonObject]:
     """`rename` over a list of requests."""
-    return [as_object(rename(r, mapping), "request") for r in reqs]
+    return [as_object(rename(google_types.slides_json(r), mapping), "request") for r in reqs]
 
 
 def letterbox_fix(oid: str, box: Sequence[float], px: tuple[int, int]) -> JsonObject:
@@ -2727,7 +2727,7 @@ class Sync:
             # slide batch in flight together can undo each other's placeholder boxes (the last
             # commit wins), and these go out one after another.
             if self.theme_plan.requests:
-                reqs += [*self.theme_plan.requests, BREAK]
+                reqs += [*map(google_types.slides_json, self.theme_plan.requests), BREAK]
             self.cleanup_ids = list(dict.fromkeys([*self.cleanup_ids, *self.theme_plan.cleanup]))
         created: list[str] = []
         for w in work.slides:
@@ -2844,7 +2844,7 @@ class Sync:
                 # fills a table the .pptx brought, whose margins this one has.
                 rs = [delete_text_request(new_oid[i], {"rowIndex": r, "columnIndex": c}) for r, c in live.cells] + \
                      [named_step(step, new_oid[i]) for step in live.steps] + \
-                     [r for r in table_requests(self.plan.placed(source[i], n), sid, new_oid[i], self.scale,
+                     [google_types.slides_json(r) for r in table_requests(self.plan.placed(source[i], n), sid, new_oid[i], self.scale,
                                                 self.plan.fonts, imported=True, page_w=SLIDE_W / self.scale) if "updatePageElementsZOrder" not in r]
                 dx, dy = live.shift
                 if abs(dx) > 0.01 or abs(dy) > 0.01:  # (the source moved it)
@@ -2865,7 +2865,8 @@ class Sync:
                         out += [delete_text_request(as_str(v, "duplicateObject.objectIds"), None)
                                 for v in as_object(dup["objectIds"], "duplicateObject.objectIds").values()]
             reqs += out
-            objects[i] = list(dict.fromkeys([new_oid[i]] + [x for x in created_ids(rs) if x != new_oid[i]]))
+            objects[i] = list(dict.fromkeys([new_oid[i]] + [x for x in created_ids([google_types.slides_request(r, "a unit's request") for r in rs])
+                                                                   if x != new_oid[i]]))
         extras: list[JsonObject] = []
         for _, rs in parts[1 + len(element_ids):]:
             for r in rename_requests(rs, order):

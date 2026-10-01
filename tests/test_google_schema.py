@@ -205,21 +205,10 @@ EXEMPT: dict[tuple[str, str], str] = {
     ("DeleteTableRowRequest", "tableObjectId"): "None: as insertTableRows (sync.table_steps)",
     ("DeleteTableColumnRequest", "tableObjectId"): "None: as insertTableRows (sync.table_steps)",
     ("BatchUpdateBody", "requests"): "still any JSON request: emit's producers are converted in phase 2",
-    ("DocsBatchUpdateBody", "requests"): "still any JSON request, as the Slides body",
     ("FileBody", "appProperties"): "an appProperty set to None is removed (Drive's own convention)",
     ("ListFiles", "pageToken"): "None on the first page: the library leaves a None keyword out",
     ("ListComments", "pageToken"): "None on the first page, as files.list",
     ("ListRevisions", "pageToken"): "None on the first page, as files.list",
-    # Docs enums still `str`: as Literals they fail the gate at 15 producer sites in src/ and 3 in
-    # tests/ whose tables are `str` (doc_ir.TO_ALIGNMENT, TO_SCRIPT, TO_DASH_STYLE, NAMED_STYLE,
-    # KIND_STYLE; doc_world, fuzz_docs). Typing those tables is the producers' conversion.
-    ("DocsParagraphStyle", "namedStyleType"): "str: doc_merge.named_style and doc_ir.NAMED_STYLE are str",
-    ("DocsNamedStyle", "namedStyleType"): "str: doc_world's theme is keyed by str",
-    ("DocsParagraphStyle", "alignment"): "str: doc_ir.TO_ALIGNMENT is dict[Align, str]",
-    ("DocsTextStyle", "baselineOffset"): "str: doc_ir.TO_SCRIPT and doc_world.SCRIPT_API are str",
-    ("DocsParagraphBorder", "dashStyle"): "str: doc_ir.TO_DASH_STYLE is dict[str, str]",
-    ("DocsDateElementProperties", "dateFormat"):
-        "str: doc_world's read-back writes \"\", which Docs never answers (a finding, devtools/doc_world.py:1311)",
 }
 
 

@@ -18,13 +18,14 @@ from beamer2slides.emit_model import Template, TemplateKey
 from beamer2slides.ir import slide_json
 from beamer2slides.emit_pptx import shape_element_requests as real_shape_element_requests
 from beamer2slides.emit_pptx import shape_requests as real_shape_requests
+from beamer2slides.google_types import SlidesRequest
 from beamer2slides.ir_types import IRError, MarkedShape, ShapeElement
 from beamer2slides.json_types import Json, JsonObject
 
 from .json_reads import jint, jnums, jobjs, jstr
 from .test_classify import deck
 
-ShapePlanner = Callable[[ShapeElement | MarkedShape, str, str, float, Callable[[TemplateKey], Template]], list[JsonObject]]
+ShapePlanner = Callable[[ShapeElement | MarkedShape, str, str, float, Callable[[TemplateKey], Template]], list[SlidesRequest]]
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def raising_for(target: str) -> ShapePlanner:
     """`shape_element_requests` failing for the element `target` as a missing field would. (emit
     plans a parsed shape: `el` is its ir_types record.)"""
     def shape_element_requests(el: ShapeElement | MarkedShape, slide_id: str, object_id: str, scale: float,
-                               template_for: Callable[[TemplateKey], Template]) -> list[JsonObject]:
+                               template_for: Callable[[TemplateKey], Template]) -> list[SlidesRequest]:
         if el.id == target:
             raise KeyError("flip")
         return real_shape_element_requests(el, slide_id, object_id, scale, template_for)
@@ -66,9 +67,9 @@ def synthetic(*elements: JsonObject) -> JsonObject:
             "slides": [{"page": 0, "size": [360.0, 270.0], "elements": [e for e in elements]}]}
 
 
-def element_parts(planned: emit.OfflinePlan) -> dict[tuple[int, str], tuple[str, list[JsonObject]]]:
+def element_parts(planned: emit.OfflinePlan) -> dict[tuple[int, str], tuple[str, list[SlidesRequest]]]:
     """(page, element id) -> (object id, the element's requests) of a plan_offline result."""
-    out: dict[tuple[int, str], tuple[str, list[JsonObject]]] = {}
+    out: dict[tuple[int, str], tuple[str, list[SlidesRequest]]] = {}
     for _, page, parts, ids in planned["slides"]:
         elements = [(el, reqs) for el, reqs in parts if el is not None]
         for (el, reqs), oid in zip(elements, ids):
@@ -173,7 +174,7 @@ def test_the_same_element_strict_is_the_same_error(monkeypatch: pytest.MonkeyPat
         emit.plan_offline(synthetic(adopted_custom()))
 
 
-def shape_requests_of(el: JsonObject, oid: str) -> list[JsonObject]:
+def shape_requests_of(el: JsonObject, oid: str) -> list[SlidesRequest]:
     return real_shape_requests(el, "b2s_s000", oid, emit.SLIDE_W / 360.0, None)
 
 

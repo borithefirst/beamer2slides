@@ -8,15 +8,14 @@ row without symbols, is N advances.
 Usage: python tools/probe_symbols.py   (prints a dict for emit.SYMBOL_ADVANCE_EM)
 """
 
-from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import object_id, presentation_id
-from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.google_types import Dimension, SlidesRequest, object_id, presentation_id
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 SYMBOLS = list("=+−<>≤≥×·/∑∏∫∈∉⊂⊆∪∩→←⇒⇔≈≠±∞ℝℕℤℚℂαβγδεθλμπσφωΔΣΩ∂∇′∀∃∧∨⊥∥∘…") + [" ", "x", "2"]
@@ -26,24 +25,44 @@ ROW = 24
 PER_COLUMN = 16
 
 
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
+    """`gslides.text_box` as a request."""
+    return {"createShape": {
+        "objectId": object_id,
+        "shapeType": "TEXT_BOX",
+        "elementProperties": {
+            "pageObjectId": page_id,
+            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
+                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
+        },
+    }}
+
+
 def main() -> None:
     slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe symbols"}))
     pid = presentation_id(pres)
     first = pres.get("slides", [])[0]
     page = object_id(first)
-    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
     rows = [""] + SYMBOLS  # the first row is the reference
     boxes = []
     for i, sym in enumerate(rows):
         oid = f"sym_{i}"
         x, y = 10 + (i // PER_COLUMN) * 178, 5 + (i % PER_COLUMN) * ROW
-        reqs += [
+        reqs.extend([
             text_box(oid, page, x, y, 175, ROW),
             {"insertText": {"objectId": oid, "text": "|  " + sym * N + "  |"}},
             {"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "fields": "fontFamily,fontSize",
                                  "style": {"fontFamily": "Lato", "fontSize": pt(SIZE)}}},
-        ]
+        ])
         boxes.append((sym, x, y))
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     path = OUT / "probe_symbols.png"

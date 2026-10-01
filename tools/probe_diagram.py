@@ -13,7 +13,6 @@ Usage: python tools/probe_diagram.py
 
 import io
 import json
-from collections.abc import Mapping
 from pathlib import Path
 
 from lxml import etree
@@ -23,12 +22,17 @@ from pptx.util import Emu, Pt
 
 from beamer2slides.gapi import media_upload
 from beamer2slides.google_auth import drive_service, slides_service
-from beamer2slides.google_types import file_id, object_id, part
-from beamer2slides.gslides import EMU_PER_PT, execute, pt, save_thumbnail
+from beamer2slides.google_types import Dimension, SlidesRequest, file_id, object_id, part
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
 
 
 def main() -> None:
@@ -54,7 +58,7 @@ def main() -> None:
     page = pres.get("slides", [])[0]
     rect_tpl, oval_tpl = [object_id(e) for e in page.get("pageElements", [])]
 
-    def node(tpl: str, oid: str, x: float, y: float, w: float, h: float, text: str, size: float) -> list[Mapping[str, object]]:
+    def node(tpl: str, oid: str, x: float, y: float, w: float, h: float, text: str, size: float) -> list[SlidesRequest]:
         return [
             {"duplicateObject": {"objectId": tpl, "objectIds": {tpl: oid}}},
             {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE", "transform": {
@@ -70,9 +74,9 @@ def main() -> None:
         ]
 
     # "Result" at 22 pt Lato is ~62 pt wide; TikZ inner sep adds ~13 pt: a 75 pt node.
-    reqs = node(rect_tpl, "node_a", 60, 80, 75, 34, "Result", 22) + node(oval_tpl, "node_b", 300, 150, 60, 60, "B", 22) \
-        + node(rect_tpl, "node_c", 60, 250, 140, 34, "Convert all", 22)
-    reqs += [
+    reqs: list[SlidesRequest] = node(rect_tpl, "node_a", 60, 80, 75, 34, "Result", 22) \
+        + node(oval_tpl, "node_b", 300, 150, 60, 60, "B", 22) + node(rect_tpl, "node_c", 60, 250, 140, 34, "Convert all", 22)
+    reqs.extend([
         {"createLine": {"objectId": "line_ab", "lineCategory": "STRAIGHT", "elementProperties": {
             "pageObjectId": object_id(page), "size": {"width": {"magnitude": 165 * EMU_PER_PT, "unit": "EMU"},
                                                          "height": {"magnitude": 83 * EMU_PER_PT, "unit": "EMU"}},
@@ -82,7 +86,7 @@ def main() -> None:
                                                      "startConnection": {"connectedObjectId": "node_a", "connectionSiteIndex": 3},
                                                      "endConnection": {"connectedObjectId": "node_b", "connectionSiteIndex": 2}}}},
         {"deleteObject": {"objectId": rect_tpl}}, {"deleteObject": {"objectId": oval_tpl}},
-    ]
+    ])
     try:
         execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     except Exception as e:

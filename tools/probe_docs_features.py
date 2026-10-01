@@ -17,20 +17,32 @@ import argparse
 import io
 import json
 import sys
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal, Protocol, TypedDict, TypeVar, runtime_checkable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from beamer2slides.gapi import media_upload  # noqa: E402
 from beamer2slides.google_auth import credentials, docs_service, drive_service  # noqa: E402
 from beamer2slides.google_types import (  # noqa: E402
+    CreateFooterRequest,
+    CreateFootnoteRequest,
+    CreateHeaderRequest,
+    CreateParagraphBulletsRequest,
+    DocsBatchUpdateResponse,
+    DocsLocation,
     DocsParagraph,
+    DocsParagraphStyle,
+    DocsPersonProperties,
+    DocsRangeWrite,
     DocsService,
     DocsStructuralElement,
     DriveService,
+    InsertPageBreakRequest,
+    InsertSectionBreakRequest,
     Request,
+    UpdateDocumentStyleRequest,
+    UpdateTextStyleRequest,
     file_id,
     json_object,
     part,
@@ -156,6 +168,94 @@ PAGE_SETUP = {
 }
 
 
+# What phase two sends. Most of it is a request google_types lists; the rest asks on purpose
+# what Docs does with a field or a request its schema does not have (a refusal is an answer),
+# so the batch goes through a client typed for these, after a runtime check (`probing`).
+
+
+class ProbeParagraphStyle(DocsParagraphStyle, total=False):
+    """Two fields of Docs' ParagraphStyle that google_types does not model yet."""
+    keepLinesTogether: bool
+    avoidWidowAndOrphan: bool
+
+
+class ProbeUpdateParagraphStyle(TypedDict):
+    range: DocsRangeWrite
+    paragraphStyle: ProbeParagraphStyle
+    fields: str
+
+
+class ProbeDate(TypedDict):
+    year: int
+    month: int
+    day: int
+
+
+class ProbeInsertDate(TypedDict):
+    """Not the schema's: `date` is no field of InsertDateRequest (it takes `dateElementProperties`)."""
+    location: DocsLocation
+    date: ProbeDate
+
+
+class ProbePerson(TypedDict):
+    personProperties: DocsPersonProperties
+
+
+class ProbeInsertPerson(TypedDict):
+    """Not the schema's: InsertPersonRequest takes `personProperties` itself, not under `person`."""
+    location: DocsLocation
+    person: ProbePerson
+
+
+class ProbeInsertRichLink(TypedDict):
+    """Not the schema's: InsertRichLinkRequest takes `richLinkProperties`, not a bare `uri`."""
+    location: DocsLocation
+    uri: str
+
+
+class ProbeInsertTableOfContents(TypedDict):
+    """No request of the v1 API at all."""
+    location: DocsLocation
+
+
+class ProbeRequest(TypedDict, total=False):
+    """One request of phase two: exactly one of these is set."""
+    updateDocumentStyle: UpdateDocumentStyleRequest
+    updateTextStyle: UpdateTextStyleRequest
+    updateParagraphStyle: ProbeUpdateParagraphStyle
+    createHeader: CreateHeaderRequest
+    createFooter: CreateFooterRequest
+    createFootnote: CreateFootnoteRequest
+    insertPageBreak: InsertPageBreakRequest
+    insertSectionBreak: InsertSectionBreakRequest
+    insertDate: ProbeInsertDate
+    insertPerson: ProbeInsertPerson
+    insertRichLink: ProbeInsertRichLink
+    createParagraphBullets: CreateParagraphBulletsRequest
+    insertTableOfContents: ProbeInsertTableOfContents
+
+
+class ProbeBody(TypedDict):
+    requests: list[ProbeRequest]
+
+
+class ProbeDocuments(Protocol):
+    def batchUpdate(self, *, documentId: str, body: ProbeBody) -> Request[DocsBatchUpdateResponse]: ...
+
+
+@runtime_checkable
+class ProbeDocs(Protocol):
+    """The Docs client, as far as phase two's batches call it."""
+
+    def documents(self) -> ProbeDocuments: ...
+
+
+def probing(docs: object) -> ProbeDocs:
+    if not isinstance(docs, ProbeDocs):
+        raise TypeError(f"{type(docs).__name__} is no Docs client")
+    return docs
+
+
 def once(request: Request[T]) -> T:
     """A write, tried once: a lost answer may have been applied (a second create is a second file)."""
     return execute_with(request, retries=1, timeout=None)
@@ -211,9 +311,10 @@ def phase_two(docs: DocsService, doc_id: str) -> None:
     target = next((el for el in content if paragraph_text(el).startswith("T01")), None)
     if target is None:
         raise ValueError("the document holds no paragraph labelled T01")
-    rng = {"startIndex": index(target, "startIndex"), "endIndex": index(target, "endIndex") - 1}
+    rng: DocsRangeWrite = {"startIndex": index(target, "startIndex"), "endIndex": index(target, "endIndex") - 1}
+    docs_probed = probing(docs)
 
-    attempts: list[tuple[str, Mapping[str, object]]] = [
+    attempts: list[tuple[str, ProbeRequest]] = [
         ("page size + margins", {"updateDocumentStyle": {
             "documentStyle": {"pageSize": {"width": {"magnitude": 842, "unit": "PT"},
                                            "height": {"magnitude": 595, "unit": "PT"}},
@@ -260,7 +361,7 @@ def phase_two(docs: DocsService, doc_id: str) -> None:
     ]
     for name, request in attempts:
         try:
-            once(docs.documents().batchUpdate(documentId=doc_id, body={"requests": [request]}))
+            once(docs_probed.documents().batchUpdate(documentId=doc_id, body={"requests": [request]}))
             print(f"  {name:22s} OK")
         except Exception as err:  # HttpError and anything the client raises first
             reason = getattr(getattr(err, "resp", None), "reason", "") or str(err)

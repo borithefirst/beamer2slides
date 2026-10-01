@@ -17,8 +17,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from beamer2slides.arrays import Gray
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import object_id, part, parts, presentation_id
-from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.google_types import Dimension, SlidesRequest, object_id, part, parts, presentation_id
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_array, as_object
 
 Box = tuple[float, float, float, float]
@@ -34,6 +34,26 @@ ROWS = [  # (Slides family, weight)
     ("Google Sans Text", 700), ("Google Sans Mono", 400), ("Google Sans Flex", 400), ("Google Sans Code", 400),
 ]
 ROW_H = 48
+
+
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
+    """`gslides.text_box` as a request."""
+    return {"createShape": {
+        "objectId": object_id,
+        "shapeType": "TEXT_BOX",
+        "elementProperties": {
+            "pageObjectId": page_id,
+            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
+                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
+        },
+    }}
 
 
 def ink(gray: Gray) -> Box | None:
@@ -73,13 +93,13 @@ def slides_side(refresh: bool) -> JsonObject:
     pres = execute(slides.presentations().create(body={"title": "b2s probe google sans"}))
     pid = presentation_id(pres)
     first = object_id(pres.get("slides", [])[0])
-    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": first}}]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": first}}]
     for s, key in enumerate(TEXTS):
         page = f"page_{key}"
         reqs.append({"createSlide": {"objectId": page, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
         for r, (family, weight) in enumerate(ROWS):
             oid = f"t_{key}_{r}"
-            reqs += [
+            reqs.extend([
                 text_box(oid, page, 10, 4 + r * ROW_H, 700, ROW_H),
                 {"insertText": {"objectId": oid, "text": TEXTS[key]}},
                 {"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"},
@@ -87,7 +107,7 @@ def slides_side(refresh: bool) -> JsonObject:
                                      "style": {"weightedFontFamily": {"fontFamily": family, "weight": weight},
                                                "fontSize": pt(SIZE),
                                                "foregroundColor": {"opaqueColor": {"rgbColor": {}}}}}},
-            ]
+            ])
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     pres = execute(slides.presentations().get(presentationId=pid))
     result: JsonObject = {"presentation": pid}

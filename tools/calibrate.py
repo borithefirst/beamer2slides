@@ -15,7 +15,6 @@ import shutil
 import statistics
 import subprocess
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
@@ -24,8 +23,8 @@ from beamer2slides import ink
 from beamer2slides.extract import shown_spans
 from beamer2slides.pdf import Document
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import Presentation, object_id, presentation_id
-from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.google_types import Dimension, Presentation, SlidesRequest, object_id, presentation_id
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 from beamer2slides.json_types import as_array, as_object, as_str
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -167,8 +166,28 @@ def page_width_pt(pres: Presentation) -> float:
 
 # ---------------------------------------------------------------- build
 
+def pt(v: float) -> Dimension:
+    """`gslides.pt` as a request's dimension."""
+    return {"magnitude": v, "unit": "PT"}
+
+
+def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
+    """`gslides.text_box` as a request."""
+    return {"createShape": {
+        "objectId": object_id,
+        "shapeType": "TEXT_BOX",
+        "elementProperties": {
+            "pageObjectId": page_id,
+            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
+                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
+        },
+    }}
+
+
 def styled_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float, text: str, font: str,
-               size: float, *, bold: bool, italic: bool) -> list[Mapping[str, object]]:
+               size: float, *, bold: bool, italic: bool) -> list[SlidesRequest]:
     return [
         text_box(object_id, page_id, x, y, w, h),
         {"insertText": {"objectId": object_id, "text": text}},
@@ -195,7 +214,7 @@ def build() -> None:
 
     slide_ids: list[str] = []
     for fi, font in enumerate(FONTS):
-        reqs: list[Mapping[str, object]] = []
+        reqs: list[SlidesRequest] = []
         sid = f"cal_f{fi}_w"
         slide_ids.append(sid)
         reqs.append({"createSlide": {"objectId": sid, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})

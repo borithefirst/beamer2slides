@@ -10,15 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .emit_metrics import SLIDE_W, rgb, xml_text
+from .emit_metrics import SLIDE_W, xml_text
 from .emit_model import (
     JsonMap, PptxTable, SetShape, Template, TemplateKey, set_shape, shape_measures_of, shape_of, template_of,
 )
 from .ir_types import Box, MarkedShape, ShapeElement
-from .json_types import JsonObject
 from .gapi import HttpError, message_of
-from .google_types import SlidesService
-from .gslides import EMU_PER_PT, emu, execute, pt
+from .google_types import Outline, SlidesRequest, SlidesService, shape_type
+from .gslides import EMU_PER_PT, emu, execute, pt, rgb_color
 
 if TYPE_CHECKING:
     from pptx.oxml.xmlchemy import BaseOxmlElement
@@ -359,14 +358,14 @@ def build_pptx(page_w: float, page_h: float, keys: Sequence[TemplateKey], pages:
 
 
 def shape_requests(el: JsonMap, slide_id: str, object_id: str, scale: float,
-                   template: JsonMap | None) -> list[JsonObject]:
+                   template: JsonMap | None) -> list[SlidesRequest]:
     """`shape_requests_of` a shape dict (a diagram's node, the tests' panels), with a template
     dict ({"id", "w", "h"})."""
     return shape_requests_of(shape_of(el), slide_id, object_id, scale, template_of(template) if template else None)
 
 
 def shape_element_requests(el: ShapeElement | MarkedShape, slide_id: str, object_id: str, scale: float,
-                           template_for: Callable[[TemplateKey], Template]) -> list[JsonObject]:
+                           template_for: Callable[[TemplateKey], Template]) -> list[SlidesRequest]:
     """The requests of a parsed shape (a panel, rule or marked shape): a duplicate of the slide's
     template shape its key names (`template_for`), where it has one."""
     shape = set_shape(el)
@@ -375,7 +374,7 @@ def shape_element_requests(el: ShapeElement | MarkedShape, slide_id: str, object
 
 
 def shape_requests_of(el: SetShape, slide_id: str, object_id: str, scale: float,
-                      template: Template | None) -> list[JsonObject]:
+                      template: Template | None) -> list[SlidesRequest]:
     """A filled shape, outlined only with the frame it carries (`outline`). With a template (a
     template shape on this slide and its size in pt) the shape is a duplicate of it, else a new shape."""
     x0, y0, x1, y1 = (v * scale for v in el.bbox)
@@ -383,7 +382,7 @@ def shape_requests_of(el: SetShape, slide_id: str, object_id: str, scale: float,
     # (a 180° rotation), which moves the origin to the opposite corner.
     flip = -1 if el.flip else 1
     tx, ty = (x1, y1) if el.flip else (x0, y0)
-    reqs: list[JsonObject]
+    reqs: list[SlidesRequest]
     if template is not None:
         reqs = [
             {"duplicateObject": {"objectId": template.id, "objectIds": {template.id: object_id}}},
@@ -393,8 +392,10 @@ def shape_requests_of(el: SetShape, slide_id: str, object_id: str, scale: float,
             {"updatePageElementsZOrder": {"pageElementObjectIds": [object_id], "operation": "BRING_TO_FRONT"}},
         ]
     else:
+        # (a producer's "custom" or "line" is no Slides shape: createShape would be refused with
+        # its whole batch, so planning it fails here and `DeckPlan.contain` makes it a picture)
         reqs = [{"createShape": {
-            "objectId": object_id, "shapeType": el.shape,
+            "objectId": object_id, "shapeType": shape_type(el.shape, f"shape {object_id}"),
             "elementProperties": {
                 "pageObjectId": slide_id,
                 "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
@@ -406,15 +407,15 @@ def shape_requests_of(el: SetShape, slide_id: str, object_id: str, scale: float,
     # frame=single) carries its frame as the outline, on the frame's centre line; the rules
     # themselves left the background with the panel.
     frame = el.outline
-    outline: JsonObject = {"outlineFill": {"solidFill": {"color": rgb(frame.color)["opaqueColor"]}},
-                           "weight": pt(round(max(0.25, frame.width * scale), 2)), "propertyState": "RENDERED"} \
+    outline: Outline = {"outlineFill": {"solidFill": {"color": rgb_color(frame.color)}},
+                        "weight": pt(round(max(0.25, frame.width * scale), 2)), "propertyState": "RENDERED"} \
         if frame is not None else {"propertyState": "NOT_RENDERED"}
     outline_fields = "outline.outlineFill.solidFill.color,outline.weight,outline.propertyState" if frame is not None \
         else "outline.propertyState"
     return [*reqs,
         {"updateShapeProperties": {
             "objectId": object_id,
-            "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb(el.fill)["opaqueColor"],
+            "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb_color(el.fill),
                                                                       "alpha": el.opacity}},
                                 "outline": outline},
             "fields": "shapeBackgroundFill.solidFill.color,shapeBackgroundFill.solidFill.alpha," + outline_fields,
@@ -426,5 +427,5 @@ def api_error(e: HttpError) -> str:
     return message_of(e)
 
 
-def batch(slides: SlidesService, pid: str, reqs: Sequence[Mapping[str, object]]) -> None:
+def batch(slides: SlidesService, pid: str, reqs: Sequence[SlidesRequest]) -> None:
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))

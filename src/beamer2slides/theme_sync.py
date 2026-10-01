@@ -35,8 +35,9 @@ from typing import TYPE_CHECKING, Literal, Union
 
 from . import identity, snapshot
 from .emit_model import dict_of, maps_of, objects_of
-from .google_types import (LayoutProperties, Page, PageElement, Presentation, SlideProperties, as_json, background_url,
-                           image_url, object_id, part, parts)
+from .google_types import (LayoutProperties, Page, PageElement, Presentation, SlideProperties, SlidesRequest, as_json,
+                           background_url, image_url, object_id, part, parts, slides_paragraph_style, slides_text_style,
+                           solid_fill)
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from .merge import conflict_entry
 from .sync_model import JsonMap, ObjectId, ReadBack
@@ -368,7 +369,7 @@ class ThemeMerge:
     serves now. `written`: what went out, for `new_record`. `pending`: placeholder id -> the style
     written, `TEXTS_FIELD` -> the texts' digest (an interrupted run's). `pinned`: slide objects
     given their inherited style explicitly (`inherited_pins`). The containers fill while planning."""
-    requests: list[JsonObject]
+    requests: list[SlidesRequest]
     cleanup: list[str]
     stage: dict[str, Stage | None]
     applied: list[JsonObject]
@@ -777,7 +778,8 @@ def plan(base: JsonMap, side: ThemeSide, ours: ThemeOurs, pres: Presentation, to
                 from .sync import api_colour
                 out.requests.append({"updatePageProperties": {
                     "objectId": mid, "fields": "pageBackgroundFill.solidFill.color",
-                    "pageProperties": {"pageBackgroundFill": {"solidFill": {"color": api_colour(side.fill[6:])}}}}})
+                    "pageProperties": {"pageBackgroundFill": {"solidFill": solid_fill(
+                        {"color": api_colour(side.fill[6:])}, "the new master fill")}}}})
             else:
                 if side.fill_file is None:
                     raise ValueError(f"the new master fill {side.fill} has no file")
@@ -926,7 +928,7 @@ def plan_texts(rec: ThemeRecord, side: ThemeSide, ours: ThemeOurs, pres: Present
         out.conflicts.append(entry)
         return
     from .emit import LAYOUT_TEXT_PREFIX, text_box_requests
-    reqs: list[JsonObject] = [{"deleteObject": {"objectId": oid}} for oid in now]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": oid}} for oid in now]
     for li, layout in enumerate(pres.get("layouts", [])):
         for ti, el in enumerate(new):
             reqs += text_box_requests(el, object_id(layout), f"{LAYOUT_TEXT_PREFIX}{li}_{ti}", ours.scale, ours.fonts)
@@ -974,7 +976,7 @@ def placeholder_chain(e: PageElement, placeholders: dict[str, PageElement]) -> l
 
 
 def inherited_pins(pres: Presentation, restyled: Mapping[str, JsonMap],
-                   slide_ids: Collection[str | None]) -> tuple[list[JsonObject], list[str]]:
+                   slide_ids: Collection[str | None]) -> tuple[list[SlidesRequest], list[str]]:
     """Requests that write onto the converter's slides, explicitly, the style their placeholder
     text now takes from a master or layout placeholder this sync restyles (`restyled`: object id
     -> the spec written), and the ids of the objects they touch.
@@ -991,7 +993,7 @@ def inherited_pins(pres: Presentation, restyled: Mapping[str, JsonMap],
         return [], []
     placeholders = {object_id(e): e for p in pres.get("masters", []) + pres.get("layouts", [])
                     for e in p.get("pageElements", []) if placeholder(e)}
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     touched: list[str] = []
     for slide in pres.get("slides", []):
         if slide.get("objectId") not in slide_ids:
@@ -1018,7 +1020,8 @@ def inherited_pins(pres: Presentation, restyled: Mapping[str, JsonMap],
                         value = _inherited(chain, level, "alignment", True)
                         if value:
                             reqs.append({"updateParagraphStyle": {
-                                "objectId": oid, "fields": "alignment", "style": {"alignment": value},
+                                "objectId": oid, "fields": "alignment",
+                                "style": slides_paragraph_style({"alignment": value}, f"{oid}: the inherited alignment"),
                                 "textRange": {"type": "FIXED_RANGE", "startIndex": a, "endIndex": b}}})
                 elif "textRun" in te and b > a:
                     style = part(part(te["textRun"], "textRun").get("style"), "textRun.style")
@@ -1026,7 +1029,8 @@ def inherited_pins(pres: Presentation, restyled: Mapping[str, JsonMap],
                                        for v in [_inherited(chain, level, f, False)] if v is not None}
                     if pin:
                         reqs.append({"updateTextStyle": {
-                            "objectId": oid, "fields": ",".join(pin), "style": pin,
+                            "objectId": oid, "fields": ",".join(pin),
+                            "style": slides_text_style(pin, f"{oid}: the inherited text style"),
                             "textRange": {"type": "FIXED_RANGE", "startIndex": a, "endIndex": b}}})
             if len(reqs) > before:
                 touched.append(oid)

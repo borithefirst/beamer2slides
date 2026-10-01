@@ -7,9 +7,10 @@ from dataclasses import dataclass
 
 from beamer2slides.emit import SLIDE_W, plan_offline
 from beamer2slides.emit_model import ObjectMap
+from beamer2slides.google_types import SlidesRange, SlidesRequest, part_json, slides_request_kind
 from beamer2slides.json_types import Json, JsonObject
 
-from .json_reads import jint, jnum, jnums, jobj, jobjs, jstr, jstrs
+from .json_reads import jnum, jnums, jobj, jobjs, jstr
 
 GLYPHS = {"BULLET_DISC_CIRCLE_SQUARE": "●", "BULLET_ARROW3D_CIRCLE_SQUARE": "➢", "BULLET_CHECKBOX": "❏",
           "BULLET_STAR_CIRCLE_SQUARE": "★", "BULLET_DIAMOND_CIRCLE_SQUARE": "◆",
@@ -74,11 +75,11 @@ class Text:
         self.styles[a:b] = []
         self.marks[a:b] = []
 
-    def ranges(self, rng: JsonObject) -> tuple[int, int]:
+    def ranges(self, rng: SlidesRange | None) -> tuple[int, int]:
+        assert rng is not None, "a text request with no textRange"
         if rng.get("type") == "ALL":
             return 0, len(self.chars)
-        return (jint(rng, "startIndex") if "startIndex" in rng else 0,
-                jint(rng, "endIndex") if "endIndex" in rng else len(self.chars))
+        return rng.get("startIndex", 0), rng.get("endIndex", len(self.chars))
 
     def json(self) -> JsonObject:
         out: list[Json] = []
@@ -110,10 +111,13 @@ def presentation_of(deck: ObjectMap) -> JsonObject:
     texts: dict[str, Text] = {}  # the text of each object that holds one, by objectId
     placeholder_type: dict[str, str] = {}
     for req in plan["copies"]:
-        for src, new in jobj(req, "duplicateObject", "objectIds").items():
+        dup = req.get("duplicateObject")
+        ids = None if dup is None else dup.get("objectIds")
+        assert ids is not None, f"a copy that is no duplicateObject with objectIds: {req}"
+        for src, new in ids.items():
             for kind in ("CENTERED_TITLE", "SUBTITLE", "TITLE"):
                 if src.endswith("_" + kind):
-                    placeholder_type[jstr(new)] = kind
+                    placeholder_type[new] = kind
     for slide_id, page, parts, _element_ids in plan["slides"]:
         elements: list[Json] = []
         for pe in plan["page_elements"].get(slide_id, []):
@@ -184,109 +188,130 @@ def find(elements: list[Json], oid: str) -> tuple[list[Json], int] | None:
     return None
 
 
-def apply(r: JsonObject, elements: list[Json], objects: dict[str, JsonObject], texts: dict[str, Text], notes: Text,
+def text_of(oid: str, texts: dict[str, Text], notes: Text, slide_id: str) -> Text | None:
+    """The text a text request names: the slide's speaker notes, a shape's, or None (not modelled)."""
+    return notes if oid == f"{slide_id}_notes" else texts.get(oid)
+
+
+def apply(r: SlidesRequest, elements: list[Json], objects: dict[str, JsonObject], texts: dict[str, Text], notes: Text,
           slide_id: str) -> None:
-    (name, request), = r.items()
-    body = jobj(request)
-    if name == "createShape":
-        props = jobj(body, "elementProperties")
-        oid = jstr(body, "objectId")
-        obj: JsonObject = {"objectId": oid, "size": copy.deepcopy(props["size"]),
-                           "transform": copy.deepcopy(props["transform"]),
-                           "shape": {"shapeType": body["shapeType"], "shapeProperties": {}}}
+    slides_request_kind(r)   # (exactly one request in each: Google refuses anything else)
+    if (made := r.get("createShape")) is not None:
+        props = made.get("elementProperties")
+        size = None if props is None else props.get("size")
+        transform = None if props is None else props.get("transform")
+        oid = made.get("objectId")
+        assert oid is not None and size is not None and transform is not None, f"a shape made with no id or place: {r}"
+        obj: JsonObject = {"objectId": oid, "size": part_json(copy.deepcopy(size), "createShape.size"),
+                           "transform": part_json(copy.deepcopy(transform), "createShape.transform"),
+                           "shape": {"shapeType": made["shapeType"], "shapeProperties": {}}}
         objects[oid] = obj
         texts[oid] = Text()
         elements.append(obj)
-    elif name == "updatePageElementTransform":
-        moved = objects.get(jstr(body, "objectId"))
+    elif (move := r.get("updatePageElementTransform")) is not None:
+        moved = objects.get(move["objectId"])
         if moved is None:
             return
-        t = jobj(body, "transform")
-        if body["applyMode"] == "ABSOLUTE":
-            moved["transform"] = copy.deepcopy(t)
+        t = move["transform"]
+        if move["applyMode"] == "ABSOLUTE":
+            moved["transform"] = part_json(copy.deepcopy(t), "updatePageElementTransform.transform")
         else:
             mine = jobj(moved, "transform")
-            mine["translateX"] = jnum(mine.get("translateX", 0)) + jnum(t.get("translateX", 0))
-            mine["translateY"] = jnum(mine.get("translateY", 0)) + jnum(t.get("translateY", 0))
-    elif name == "updateShapeProperties":
-        shaped = objects.get(jstr(body, "objectId"))
+            mine["translateX"] = jnum(mine.get("translateX", 0)) + t.get("translateX", 0)
+            mine["translateY"] = jnum(mine.get("translateY", 0)) + t.get("translateY", 0)
+    elif (shaped_by := r.get("updateShapeProperties")) is not None:
+        shaped = objects.get(shaped_by["objectId"])
         if shaped is not None:
             none_yet: JsonObject = {}
             jobj(jobj(shaped, "shape").setdefault("shapeProperties", none_yet)).update(
-                copy.deepcopy(jobj(body, "shapeProperties")))
-    elif name in ("insertText", "deleteText", "updateTextStyle", "createParagraphBullets", "updateParagraphStyle"):
-        oid = jstr(body, "objectId")
-        text = notes if oid == f"{slide_id}_notes" else texts.get(oid)
+                part_json(copy.deepcopy(shaped_by["shapeProperties"]), "updateShapeProperties.shapeProperties"))
+    elif (insert := r.get("insertText")) is not None:
+        text = text_of(insert["objectId"], texts, notes, slide_id)
         if text is None:
             return
-        if name == "insertText":
-            i = jint(body, "insertionIndex") if "insertionIndex" in body else 0
-            if i > len(text.chars):
-                raise ValueError(f"Invalid insertText: The insertion index ({i}) should not be greater "
-                                 f"than the existing text length ({len(text.chars)}).")
-            text.insert(i, jstr(body, "text"))
-        elif name == "deleteText":
-            a, b = text.ranges(jobj(body, "textRange"))
-            if b > len(text.chars):
-                # Slides counts the text without the newline it ends on and refuses to delete it
-                # (`merge.text_edit_requests`); `chars` is exactly that length, so clipping the
-                # slice here would hide a batch the API throws out whole.
-                raise ValueError(f"Invalid deleteText: The end index ({b}) should not be greater "
-                                 f"than the existing text length ({len(text.chars)}).")
-            text.remove(a, b)
-        elif name == "updateTextStyle":
-            a, b = text.ranges(jobj(body, "textRange"))
-            if b > len(text.chars):
-                # A FIXED_RANGE is measured against the same length a delete is (see below), so
-                # clipping here would let through a request the API throws the batch out for.
-                # `sync.style_range_requests` keeps under it by construction - a run's trailing
-                # newlines are taken off its range, and the text it styles ends on one - and this
-                # is what says so if that ever stops being true.
-                raise ValueError(f"Invalid updateTextStyle: The end index ({b}) should not be greater "
-                                 f"than the existing text length ({len(text.chars)}).")
-            fields = jstr(body, "fields").split(",")
-            style = jobj(body, "style")
-            for k in range(a, min(b, len(text.chars))):
-                for f in fields:
+        i = insert.get("insertionIndex", 0)
+        if i > len(text.chars):
+            raise ValueError(f"Invalid insertText: The insertion index ({i}) should not be greater "
+                             f"than the existing text length ({len(text.chars)}).")
+        text.insert(i, insert["text"])
+    elif (delete := r.get("deleteText")) is not None:
+        text = text_of(delete["objectId"], texts, notes, slide_id)
+        if text is None:
+            return
+        a, b = text.ranges(delete.get("textRange"))
+        if b > len(text.chars):
+            # Slides counts the text without the newline it ends on and refuses to delete it
+            # (`merge.text_edit_requests`); `chars` is exactly that length, so clipping the
+            # slice here would hide a batch the API throws out whole.
+            raise ValueError(f"Invalid deleteText: The end index ({b}) should not be greater "
+                             f"than the existing text length ({len(text.chars)}).")
+        text.remove(a, b)
+    elif (styled := r.get("updateTextStyle")) is not None:
+        text = text_of(styled["objectId"], texts, notes, slide_id)
+        if text is None:
+            return
+        a, b = text.ranges(styled.get("textRange"))
+        if b > len(text.chars):
+            # A FIXED_RANGE is measured against the same length a delete is (see below), so
+            # clipping here would let through a request the API throws the batch out for.
+            # `sync.style_range_requests` keeps under it by construction - a run's trailing
+            # newlines are taken off its range, and the text it styles ends on one - and this
+            # is what says so if that ever stops being true.
+            raise ValueError(f"Invalid updateTextStyle: The end index ({b}) should not be greater "
+                             f"than the existing text length ({len(text.chars)}).")
+        fields = styled["fields"].split(",")
+        style = part_json(styled["style"], "updateTextStyle.style")
+        for k in range(a, min(b, len(text.chars))):
+            for f in fields:
+                if f in style:
+                    text.styles[k][f] = copy.deepcopy(style[f])
+                if f == "weightedFontFamily" and "bold" not in fields:
+                    # a weight reads back as bold from 700 up (tools/probe_font_weights.py)
+                    family = styled["style"].get("weightedFontFamily")
+                    assert family is not None, f"a weight asked for and not given: {r}"
+                    weight = family.get("weight")
+                    text.styles[k]["bold"] = (weight if weight else 400) >= 700
+    elif (paragraph := r.get("updateParagraphStyle")) is not None:
+        text = text_of(paragraph["objectId"], texts, notes, slide_id)
+        if text is None:
+            return
+        a, b = text.ranges(paragraph.get("textRange"))
+        style = part_json(paragraph["style"], "updateParagraphStyle.style")
+        for pa, pb, marker in text.paragraphs():
+            if pa <= max(a, b - 1) and pb >= a:
+                for f in paragraph["fields"].split(","):
                     if f in style:
-                        text.styles[k][f] = copy.deepcopy(style[f])
-                    if f == "weightedFontFamily" and "bold" not in fields:
-                        # a weight reads back as bold from 700 up (tools/probe_font_weights.py)
-                        weight = jobj(style, f).get("weight")
-                        text.styles[k]["bold"] = (jnum(weight) if weight else 400) >= 700
-        elif name == "updateParagraphStyle":
-            a, b = text.ranges(jobj(body, "textRange"))
-            style = jobj(body, "style")
-            for pa, pb, marker in text.paragraphs():
-                if pa <= max(a, b - 1) and pb >= a:
-                    for f in jstr(body, "fields").split(","):
-                        if f in style:
-                            marker.style[f] = copy.deepcopy(style[f])
-        elif name == "createParagraphBullets":
-            a, b = text.ranges(jobj(body, "textRange"))
-            paras = [(pa, pb, m) for pa, pb, m in text.paragraphs() if pa <= max(a, b - 1) and pb >= a]
-            for pa, _pb, marker in reversed(paras):
-                tabs = 0
-                while pa + tabs < len(text.chars) and text.chars[pa + tabs] == "\t":
-                    tabs += 1
-                marker.bullet = {"listId": "l", "nestingLevel": tabs,
-                                 "glyph": GLYPHS.get(jstr(body, "bulletPreset"), "●")}
-                if tabs:
-                    text.remove(pa, pa + tabs)
-    elif name == "groupObjects":
+                        marker.style[f] = copy.deepcopy(style[f])
+    elif (bullets := r.get("createParagraphBullets")) is not None:
+        text = text_of(bullets["objectId"], texts, notes, slide_id)
+        if text is None:
+            return
+        a, b = text.ranges(bullets.get("textRange"))
+        preset = bullets.get("bulletPreset")
+        assert preset is not None, f"bullets with no preset: {r}"
+        paras = [(pa, pb, m) for pa, pb, m in text.paragraphs() if pa <= max(a, b - 1) and pb >= a]
+        for pa, _pb, marker in reversed(paras):
+            tabs = 0
+            while pa + tabs < len(text.chars) and text.chars[pa + tabs] == "\t":
+                tabs += 1
+            marker.bullet = {"listId": "l", "nestingLevel": tabs, "glyph": GLYPHS.get(preset, "●")}
+            if tabs:
+                text.remove(pa, pa + tabs)
+    elif (grouping := r.get("groupObjects")) is not None:
         children: list[Json] = []
-        for cid in jstrs(body, "childrenObjectIds"):
+        for cid in grouping["childrenObjectIds"]:
             got = find(elements, cid)
             if got:
                 lst, i = got
                 children.append(lst.pop(i))
-        gid = jstr(body, "groupObjectId")
+        gid = grouping.get("groupObjectId")
+        assert gid is not None, f"a group with no id: {r}"
         group: JsonObject = {"objectId": gid, "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU"},
                              "elementGroup": {"children": children}}
         objects[gid] = group
         elements.append(group)
-    elif name == "deleteObject":
-        got = find(elements, jstr(body, "objectId"))
+    elif (gone := r.get("deleteObject")) is not None:
+        got = find(elements, gone["objectId"])
         if got:
             lst, i = got
             lst.pop(i)

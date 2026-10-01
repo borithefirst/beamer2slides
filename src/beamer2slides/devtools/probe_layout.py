@@ -31,7 +31,7 @@ import numpy as np
 from PIL import Image
 
 from ..arrays import Mask, SignedRGB
-from ..google_types import all_elements, children, object_id, part
+from ..google_types import SlidesRequest, all_elements, children, object_id, part
 from ..json_types import Json, JsonObject, JsonShapeError, as_int, as_object, as_objects, as_str
 from .sync_check import EMU_PER_PT, Element, Model, flatten, presentation_id
 
@@ -149,10 +149,10 @@ def _leaves(elements: Sequence[PageElement]) -> list[str]:
     return out
 
 
-Extra = Callable[[Mapping[str, str]], list[JsonObject]]
+Extra = Callable[[Mapping[str, str]], list[SlidesRequest]]
 
 
-def _nothing_more(mapping: Mapping[str, str]) -> list[JsonObject]:
+def _nothing_more(mapping: Mapping[str, str]) -> list[SlidesRequest]:
     return []
 
 
@@ -166,9 +166,8 @@ def _copy(api: SlidesService, pid: str, slide: Page, keep: Set[str], extra: Extr
     mapping = {object_id(slide): f"plc_{tag}"}
     mapping.update({oid: f"plc_{tag}_{i}" for i, oid in enumerate(ids)})
     gone = [mapping[oid] for oid in _leaves(elements) if oid not in keep]
-    object_ids: JsonObject = {k: v for k, v in mapping.items()}
-    reqs: list[JsonObject] = [{"duplicateObject": {"objectId": object_id(slide), "objectIds": object_ids}}]
-    deletes: list[JsonObject] = [{"deleteObject": {"objectId": oid}} for oid in gone]
+    reqs: list[SlidesRequest] = [{"duplicateObject": {"objectId": object_id(slide), "objectIds": dict(mapping)}}]
+    deletes: list[SlidesRequest] = [{"deleteObject": {"objectId": oid}} for oid in gone]
     reqs += deletes
     execute(api.presentations().batchUpdate(presentationId=pid, body={"requests": reqs + extra(mapping)}))
     return mapping[object_id(slide)], mapping
@@ -252,7 +251,7 @@ def holes(api: SlidesService, pid: str, slide_id: str, text_id: str, folder: Pat
         return []
     colours = [HOLE_COLOURS[i % len(HOLE_COLOURS)] for i in range(len(runs))]
 
-    def paint(mapping: Mapping[str, str]) -> list[JsonObject]:
+    def paint(mapping: Mapping[str, str]) -> list[SlidesRequest]:
         return [{"updateTextStyle": {"objectId": mapping[text_id], "fields": "backgroundColor",
                                      "textRange": {"type": "FIXED_RANGE", "startIndex": a, "endIndex": b},
                                      "style": {"backgroundColor": {"opaqueColor": rgb(c)}}}}

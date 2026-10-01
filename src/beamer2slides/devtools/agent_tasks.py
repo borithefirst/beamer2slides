@@ -26,7 +26,7 @@ from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Generic, NoReturn, TypeGuard, TypeVar
+from typing import TYPE_CHECKING, Callable, Generic, NoReturn, TypeVar
 
 from beamer2slides.agent.types import Code, Diagnostic, Result, refusal
 from beamer2slides.json_types import Json, JsonObject, as_array, as_objects, as_str
@@ -1259,25 +1259,6 @@ class _Reply(Generic[T]):
         return self.run()
 
 
-def _is_request(request: Mapping[str, object]) -> TypeGuard[DocsRequest]:
-    """Whether what the fake was handed is one Docs request: a oneof, so exactly one key, and
-    that one a request `google_types.DocsRequest` names. `doc_sync` wrote it as one; a batch
-    body's type only says `Mapping` (`DocsBatchUpdateBody`), so the world is handed it here."""
-    from beamer2slides import google_types
-
-    kinds = google_types.DocsRequest.__required_keys__ | google_types.DocsRequest.__optional_keys__
-    return len(request) == 1 and all(k in kinds and isinstance(v, dict) for k, v in request.items())
-
-
-def _docs_requests(body: Sequence[Mapping[str, object]]) -> list[DocsRequest]:
-    out: list[DocsRequest] = []
-    for i, request in enumerate(body):
-        if not _is_request(request):
-            raise AssertionError(f"requests[{i}] is not a Docs request: {sorted(request)}")
-        out.append(request)
-    return out
-
-
 def _unused(what: str) -> NoReturn:
     """A method of Google's client (`google_types`) the Docs journeys never call: there for the
     fake to be a whole client, and loud should a journey start calling it."""
@@ -1289,7 +1270,7 @@ class _DocsService:
 
     def __init__(self, world: World) -> None:
         self.world = world
-        self.batches: list[list[Mapping[str, object]]] = []
+        self.batches: list[list[DocsRequest]] = []
 
     def documents(self) -> _DocsService:
         return self
@@ -1304,7 +1285,7 @@ class _DocsService:
 
         def run() -> DocsBatchUpdateResponse:
             self.batches.append(list(body["requests"]))
-            answer = self.world.apply(_docs_requests(body["requests"]))
+            answer = self.world.apply(body["requests"])
             # What `send` chains into the next batch's requiredRevisionId, so a chunked
             # write is refused here for the same reason Google refuses one.
             answer["writeControl"] = {"requiredRevisionId": f"r{self.world.revision}"}

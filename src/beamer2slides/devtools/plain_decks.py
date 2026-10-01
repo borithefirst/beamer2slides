@@ -22,7 +22,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from beamer2slides.devtools.adopt_bench import MANIFEST, capture
-from beamer2slides.google_types import as_json
+from beamer2slides.google_types import PredefinedLayout, SlidesRequest, SlidesTextStyle, as_json
 from beamer2slides.json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
 
 
@@ -56,7 +56,7 @@ Placeholder = tuple[str, int]    # (placeholder type, index)
 class PlainSlide:
     """A slide: its predefined layout, and the paragraphs typed into its placeholders."""
 
-    layout: str
+    layout: PredefinedLayout
     fill: dict[Placeholder, list[Paragraph]]
 
 
@@ -127,7 +127,7 @@ DECKS = {"plain-layouts": DeckSpec(title="b2s plain deck: layouts", slides=layou
          "plain-fonts": DeckSpec(title="b2s plain deck: Google Fonts", slides=fonts_deck, table=True)}
 
 
-def paragraphs_requests(oid: str, paragraphs: Sequence[Paragraph], font: str | None) -> list[JsonObject]:
+def paragraphs_requests(oid: str, paragraphs: Sequence[Paragraph], font: str | None) -> list[SlidesRequest]:
     text = ""
     runs: list[tuple[int, int, Style]] = []
     for k, para in enumerate(paragraphs):
@@ -136,14 +136,14 @@ def paragraphs_requests(oid: str, paragraphs: Sequence[Paragraph], font: str | N
             text += piece
         if k < len(paragraphs) - 1:
             text += "\n"
-    reqs: list[JsonObject] = [{"insertText": {"objectId": oid, "text": text}}]
+    reqs: list[SlidesRequest] = [{"insertText": {"objectId": oid, "text": text}}]
     if font:
         reqs.append({"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"},
                                          "style": {"fontFamily": font}, "fields": "fontFamily"}})
     for a, b, style in runs:
         if not style.said() or a == b:
             continue
-        s: JsonObject = {}
+        s: SlidesTextStyle = {}
         fields: list[str] = []
         if style.weight is not None:
             s["weightedFontFamily"] = {"fontFamily": font or "Arial", "weight": style.weight}
@@ -177,7 +177,7 @@ def make(name: str) -> str:
     pid, blank = made.get("presentationId"), first[0].get("objectId") if first else None
     if pid is None or blank is None:
         raise ValueError(f"presentations.create answered no deck id or no first slide: {sorted(made)}")
-    reqs: list[JsonObject] = [{"deleteObject": {"objectId": blank}}]
+    reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": blank}}]
     for k, slide in enumerate(slides):
         reqs.append({"createSlide": {"objectId": f"b2s_plain_{k:02d}", "insertionIndex": k,
                                      "slideLayoutReference": {"predefinedLayout": slide.layout}}})

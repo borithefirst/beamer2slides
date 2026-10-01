@@ -10,10 +10,10 @@ dicts sync, classify and the tests hold.
 import functools
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from . import bidi
-from .emit_metrics import ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, SLIDE_W, FontMapper, rgb, u16
+from .emit_metrics import ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, SLIDE_W, FontMapper, u16
 from .emit_model import (
     CellGrid, JsonMap, ObjectMap, PptxTable, SetRun, SetTable, columns_of, set_table, table_of,
 )
@@ -21,10 +21,13 @@ from .emit_text import extra_above, in_sentence_of, run_sizes_of
 from .emit_widths import (
     WRAP_MARGIN, set_runs_of, slides_width_of, wrap_joins_of, wrap_window_of, wrapped_width_of,
 )
-from .gslides import EMU_PER_PT, emu, pt
+from .google_types import (
+    SlidesParagraphStyle, SlidesRequest, SlidesTableCellLocation, slides_text_style,
+)
+from .gslides import EMU_PER_PT, emu, pt, rgb_color, text_color
 from .ir import Align, Script
 from .ir_types import Column, Merge, TableElement
-from .json_types import Json, JsonObject
+from .json_types import Json
 from .typing_compat import assert_never
 
 
@@ -640,7 +643,7 @@ def merged_pads(m: Merge, x: tuple[float, float], bounds: Sequence[float], dx: f
     return left, right
 
 
-def _baseline_offset(script: Script | None) -> str:
+def _baseline_offset(script: Script | None) -> Literal["NONE", "SUPERSCRIPT", "SUBSCRIPT"]:
     if script is None:
         return "NONE"
     match script:
@@ -652,7 +655,7 @@ def _baseline_offset(script: Script | None) -> str:
             assert_never(script)
 
 
-def _alignment(align: Align, rtl: bool) -> str:
+def _alignment(align: Align, rtl: bool) -> Literal["START", "CENTER", "END"]:
     """A cell's paragraph alignment: a cell that reads right to left starts at its right edge."""
     match align:
         case "left":
@@ -673,20 +676,20 @@ def _moved(c: Column, dx: float, m: float) -> Column:
 
 
 def table_requests(el: ObjectMap, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                   imported: bool, page_w: float) -> list[JsonObject]:
+                   imported: bool, page_w: float) -> list[SlidesRequest]:
     """`table_requests_of` a table dict (sync's recreated tables, the tests). `page_w`: see
     `table_layout`."""
     return table_requests_of(table_of(el), slide_id, object_id, scale, fonts, imported, page_w)
 
 
 def table_element_requests(el: TableElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                           imported: bool) -> list[JsonObject]:
+                           imported: bool) -> list[SlidesRequest]:
     """The requests of a parsed table, on a deck SLIDE_W wide."""
     return table_requests_of(set_table(el), slide_id, object_id, scale, fonts, imported, SLIDE_W / scale)
 
 
 def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                      imported: bool, page_w: float) -> list[JsonObject]:
+                      imported: bool, page_w: float) -> list[SlidesRequest]:
     """A table filled in through the API. `imported`: the table (`object_id`) came with the .pptx,
     empty and with the cell margins `pptx_table` gave it; else it is made here by createTable."""
     lay = table_layout_of(t, scale, fonts, imported, page_w)
@@ -697,7 +700,7 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
     bounds, cell_width, first_run = lay.bounds, lay.cell_width, lay.first_run
     n_rows, n_cols = len(t.cells), len(cols)
 
-    reqs: list[JsonObject] = [
+    reqs: list[SlidesRequest] = [
         # (it lies where the .pptx put it, below what the slide's elements before it made)
         {"updatePageElementsZOrder": {"pageElementObjectIds": [object_id], "operation": "BRING_TO_FRONT"}}
     ] if imported else [
@@ -727,7 +730,7 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
             "objectId": object_id, "borderPosition": rule.position,
             "tableRange": {"location": {"rowIndex": rule.row, "columnIndex": 0}, "rowSpan": 1, "columnSpan": n_cols},
             "tableBorderProperties": {
-                "tableBorderFill": {"solidFill": {"color": rgb(rule.color)["opaqueColor"], "alpha": 1}},
+                "tableBorderFill": {"solidFill": {"color": rgb_color(rule.color), "alpha": 1}},
                 "weight": pt(round(max(0.5, rule.weight * scale), 2))},
             "fields": "tableBorderFill.solidFill.color,tableBorderFill.solidFill.alpha,weight"}})
     for b in t.borders:
@@ -735,14 +738,14 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
             "objectId": object_id, "borderPosition": b.position,
             "tableRange": {"location": {"rowIndex": b.row, "columnIndex": b.col}, "rowSpan": 1, "columnSpan": 1},
             "tableBorderProperties": {
-                "tableBorderFill": {"solidFill": {"color": rgb(b.color)["opaqueColor"], "alpha": 1}},
+                "tableBorderFill": {"solidFill": {"color": rgb_color(b.color), "alpha": 1}},
                 "weight": pt(round(max(0.5, b.weight * scale), 2))},
             "fields": "tableBorderFill.solidFill.color,tableBorderFill.solidFill.alpha,weight"}})
     for f in t.fills:
         reqs.append({"updateTableCellProperties": {
             "objectId": object_id, "tableRange": {"location": {"rowIndex": f.row, "columnIndex": f.col},
                                                   "rowSpan": 1, "columnSpan": 1},
-            "tableCellProperties": {"tableCellBackgroundFill": {"solidFill": {"color": rgb(f.color)["opaqueColor"]}}},
+            "tableCellProperties": {"tableCellBackgroundFill": {"solidFill": {"color": rgb_color(f.color)}}},
             "fields": "tableCellBackgroundFill.solidFill.color"}})
     merged = {(m.row, m.col): m for m in t.merges}
     merge_x = {(m.row, m.col): x for m, x in zip(t.merges, t.merge_x)}
@@ -775,22 +778,23 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
     for r, row in enumerate(lay.cells):
         for c, runs in enumerate(row):
             text = "".join(run.text for run in runs).strip()
-            loc: JsonObject = {"rowIndex": r, "columnIndex": c}
+            loc: SlidesTableCellLocation = {"rowIndex": r, "columnIndex": c}
             if not text:
                 if (r, c) in hidden or first_run is None:
                     continue
                 # An empty cell still has a line of the default font, which would set the row's
                 # minimum height: give it a space in the table's font, its row's size and line spacing.
-                style, fields = fonts.style_of(first_run, scale)
+                font, fields = fonts.style_of(first_run, scale)
+                style = slides_text_style(font, "a table's font (FontMapper.style_of)")
                 if "fontSize" in style:
                     style["fontSize"] = pt(round(lay.sizes[r], 2))
-                space: list[JsonObject] = [
+                space: list[SlidesRequest] = [
                     {"insertText": {"objectId": object_id, "cellLocation": loc, "text": " "}},
                     {"updateTextStyle": {"objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
                                          "style": style, "fields": ",".join(fields)}},
                     {"updateParagraphStyle": {"objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
-                                              "style": {"lineSpacing": round(100 * row_ratio[r], 1), "spaceAbove": pt(0),
-                                                        "spaceBelow": pt(0)},
+                                              "style": {"lineSpacing": round(100 * row_ratio[r], 1),
+                                                        "spaceAbove": pt(0), "spaceBelow": pt(0)},
                                               "fields": "lineSpacing,spaceAbove,spaceBelow"}},
                 ]
                 reqs += space
@@ -803,11 +807,13 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
                     piece = piece.lstrip()
                 if not piece:
                     continue
-                style, fields = fonts.style_of(run, scale)
+                font, fields = fonts.style_of(run, scale)
+                style = slides_text_style(font, "a cell run's font (FontMapper.style_of)")
                 if "fontSize" in style:
                     style["fontSize"] = pt(z)  # (a subscript no larger than its text: run_sizes)
-                style.update({"smallCaps": run.smallcaps, "foregroundColor": rgb(run.color),
-                              "baselineOffset": _baseline_offset(run.script)})
+                style["smallCaps"] = run.smallcaps
+                style["foregroundColor"] = text_color(run.color)
+                style["baselineOffset"] = _baseline_offset(run.script)
                 reqs.append({"updateTextStyle": {
                     "objectId": object_id, "cellLocation": loc,  # (UTF-16 units: u16)
                     "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": min(u16(text), start + u16(piece))},
@@ -855,13 +861,16 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
             # its two indents are mirrored (the text element's rule, one cell wide).
             rtl = bidi.reads_rtl(text)
             indent_start, indent_end = (right_pad, left_pad) if rtl else (left_pad, right_pad)
+            paragraph: SlidesParagraphStyle = {
+                "alignment": "JUSTIFIED" if justify and not rtl else _alignment(align, rtl),
+                "lineSpacing": round(100 * row_ratio[r], 1), "spaceAbove": pt(0),
+                "spaceBelow": pt(0), "indentStart": pt(round(indent_start, 2)),
+                "indentFirstLine": pt(round(indent_start, 2)), "indentEnd": pt(round(indent_end, 2))}
+            if rtl:
+                paragraph["direction"] = "RIGHT_TO_LEFT"
             reqs.append({"updateParagraphStyle": {
                 "objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
-                "style": {"alignment": "JUSTIFIED" if justify and not rtl else _alignment(align, rtl),
-                          "lineSpacing": round(100 * row_ratio[r], 1), "spaceAbove": pt(0), "spaceBelow": pt(0),
-                          "indentStart": pt(round(indent_start, 2)), "indentFirstLine": pt(round(indent_start, 2)),
-                          "indentEnd": pt(round(indent_end, 2)),
-                          **({"direction": "RIGHT_TO_LEFT"} if rtl else {})},
+                "style": paragraph,
                 "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine,indentEnd" +
                           (",direction" if rtl else "")}})
     return reqs

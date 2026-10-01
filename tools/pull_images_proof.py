@@ -28,11 +28,15 @@ from tools.probe_images import photo  # noqa: E402
 
 from beamer2slides.deck_ir import TAG_RE, walk_elements  # noqa: E402
 from beamer2slides.emit import PPTX_MIME, build_pptx  # noqa: E402
+from beamer2slides.gapi import resumable_media_upload  # noqa: E402
 from beamer2slides.google_auth import credentials, drive_service, slides_service  # noqa: E402
 from beamer2slides.google_types import (  # noqa: E402
     Dimension,
     DriveService,
     PageElement,
+    SlidesCropProperties,
+    SlidesPageElementProperties,
+    SlidesRequest,
     SlidesService,
     file_id,
     object_id,
@@ -43,7 +47,9 @@ from beamer2slides.json_types import as_object, as_str  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDED = ("b2s_proof_photo", "b2s_proof_alpha")
-CROP = {"leftOffset": 0.15, "topOffset": 0.1, "rightOffset": 0.1, "bottomOffset": 0.25}
+# cropProperties is read-only in slides.v1.json (and tools/probe_images.py found the API cannot set a
+# crop): sent as it always was, the proof's crop edit
+CROP: SlidesCropProperties = {"leftOffset": 0.15, "topOffset": 0.1, "rightOffset": 0.1, "bottomOffset": 0.25}
 ROTATION = 12.0
 HALF_SIZE = (600, 400)
 
@@ -92,15 +98,13 @@ def stage(drive: DriveService, slides: SlidesService, files: list[Path],
           page: tuple[float, float]) -> tuple[str, dict[str, str]]:
     # Resumable, unlike gapi.media_upload: the 3000x2000 photo takes the .pptx past the 5 MB a
     # simple upload carries.
-    from googleapiclient.http import MediaIoBaseUpload
-
     pages: list[Mapping[str, object]] = [{"layout": "BLANK", "fill": None, "templates": False, "pictures": [
         {"file": f, "bbox": [0, 0, 100, 100 * Image.open(f).size[1] / Image.open(f).size[0]],
          "alt": f"b2s-stage:{k}", "title": "stage"} for k, f in enumerate(files)]}]
     pptx = build_pptx(page[0], page[1], [], pages, {"color": "#ffffff"}, None)
     fid = file_id(execute(drive.files().create(body={"name": "beamer2slides pull proof staging (temporary)",
                                                      "mimeType": "application/vnd.google-apps.presentation"},
-                                               media_body=MediaIoBaseUpload(pptx, mimetype=PPTX_MIME, resumable=True),
+                                               media_body=resumable_media_upload(pptx, PPTX_MIME),
                                                fields="id")), "the staging deck")
     staged = execute(slides.presentations().get(presentationId=fid))
     urls: dict[str, str] = {}
@@ -111,7 +115,7 @@ def stage(drive: DriveService, slides: SlidesService, files: list[Path],
     return fid, urls
 
 
-def element_properties(page_id: str, box: list[float]) -> dict[str, object]:
+def element_properties(page_id: str, box: list[float]) -> SlidesPageElementProperties:
     x0, y0, x1, y1 = box
     return {"pageObjectId": page_id, "size": {"width": {"magnitude": (x1 - x0) * EMU_PER_PT, "unit": "EMU"},
                                               "height": {"magnitude": (y1 - y0) * EMU_PER_PT, "unit": "EMU"}},
@@ -119,7 +123,7 @@ def element_properties(page_id: str, box: list[float]) -> dict[str, object]:
                           "unit": "EMU"}}
 
 
-def rotate_request(pe: PageElement, degrees: float) -> dict[str, object]:
+def rotate_request(pe: PageElement, degrees: float) -> SlidesRequest:
     """A rotation about the picture's centre, as the Slides UI makes it."""
     tr = pe.get("transform")
     if tr is None:
@@ -180,8 +184,8 @@ def main() -> None:
         last = object_id(pres.get("slides", [])[-1])
         steps = keys["steps"]
         old = {object_id(pe) for s in pres.get("slides", []) for pe in s.get("pageElements", [])} & set(ADDED)
-        reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": o}} for o in sorted(old)]
-        reqs += [
+        reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": o}} for o in sorted(old)]
+        reqs.extend([
             {"createImage": {"objectId": ADDED[0], "url": urls["photo.png"],
                              "elementProperties": element_properties(last, [360, 120, 560, 253])}},
             {"createImage": {"objectId": ADDED[1], "url": urls["half.png"],
@@ -190,7 +194,7 @@ def main() -> None:
                               "imageReplaceMethod": "CENTER_INSIDE"}},
             {"updateImageProperties": {"objectId": ADDED[0], "imageProperties": {"cropProperties": CROP},
                                        "fields": "cropProperties"}},
-        ]
+        ])
         execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
         last_page = execute(slides.presentations().pages().get(presentationId=pid, pageObjectId=last))
         pe = next(pe for pe in last_page.get("pageElements", []) if object_id(pe) == ADDED[0])

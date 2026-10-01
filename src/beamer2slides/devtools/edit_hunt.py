@@ -59,7 +59,7 @@ from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw
 
-from ..google_types import part, presentation
+from ..google_types import SlidesRequest, part, presentation, typed_part
 from ..json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
 from .visual_hunt import PANEL, ROOT, compile_tex, google_turn
 
@@ -354,8 +354,10 @@ def edit(journey: str, edits_path: Path) -> int:
         for item in items:
             try:
                 if "raw" in item:
-                    execute(deck.api.presentations().batchUpdate(
-                        presentationId=state.pid, body={"requests": as_objects(item["raw"], "raw")}))
+                    # (parsed as the requests they are: one the types refuse is refused here, as Google would)
+                    raw = [typed_part(r, SlidesRequest, f"raw[{i}]")
+                           for i, r in enumerate(as_objects(item["raw"], "raw"))]
+                    execute(deck.api.presentations().batchUpdate(presentationId=state.pid, body={"requests": raw}))
                     deck.read()
                 else:
                     expectations.append(apply(deck, item).json())

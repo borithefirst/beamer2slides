@@ -21,7 +21,7 @@ import json
 import os
 import shutil
 from collections import Counter
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypedDict, TypeVar
@@ -33,7 +33,7 @@ from beamer2slides.adopt_sync import Folds
 from beamer2slides.emit import OfflinePlan, Part
 from beamer2slides.emit_model import PptxTable
 from beamer2slides.emit_theme import BgKey
-from beamer2slides.google_types import Dimension, Page, PageElement, Presentation
+from beamer2slides.google_types import Dimension, Page, PageElement, Presentation, SlidesRequest
 from beamer2slides.inverse import Candidate, Workspace
 from beamer2slides.json_types import Json, JsonObject, as_object, as_optional_str
 from beamer2slides.raw_types import RawDoc
@@ -378,16 +378,26 @@ def written(slide: JsonObject, parts: Sequence[Part], element_ids: Sequence[str]
     assert not missing, f"{what}: elements with no object: {missing}"
 
 
-def says(el: JsonObject, oid: str, reqs: Sequence[JsonObject]) -> bool:
+def copied_ids(request: SlidesRequest) -> dict[str, str]:
+    """The object ids a slide's duplicateObject gives its copies (`emit.copy_request`)."""
+    dup = request.get("duplicateObject")
+    ids = None if dup is None else dup.get("objectIds")
+    assert ids is not None, f"a copy that is no duplicateObject with objectIds: {request}"
+    return dict(ids)
+
+
+def says(el: JsonObject, oid: str, reqs: Sequence[Mapping[str, object]]) -> bool:
     """A text element with words has them inserted into its object (a placeholder the slide was
     copied with exists whether or not anything is written into it)."""
     if el["kind"] != "text" or not any(jstr(r, "text").strip() for p in jobjs(el.get("paragraphs", []))
                                        for r in jobjs(p, "runs")):
         return True
     for r in reqs:
-        inserted = r.get("insertText")
-        if isinstance(inserted, dict) and inserted.get("objectId") == oid and jstr(inserted, "text").strip():
-            return True
+        inserted = r.get("insertText")   # (emit's typed requests, or sync's JSON)
+        if isinstance(inserted, Mapping) and inserted.get("objectId") == oid:
+            words = inserted.get("text")
+            if isinstance(words, str) and words.strip():
+                return True
     return False
 
 
@@ -521,11 +531,11 @@ def convert(made: Made, home: Path) -> None:
     for slide, source in zip(slides_of(deck), sources):
         request, sizes = plan.copy_request(slide, source)
         template_sizes = template_sizes or sizes
-        new = jobj(request, "duplicateObject", "objectIds")
-        sid = jstr(new, jstr(source, "objectId"))
+        new = copied_ids(request)
+        sid = new[jstr(source, "objectId")]
         page_elements[sid] = [{"objectId": new.get(jstr(e, "objectId"), f"{jstr(e, 'objectId')}_copy"),
                                "size": e["size"]} for e in jobjs(source, "pageElements")]
-        carried[sid] = {jstr(v) for v in new.values()}
+        carried[sid] = set(new.values())
     speaker_notes = {sid: f"{sid}_notes" for sid in page_elements}
 
     ground = emit.master_ground(shared, bg_file, page_w)
@@ -592,8 +602,8 @@ def convert_state(deck: JsonObject) -> tuple[OfflinePlan, JsonObject]:
     plan = off["plan"]
     slides: list[Json] = []
     for n, (slide, (sid, page, parts, element_ids)) in enumerate(zip(slides_of(plan.deck), off["slides"])):
-        copied = jobj(off["copies"][n], "duplicateObject", "objectIds")
-        written(slide, parts, element_ids, {jstr(v) for v in copied.values()}, f"slide {page + 1}")
+        copied = copied_ids(off["copies"][n])
+        written(slide, parts, element_ids, set(copied.values()), f"slide {page + 1}")
         objects, groups = element_objects(parts, element_ids)
         margins: JsonObject = {str(i): grid_json(pptx_table(el, plan.scale, plan.fonts, SLIDE_W / plan.scale)["margins"])
                                for i, el in enumerate(elements_of(slide)) if el["kind"] == "table"}

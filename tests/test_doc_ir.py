@@ -8,8 +8,9 @@ import pytest
 
 from beamer2slides import doc_ir
 from beamer2slides.doc_ir import Block, Ir, Run
-from beamer2slides.google_types import (DocsBullet, DocsDateElement, DocsDimension, DocsEmbeddedObject,
-                                        DocsImageProperties, DocsNamedRanges, DocsNestingLevel, DocsParagraph,
+from beamer2slides.google_types import (DocsAlignment, DocsBullet, DocsDateElement, DocsDimension,
+                                        DocsEmbeddedObject, DocsImageProperties, DocsNamedRanges,
+                                        DocsNamedStyleType, DocsNestingLevel, DocsParagraph,
                                         DocsParagraphElement, DocsParagraphStyle, DocsPerson,
                                         DocsStructuralElement, DocsTable, DocsTableCell, DocsTableRow,
                                         DocsTextStyle, Document)
@@ -593,7 +594,7 @@ def test_a_title_and_a_subtitle_are_kinds_of_their_own() -> None:
     six were a block kind and a level; these two are a kind each, because they are not
     a level — and the merge names `namedStyleType` on every paragraph it writes, so a
     style the file cannot spell is one a sync writes body text over."""
-    def document(named: str) -> Document:
+    def document(named: DocsNamedStyleType) -> Document:
         return {"body": {"content": [{"paragraph": {
             "paragraphStyle": {"namedStyleType": named},
             "elements": [{"startIndex": 1, "endIndex": 5,
@@ -860,7 +861,7 @@ def test_a_heading_the_theme_centres_says_nothing_about_its_alignment() -> None:
     being the theme's and becomes ours, left-aligned the moment a source edit drops it.
     The reader's own choice still counts: a heading somebody left-aligned in the
     browser differs from the style and is carried."""
-    def doc(alignment: str | None) -> Document:
+    def doc(alignment: DocsAlignment | None) -> Document:
         style: DocsParagraphStyle = {"namedStyleType": "HEADING_1"}
         if alignment:
             style["alignment"] = alignment

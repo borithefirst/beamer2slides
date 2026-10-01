@@ -20,7 +20,7 @@ import pytest
 from beamer2slides.emit import SLIDE_W, FontMapper
 from beamer2slides import adopt_sync, emit, identity, merge, snapshot, sync, sync_model
 from beamer2slides.emit_model import Placeholder, Template, TemplateKey
-from beamer2slides.google_types import Presentation, presentation
+from beamer2slides.google_types import Presentation, SlidesRequest, presentation
 from beamer2slides.ir_types import MarkedShape, ShapeElement, TextElement
 from beamer2slides.json_types import Json, JsonObject
 
@@ -48,7 +48,7 @@ def unplannable(monkeypatch: pytest.MonkeyPatch, words: str) -> None:
     def text_element_requests(el: TextElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                               placeholder: Placeholder | None, page_slide: Mapping[int, str] | None,
                               bar: Sequence[float] | None, right_limit: float | None,
-                              marks: Sequence[str] | None) -> list[JsonObject]:
+                              marks: Sequence[str] | None) -> list[SlidesRequest]:
         if words in " ".join("".join(r.text for r in p.runs) for p in el.paragraphs):
             raise KeyError("lines")
         return real(el, slide_id, object_id, scale, fonts, placeholder, page_slide, bar, right_limit, marks)
@@ -233,7 +233,7 @@ def failing_new_element(monkeypatch: pytest.MonkeyPatch) -> tuple[JsonObject, Js
     real = emit.shape_element_requests
 
     def shape_element_requests(el: ShapeElement | MarkedShape, slide_id: str, object_id: str, scale: float,
-                               template_for: Callable[[TemplateKey], Template]) -> list[JsonObject]:
+                               template_for: Callable[[TemplateKey], Template]) -> list[SlidesRequest]:
         if el.id == "p0s9":
             raise KeyError("flip")
         return real(el, slide_id, object_id, scale, template_for)

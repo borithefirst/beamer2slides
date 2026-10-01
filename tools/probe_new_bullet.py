@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from beamer2slides import gslides
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import Page, object_id, part
+from beamer2slides.google_types import Page, SlidesRequest, object_id, part
 from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_int, as_object, as_objects, as_str
 
 
@@ -134,8 +134,8 @@ def main() -> None:
     items = [p for p in paragraphs(shape) if p.marker.get("bullet")]
     # One after the last item (before the shape's final newline) and one after the first.
     spots = sorted({items[-1].end - 1, items[0].end - 1}, reverse=True)
-    reqs: list[Mapping[str, object]] = [{"insertText": {"objectId": oid, "insertionIndex": at,
-                                                        "text": f"\n{new_text} {n}"}} for n, at in enumerate(spots)]
+    reqs: list[SlidesRequest] = [{"insertText": {"objectId": oid, "insertionIndex": at,
+                                                 "text": f"\n{new_text} {n}"}} for n, at in enumerate(spots)]
     gslides.execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     print(f"after inserting at {spots}:")
     for o, s in bulleted(read()):

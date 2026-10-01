@@ -4,12 +4,10 @@ Usage: python tools/slides_smoke.py
 """
 
 import urllib.request
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Protocol, TypedDict, runtime_checkable
 
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import Dimension, Presentation, Request, Size, object_id, presentation_id
+from beamer2slides.google_types import Dimension, SlidesRequest, object_id, presentation_id
 
 EMU_PER_PT = 12700
 OUT = Path(__file__).resolve().parents[1] / "out" / "smoke"
@@ -19,36 +17,12 @@ def pt(v: float) -> Dimension:
     return {"magnitude": v * EMU_PER_PT, "unit": "EMU"}
 
 
-# A `presentations.create` body with a `pageSize`, which google_types' NewPresentation does not list
-# yet (Google takes the key and ignores it: a new deck is always 16:9): described here, after a
-# runtime check, until it does.
-class SizedPresentation(TypedDict):
-    title: str
-    pageSize: Size
-
-
-class SizedPresentations(Protocol):
-    def create(self, *, body: SizedPresentation) -> Request[Presentation]: ...
-
-
-@runtime_checkable
-class SizedSlides(Protocol):
-    """The Slides client, as far as a create with a page size calls it."""
-
-    def presentations(self) -> SizedPresentations: ...
-
-
-def sized(slides: object) -> SizedSlides:
-    if not isinstance(slides, SizedSlides):
-        raise TypeError(f"{type(slides).__name__} is no Slides client")
-    return slides
-
-
 def main() -> None:
     slides = slides_service(None)
 
-    # Beamer 4:3 (362.8 x 272.1 pt) scaled to the standard 720 x 540 pt.
-    pres = sized(slides).presentations().create(body={
+    # Beamer 4:3 (362.8 x 272.1 pt) scaled to the standard 720 x 540 pt (Google takes the
+    # pageSize and ignores it: a new deck is always 16:9).
+    pres = slides.presentations().create(body={
         "title": "beamer2slides smoke test",
         "pageSize": {"width": pt(720), "height": pt(540)},
     }).execute()
@@ -60,7 +34,7 @@ def main() -> None:
 
     first = pres.get("slides", [])[0]
     page_id = object_id(first)
-    requests: list[Mapping[str, object]] = [
+    requests: list[SlidesRequest] = [
         # Clear the default title-slide placeholders.
         *({"deleteObject": {"objectId": object_id(el)}}
           for el in first.get("pageElements", [])),

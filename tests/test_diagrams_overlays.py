@@ -14,6 +14,7 @@ from beamer2slides.extract import extract_page, select_overlays
 from beamer2slides.ir import DiagramElement, Element, Slide, deck_json, element_json
 from beamer2slides.raw_types import PathItem, RawDoc, RawPage
 from beamer2slides.render import load_png, render_backgrounds
+from beamer2slides.google_types import slides_json
 
 from .json_reads import jnum, jobj, jstr
 from .test_charts_diagrams import H, W, Page, body_text, deck, lines, rect
@@ -313,7 +314,7 @@ def test_rounded_nodes_keep_their_corner_radius():
         asked.append(key)
         return {"id": "tpl", "w": 100, "h": 100}
 
-    reqs = diagram_requests(element_json(el), "s", "d", 1.0, FontMapper(), template=template)
+    reqs = [slides_json(r) for r in diagram_requests(element_json(el), "s", "d", 1.0, FontMapper(), template=template)]
     assert asked == [("ROUND_RECTANGLE", 0.1, None)] * 2
     made = [jstr(r, "createShape", "shapeType") for r in reqs if "createShape" in r]
     assert made and set(made) == {"TEXT_BOX"}, made  # labels in their own boxes; both nodes copied
@@ -342,7 +343,7 @@ def test_a_horizontal_first_elbow_is_written_from_its_other_end():
     def template(key: TemplateKey) -> JsonMap:
         return {"id": "tpl", "w": 100, "h": 100}
 
-    reqs = diagram_requests(element_json(el), "s", "d", 1.0, FontMapper(), template=template)
+    reqs = [slides_json(r) for r in diagram_requests(element_json(el), "s", "d", 1.0, FontMapper(), template=template)]
     move = next(jobj(r, "updatePageElementTransform", "transform") for r in reqs if "updatePageElementTransform" in r)
     assert (move["translateX"], move["translateY"]) == (140 * 12700, round(100.38 * 12700))
     assert move["scaleX"] == -0.8 and abs(jnum(move, "scaleY") + 0.5038) < 1e-6

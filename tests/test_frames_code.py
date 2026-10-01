@@ -4,6 +4,7 @@ its rules, and code keeps its columns in one text box. Local only, no Google API
 from beamer2slides import emit
 from beamer2slides.ir import Box, Run, ShapeElement, Slide, TextElement
 from beamer2slides.json_types import Json, JsonObject
+from beamer2slides.google_types import slides_json
 
 from .json_reads import jnums, jobj, jobjs, jstr
 from .test_classify import deck, given, images, paragraph_text, shapes_of, tables_of, texts
@@ -150,7 +151,7 @@ def test_a_framed_panel_is_written_with_its_outline():
     plan = emit.plan_offline(deck("28_frames_code"))["plan"]
     slide = plan.slides()[0]
     [panel] = [e for e in jobjs(slide, "elements") if e.get("fill") == "#e6e6ff"]
-    [update] = [jobj(r, "updateShapeProperties") for r in emit.shape_requests(panel, "s", "o", plan.scale, None)
+    [update] = [jobj(r, "updateShapeProperties") for r in map(slides_json, emit.shape_requests(panel, "s", "o", plan.scale, None))
                 if "updateShapeProperties" in r]
     outline = jobj(update, "shapeProperties", "outline")
     assert jstr(outline, "propertyState") == "RENDERED"

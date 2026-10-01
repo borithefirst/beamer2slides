@@ -27,7 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ..google_types import BatchUpdateResponse, Presentation, SlidesService, children, image_url
+from ..google_types import (AffineTransform, BatchUpdateResponse, OpaqueColor, PlaceholderType, Presentation,
+                            SlidesInsertTextRequest, SlidesPageElementProperties, SlidesRange, SlidesRequest,
+                            SlidesService, SlidesTableCellLocation, SlidesTextStyle, SlidesUpdateTextStyleRequest,
+                            children, image_url, is_placeholder_type, is_shape_type, object_id, slides_request_kind)
 from ..json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
 from ..typing_compat import assert_never
 from .sync_check import (EMU_PER_PT, Cell, CheckError, Element, Model, Point, Slide, check_all, norm, number, part,
@@ -64,7 +67,7 @@ class LiveDeck:
 
     def __init__(self, pid: str, api: SlidesService, pres: JsonObject, defer: bool) -> None:
         self.pid, self.api, self.defer = pid, api, defer
-        self.pending: list[list[JsonObject]] = []
+        self.pending: list[list[SlidesRequest]] = []
         self.dirty: set[str] = set()
         self.reshaped = False
         self.reads = 0
@@ -83,7 +86,7 @@ class LiveDeck:
         self.dirty, self.reshaped = set(), False
         return self.model
 
-    def batch(self, requests: list[JsonObject]) -> BatchUpdateResponse:
+    def batch(self, requests: list[SlidesRequest]) -> BatchUpdateResponse:
         from beamer2slides.gslides import execute
         if self.defer:
             self.pending.append(requests)
@@ -104,7 +107,7 @@ class LiveDeck:
         if not queue:
             return []
 
-        def send(reqs: list[JsonObject]) -> None:
+        def send(reqs: list[SlidesRequest]) -> None:
             self.writes += 1
             execute(self.api.presentations().batchUpdate(presentationId=self.pid, body={"requests": reqs}))
         try:
@@ -121,19 +124,14 @@ class LiveDeck:
                 refused.append(i)
         return refused
 
-    def _touched(self, requests: list[JsonObject]) -> None:
+    def _touched(self, requests: list[SlidesRequest]) -> None:
         """Mark the slides `requests` change (and `reshaped` for slides added, removed or moved)."""
         slide_ids = {s.id for s in self.model.slides}
         where = {e.id: s.id for s in self.model.slides for e in s.elements}
         for r in requests:
-            (name, value), = r.items()
-            body = as_object(value, name)
-            ids = [body.get("objectId"), body.get("pageObjectId"), body.get("groupObjectId"), body.get("tableObjectId"),
-                   part(body.get("elementProperties"), "elementProperties").get("pageObjectId"),
-                   *_named(body.get("childrenObjectIds")), *_named(body.get("objectIds")),
-                   *_named(body.get("slideObjectIds"))]
-            for oid in ids:
-                if not isinstance(oid, str) or not oid:
+            name = slides_request_kind(r)
+            for oid in _named(r):
+                if not oid:
                     continue
                 if oid in slide_ids:
                     self.dirty.add(oid)
@@ -145,12 +143,89 @@ class LiveDeck:
                 self.reshaped = True
 
 
-def _named(v: Json) -> list[Json]:
-    """The ids a request field names: a list of them, or a duplicateObject's `objectIds` map (by
-    the ids it copies)."""
-    if isinstance(v, dict):
-        return [k for k in v]
-    return v if isinstance(v, list) else []
+def _made_on(props: SlidesPageElementProperties | None) -> list[str | None]:
+    """The page a created element goes on (none said: none)."""
+    return [] if props is None else [props["pageObjectId"]]
+
+
+def _named(r: SlidesRequest) -> list[str | None]:
+    """The objects a request names: the one it changes or makes, the page it makes an element on,
+    a group's children, a duplication's originals (its `objectIds` map, by the ids it copies), the
+    slides it moves, the elements it restacks."""
+    if "createImage" in r:
+        return [r["createImage"].get("objectId"), *_made_on(r["createImage"].get("elementProperties"))]
+    if "createLine" in r:
+        return [r["createLine"].get("objectId"), *_made_on(r["createLine"].get("elementProperties"))]
+    if "createShape" in r:
+        return [r["createShape"].get("objectId"), *_made_on(r["createShape"].get("elementProperties"))]
+    if "createTable" in r:
+        return [r["createTable"].get("objectId"), *_made_on(r["createTable"].get("elementProperties"))]
+    if "createSlide" in r:
+        return [r["createSlide"].get("objectId")]
+    if "duplicateObject" in r:
+        return [r["duplicateObject"]["objectId"], *r["duplicateObject"].get("objectIds", {})]
+    if "groupObjects" in r:
+        return [r["groupObjects"].get("groupObjectId"), *r["groupObjects"]["childrenObjectIds"]]
+    if "ungroupObjects" in r:
+        return [*r["ungroupObjects"]["objectIds"]]
+    if "updateSlidesPosition" in r:
+        return [*r["updateSlidesPosition"]["slideObjectIds"]]
+    if "updatePageElementsZOrder" in r:
+        return [*r["updatePageElementsZOrder"]["pageElementObjectIds"]]
+    if "replaceImage" in r:
+        return [r["replaceImage"]["imageObjectId"]]
+    if "insertTableRows" in r:
+        return [r["insertTableRows"]["tableObjectId"]]
+    if "insertTableColumns" in r:
+        return [r["insertTableColumns"]["tableObjectId"]]
+    if "deleteTableRow" in r:
+        return [r["deleteTableRow"]["tableObjectId"]]
+    if "deleteTableColumn" in r:
+        return [r["deleteTableColumn"]["tableObjectId"]]
+    return [_changed(r)]
+
+
+def _changed(r: SlidesRequest) -> str:
+    """The object a request of the kinds that change one object names (`objectId`)."""
+    if "deleteObject" in r:
+        return r["deleteObject"]["objectId"]
+    if "deleteText" in r:
+        return r["deleteText"]["objectId"]
+    if "insertText" in r:
+        return r["insertText"]["objectId"]
+    if "updateImageProperties" in r:
+        return r["updateImageProperties"]["objectId"]
+    if "updateLineProperties" in r:
+        return r["updateLineProperties"]["objectId"]
+    if "updatePageElementAltText" in r:
+        return r["updatePageElementAltText"]["objectId"]
+    if "updatePageElementTransform" in r:
+        return r["updatePageElementTransform"]["objectId"]
+    if "updatePageProperties" in r:
+        return r["updatePageProperties"]["objectId"]
+    if "updateShapeProperties" in r:
+        return r["updateShapeProperties"]["objectId"]
+    if "updateSlideProperties" in r:
+        return r["updateSlideProperties"]["objectId"]
+    if "updateTableBorderProperties" in r:
+        return r["updateTableBorderProperties"]["objectId"]
+    if "updateTableCellProperties" in r:
+        return r["updateTableCellProperties"]["objectId"]
+    if "updateTableRowProperties" in r:
+        return r["updateTableRowProperties"]["objectId"]
+    if "updateTableColumnProperties" in r:
+        return r["updateTableColumnProperties"]["objectId"]
+    if "createParagraphBullets" in r:
+        return r["createParagraphBullets"]["objectId"]
+    if "deleteParagraphBullets" in r:
+        return r["deleteParagraphBullets"]["objectId"]
+    if "mergeTableCells" in r:
+        return r["mergeTableCells"]["objectId"]
+    if "updateParagraphStyle" in r:
+        return r["updateParagraphStyle"]["objectId"]
+    if "updateTextStyle" in r:
+        return r["updateTextStyle"]["objectId"]
+    raise ValueError(f"a Slides request of {sorted(r)} names no object `_named` reads")
 
 
 def open_deck(pid: str, *, defer: bool) -> LiveDeck:
@@ -166,8 +241,10 @@ def new_id() -> str:
     return "u" + uuid.uuid4().hex[:16]
 
 
-def rgb(color: str) -> JsonObject:
-    return {"rgbColor": {k: int(color[i:i + 2], 16) / 255 for k, i in (("red", 1), ("green", 3), ("blue", 5))}}
+def rgb(color: str) -> OpaqueColor:
+    """`#rrggbb` as a request's colour."""
+    return {"rgbColor": {"red": int(color[1:3], 16) / 255, "green": int(color[3:5], 16) / 255,
+                         "blue": int(color[5:7], 16) / 255}}
 
 
 EditName = Literal["replace_word", "append_sentence", "add_paragraph", "insert_before_hole", "delete_paragraph",
@@ -217,12 +294,38 @@ def locate(deck: LiveDeck, slide: Json, phrase: str) -> tuple[Slide, Element, st
     raise CheckError(f"{phrase!r} not found in {el.id}")
 
 
-def _where(el: Element, cell: Cell | None) -> JsonObject:
-    return {"objectId": el.id, **({"cellLocation": cell.location()} if cell else {})}
+def _location(cell: Cell) -> SlidesTableCellLocation:
+    """The cell as a request's `cellLocation`."""
+    return {"rowIndex": cell.row, "columnIndex": cell.column}
 
 
-def _range(raw: str, a: int, b: int) -> JsonObject:
+def _range(raw: str, a: int, b: int) -> SlidesRange:
     return {"type": "FIXED_RANGE", "startIndex": utf16(raw, a), "endIndex": utf16(raw, b)}
+
+
+def _delete_text(el: Element, cell: Cell | None, text_range: SlidesRange) -> SlidesRequest:
+    """Delete `text_range` of the element's text (of its cell `cell`, in a table)."""
+    if cell:
+        return {"deleteText": {"objectId": el.id, "cellLocation": _location(cell), "textRange": text_range}}
+    return {"deleteText": {"objectId": el.id, "textRange": text_range}}
+
+
+def _insert_text(el: Element, cell: Cell | None, text: str, index: int) -> SlidesRequest:
+    """Type `text` at `index` (UTF-16) of the element's text (of its cell `cell`, in a table)."""
+    body: SlidesInsertTextRequest = {"objectId": el.id, "cellLocation": _location(cell), "text": text,
+                                     "insertionIndex": index} if cell else \
+        {"objectId": el.id, "text": text, "insertionIndex": index}
+    return {"insertText": body}
+
+
+def _text_style(el: Element, cell: Cell | None, text_range: SlidesRange, style: SlidesTextStyle,
+                fields: str) -> SlidesRequest:
+    """Style `text_range` of the element's text (of its cell `cell`, in a table)."""
+    body: SlidesUpdateTextStyleRequest = {
+        "objectId": el.id, "cellLocation": _location(cell), "textRange": text_range, "style": style,
+        "fields": fields} if cell else \
+        {"objectId": el.id, "textRange": text_range, "style": style, "fields": fields}
+    return {"updateTextStyle": body}
 
 
 def _word(raw: str, span: tuple[int, int], word: str) -> tuple[int, int]:
@@ -255,8 +358,7 @@ def replace_word(deck: LiveDeck, slide: Json, text: str, old: str, new: str) -> 
     s, el, raw, cell, span = locate(deck, slide, text)
     a, b = _word(raw, span, old)
     after = norm(raw[span[0]:a] + new + raw[b:span[1]])
-    deck.batch([{"deleteText": {**_where(el, cell), "textRange": _range(raw, a, b)}},
-                {"insertText": {**_where(el, cell), "text": new, "insertionIndex": utf16(raw, a)}}])
+    deck.batch([_delete_text(el, cell, _range(raw, a, b)), _insert_text(el, cell, new, utf16(raw, a))])
     return expectation("replace_word", {"slide": slide, "text": text, "old": old, "new": new}, [slide],
                        [{"check": "text", "slide": slide, "text": after, "count": 1},
                         {"check": "text", "slide": slide, "text": text, "count": 0}])
@@ -267,7 +369,7 @@ def append_sentence(deck: LiveDeck, slide: Json, text: str, sentence: str) -> Ex
     s, el, raw, cell, span = locate(deck, slide, text)
     end = raw.find("\n", span[1])
     end = len(raw) if end < 0 else end
-    deck.batch([{"insertText": {**_where(el, cell), "text": " " + sentence, "insertionIndex": utf16(raw, end)}}])
+    deck.batch([_insert_text(el, cell, " " + sentence, utf16(raw, end))])
     return expectation("append_sentence", {"slide": slide, "text": text, "sentence": sentence}, [slide],
                        [{"check": "text", "slide": slide, "text": f"{text} {sentence}", "count": 1}])
 
@@ -278,7 +380,7 @@ def add_paragraph(deck: LiveDeck, slide: Json, text: str, paragraph: str) -> Exp
     s, el, raw, cell, span = locate(deck, slide, text)
     end = raw.find("\n", span[1])
     end = len(raw.rstrip("\n")) if end < 0 else end
-    deck.batch([{"insertText": {**_where(el, cell), "text": "\n" + paragraph, "insertionIndex": utf16(raw, end)}}])
+    deck.batch([_insert_text(el, cell, "\n" + paragraph, utf16(raw, end))])
     return expectation("add_paragraph", {"slide": slide, "text": text, "paragraph": paragraph}, [slide],
                        [{"check": "text", "slide": slide, "text": paragraph, "count": 1},
                         {"check": "text", "slide": slide, "text": text, "count": 1}])
@@ -298,7 +400,7 @@ def insert_before_hole(deck: LiveDeck, slide: Json, text: str, words: str) -> Ex
     if not hole:
         raise CheckError(f"no formula hole in the paragraph holding {text!r}")
     before = raw[start:hole.start()].split()
-    deck.batch([{"insertText": {**_where(el, cell), "text": words + " ", "insertionIndex": utf16(raw, hole.start())}}])
+    deck.batch([_insert_text(el, cell, words + " ", utf16(raw, hole.start()))])
     checks: list[JsonObject] = [{"check": "text", "slide": slide, "text": words, "count": 1}]
     if before:
         checks.append({"check": "text", "slide": slide, "text": f"{before[-1]} {words}", "count": 1})
@@ -319,9 +421,9 @@ def _table_cell(deck: LiveDeck, slide: Json, text: str, nth: int | None) -> tupl
     return el, cell
 
 
-def _cell_text(el: Element, cell: Cell, text: str) -> JsonObject:
+def _cell_text(el: Element, cell: Cell, text: str) -> SlidesRequest:
     """Type `text` into an empty cell."""
-    return {"insertText": {"objectId": el.id, "cellLocation": cell.location(), "text": text, "insertionIndex": 0}}
+    return _insert_text(el, cell, text, 0)
 
 
 def insert_table_row(deck: LiveDeck, slide: Json, text: str, cells: Sequence[str], nth: int | None) -> Expectation:
@@ -330,9 +432,9 @@ def insert_table_row(deck: LiveDeck, slide: Json, text: str, cells: Sequence[str
     of several tables holding `text` (None: there must be one)."""
     el, cell = _table_cell(deck, slide, text, nth)
     row, cols = cell.row + 1, el.table_size[1]
-    insert: JsonObject = {"insertTableRows": {"tableObjectId": el.id, "cellLocation": cell.location(),
-                                              "insertBelow": True, "number": 1}}
-    typed: list[JsonObject] = [_cell_text(el, Cell(row=row, column=i), t) for i, t in enumerate(cells[:cols]) if t]
+    insert: SlidesRequest = {"insertTableRows": {"tableObjectId": el.id, "cellLocation": _location(cell),
+                                                 "insertBelow": True, "number": 1}}
+    typed: list[SlidesRequest] = [_cell_text(el, Cell(row=row, column=i), t) for i, t in enumerate(cells[:cols]) if t]
     deck.batch([insert, *typed])
     return expectation("insert_table_row", {"slide": slide, "text": text, "cells": _jlist(cells), "nth": nth}, [slide],
                        [{"check": "text", "slide": slide, "text": t, "count": 1} for t in cells[:cols] if t])
@@ -343,9 +445,9 @@ def insert_table_column(deck: LiveDeck, slide: Json, text: str, cells: Sequence[
     the table grows to the right, over whatever is beside it. `nth` as for `insert_table_row`."""
     el, cell = _table_cell(deck, slide, text, nth)
     col, rows = cell.column + 1, el.table_size[0]
-    insert: JsonObject = {"insertTableColumns": {"tableObjectId": el.id, "cellLocation": cell.location(),
-                                                 "insertRight": True, "number": 1}}
-    typed: list[JsonObject] = [_cell_text(el, Cell(row=i, column=col), t) for i, t in enumerate(cells[:rows]) if t]
+    insert: SlidesRequest = {"insertTableColumns": {"tableObjectId": el.id, "cellLocation": _location(cell),
+                                                    "insertRight": True, "number": 1}}
+    typed: list[SlidesRequest] = [_cell_text(el, Cell(row=i, column=col), t) for i, t in enumerate(cells[:rows]) if t]
     deck.batch([insert, *typed])
     return expectation("insert_table_column", {"slide": slide, "text": text, "cells": _jlist(cells), "nth": nth}, [slide],
                        [{"check": "text", "slide": slide, "text": t, "count": 1} for t in cells[:rows] if t])
@@ -359,7 +461,7 @@ def delete_paragraph(deck: LiveDeck, slide: Json, text: str) -> Expectation:
     end = len(raw) - 1 if end < 0 else end
     paragraphs = [p for p in raw.split("\n") if norm(p) and norm(text) not in norm(p)]
     a, b = (start, end + 1) if end < len(raw) - 1 else (max(0, start - 1), end)
-    deck.batch([{"deleteText": {**_where(el, cell), "textRange": _range(raw, a, b)}}])
+    deck.batch([_delete_text(el, cell, _range(raw, a, b))])
     checks: list[JsonObject] = [{"check": "text", "slide": slide, "text": text, "count": 0}]
     if paragraphs:
         checks.append({"check": "text", "slide": slide, "text": norm(paragraphs[0]), "count": 1})
@@ -369,10 +471,10 @@ def delete_paragraph(deck: LiveDeck, slide: Json, text: str) -> Expectation:
 # ---------------------------------------------------------------- style
 
 def _style(deck: LiveDeck, name: Literal["bold", "recolour"], slide: Json, word: str, context: str | None,
-           style: JsonObject, fields: str, check: JsonObject, more_args: JsonObject) -> Expectation:
+           style: SlidesTextStyle, fields: str, check: JsonObject, more_args: JsonObject) -> Expectation:
     s, el, raw, cell, span = locate(deck, slide, context or word)
     a, b = _word(raw, span, word) if context else span
-    deck.batch([{"updateTextStyle": {**_where(el, cell), "textRange": _range(raw, a, b), "style": style, "fields": fields}}])
+    deck.batch([_text_style(el, cell, _range(raw, a, b), style, fields)])
     args: JsonObject = {"slide": slide, "word": word, "context": context, **more_args}
     return expectation(name, args, [slide], [{"check": "style", "slide": slide, "text": word,
                                               **({"context": context} if context else {}), **check}])
@@ -395,18 +497,18 @@ def resize_font(deck: LiveDeck, slide: Json, text: str, size: float) -> Expectat
     s, el, raw, cell, span = locate(deck, slide, text)
     start, end = raw.rfind("\n", 0, span[0]) + 1, raw.find("\n", span[1])
     end = len(raw) if end < 0 else end
-    deck.batch([{"updateTextStyle": {**_where(el, cell), "textRange": _range(raw, start, end),
-                                     "style": {"fontSize": {"magnitude": size, "unit": "PT"}}, "fields": "fontSize"}}])
+    deck.batch([_text_style(el, cell, _range(raw, start, end), {"fontSize": {"magnitude": size, "unit": "PT"}},
+                            "fontSize")])
     return expectation("resize_font", {"slide": slide, "text": text, "size": size}, [slide],
                        [{"check": "style", "slide": slide, "text": text, "size": size}])
 
 
 # ---------------------------------------------------------------- geometry
 
-def _relative(object_id: str, sx: float, sy: float, dx: float, dy: float) -> JsonObject:
-    return {"updatePageElementTransform": {"objectId": object_id, "applyMode": "RELATIVE", "transform": {
-        "scaleX": sx, "shearX": 0, "translateX": dx * EMU_PER_PT,
-        "shearY": 0, "scaleY": sy, "translateY": dy * EMU_PER_PT, "unit": "EMU"}}}
+def _relative(oid: str, sx: float, sy: float, dx: float, dy: float) -> SlidesRequest:
+    transform: AffineTransform = {"scaleX": sx, "shearX": 0, "translateX": dx * EMU_PER_PT,
+                                  "shearY": 0, "scaleY": sy, "translateY": dy * EMU_PER_PT, "unit": "EMU"}
+    return {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": transform}}
 
 
 def move(deck: LiveDeck, slide: Json, target: Json, dx: float, dy: float) -> Expectation:
@@ -465,7 +567,7 @@ def delete_group(deck: LiveDeck, slide: Json, target: Json) -> Expectation:
     return expectation("delete_group", {"slide": slide, "target": target}, [slide], checks)
 
 
-def _props(page_id: str, box: Sequence[float]) -> JsonObject:
+def _props(page_id: str, box: Sequence[float]) -> SlidesPageElementProperties:
     x, y, w, h = box
     return {"pageObjectId": page_id, "size": {"width": {"magnitude": w * EMU_PER_PT, "unit": "EMU"},
                                               "height": {"magnitude": h * EMU_PER_PT, "unit": "EMU"}},
@@ -484,6 +586,8 @@ def add_text_box(deck: LiveDeck, slide: Json, text: str, box: Sequence[float]) -
 
 
 def add_shape(deck: LiveDeck, slide: Json, shape_type: str, box: Sequence[float], color: str) -> Expectation:
+    if not is_shape_type(shape_type):
+        raise CheckError(f"{shape_type!r} is no Slides shape type")
     s, oid = deck.model.one(slide), new_id()
     deck.batch([{"createShape": {"objectId": oid, "shapeType": shape_type, "elementProperties": _props(s.id, box)}},
                 {"updateShapeProperties": {"objectId": oid, "fields": "shapeBackgroundFill.solidFill.color",
@@ -550,7 +654,7 @@ def group(deck: LiveDeck, slide: Json, targets: Sequence[Json]) -> Expectation:
     s = deck.model.one(slide)
     els = [deck.model.element(s, t) for t in targets]
     tops = list(dict.fromkeys(e.top for e in els))
-    deck.batch([{"groupObjects": {"groupObjectId": new_id(), "childrenObjectIds": _jlist(tops)}}])
+    deck.batch([{"groupObjects": {"groupObjectId": new_id(), "childrenObjectIds": tops}}])
     members = [_member(e) for e in els]   # (grouping moves nothing: text and centres stay)
     return expectation("group", {"slide": slide, "targets": _jlist(targets)}, [slide],
                        [{"check": "grouped", "slide": slide, "members": _jlist(members), "grouped": True}])
@@ -560,24 +664,25 @@ def ungroup(deck: LiveDeck, slide: Json, target: Json) -> Expectation:
     """Ungroup the group holding the target."""
     s = deck.model.one(slide)
     el = deck.model.element(s, target)
-    if el.parent is None:
+    parent = el.parent
+    if parent is None:
         raise CheckError(f"{target} is not in a group")
-    members = [_member(c) for c in s.elements if c.parent == el.parent and c.kind != "group"]
-    deck.batch([{"ungroupObjects": {"objectIds": [el.parent]}}])
+    members = [_member(c) for c in s.elements if c.parent == parent and c.kind != "group"]
+    deck.batch([{"ungroupObjects": {"objectIds": [parent]}}])
     return expectation("ungroup", {"slide": slide, "target": target}, [slide],
                        [{"check": "grouped", "slide": slide, "members": _jlist(members), "grouped": False}])
 
 
 # ---------------------------------------------------------------- slides
 
-def _title_placeholder(s: Slide) -> tuple[str, int] | None:
+def _title_placeholder(s: Slide) -> tuple[PlaceholderType, int] | None:
     """The slide's title placeholder as (type, index), or None. `createSlide` can only map a
     placeholder the layout really has - it answers *"The placeholder (15_0_0) is not on the page"*
     and refuses the whole batch otherwise - and a converted deck has layouts without a plain TITLE:
     the title page's carries CENTERED_TITLE, and a "(no theme)" copy may carry neither."""
     for e in s.elements:
         kind = e.placeholder_type
-        if kind in ("TITLE", "CENTERED_TITLE"):
+        if kind is not None and is_placeholder_type(kind) and kind in ("TITLE", "CENTERED_TITLE"):
             return kind, as_int(part(e.shape.get("placeholder"), "placeholder").get("index", 0), "placeholder.index")
     return None
 
@@ -590,19 +695,20 @@ def add_slide(deck: LiveDeck, after: Json, title: str, body: str | None) -> Expe
     dropped from the round."""
     s = deck.model.one(after)
     host = s if _title_placeholder(s) else next((x for x in deck.model.slides if _title_placeholder(x)), s)
-    kind, index = _title_placeholder(host) or ("TITLE", 0)
+    title_placeholder: tuple[PlaceholderType, int] = _title_placeholder(host) or ("TITLE", 0)
+    kind, index = title_placeholder
     props = host.obj.get("slideProperties")
     layout = None if props is None else props.get("layoutObjectId")
     if layout is None:
         raise CheckError(f"slide {host.index + 1} names no layout")
     sid, tid = new_id(), new_id()
-    reqs: list[JsonObject] = [
+    reqs: list[SlidesRequest] = [
         {"createSlide": {"objectId": sid, "insertionIndex": s.index + 1, "slideLayoutReference": {"layoutId": layout},
                          "placeholderIdMappings": [{"layoutPlaceholder": {"type": kind, "index": index}, "objectId": tid}]}},
         {"insertText": {"objectId": tid, "text": title}}]
     if body:
         bid = new_id()
-        box: list[JsonObject] = [
+        box: list[SlidesRequest] = [
             {"createShape": {"objectId": bid, "shapeType": "TEXT_BOX", "elementProperties": _props(sid, [40, 120, 600, 60])}},
             {"insertText": {"objectId": bid, "text": body}}]
         reqs += box
@@ -656,10 +762,10 @@ def set_notes(deck: LiveDeck, slide: Json, text: str) -> Expectation:
     shape = s.notes_shape()
     if shape is None:
         raise CheckError(f"slide {s.index + 1} ({s.title}) has no speaker notes shape")
-    oid = shape.get("objectId")
-    reqs: list[JsonObject] = [{"deleteText": {"objectId": oid, "textRange": {"type": "ALL"}}}] \
+    oid = object_id(shape)
+    reqs: list[SlidesRequest] = [{"deleteText": {"objectId": oid, "textRange": {"type": "ALL"}}}] \
         if norm(raw_text(text_elements(part(shape.get("shape"), "shape")))) else []
-    typed: JsonObject = {"insertText": {"objectId": oid, "text": text, "insertionIndex": 0}}
+    typed: SlidesRequest = {"insertText": {"objectId": oid, "text": text, "insertionIndex": 0}}
     deck.batch([*reqs, typed])
     return expectation("set_notes", {"slide": slide, "text": text}, [slide],
                        [{"check": "notes", "slide": slide, "text": text}])
