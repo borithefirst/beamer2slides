@@ -137,6 +137,29 @@ def tip_head(kind: DrawingType, fill: str | None, stroke: str | None, path: Sequ
     return "FILL_ARROW" if filled else "OPEN_ARROW"
 
 
+Segment = tuple[tuple[float, ...], tuple[float, ...]]
+
+
+def straight_runs(segments: Sequence[Segment]) -> list[Segment]:
+    """A polyline's segments without those of no length, and a run going on in one direction
+    joined into one segment: a TikZ |-| edge to a child straight below its parent is three
+    segments, the middle one a point, and Slides refuses a line of no size (the whole diagram
+    became a picture)."""
+    out: list[Segment] = []
+    for a, b in segments:
+        if math.dist(a, b) < 0.05:
+            continue
+        if out:
+            p, q = out[-1]
+            u, v = (q[0] - p[0], q[1] - p[1]), (b[0] - a[0], b[1] - a[1])
+            if math.dist(q, a) < 0.05 and u[0] * v[0] + u[1] * v[1] > 0 and \
+                    abs(u[0] * v[1] - u[1] * v[0]) < 0.01 * math.hypot(*u) * math.hypot(*v):
+                out[-1] = (p, b)
+                continue
+        out.append((a, b))
+    return out
+
+
 def on_rim(rect: Rect, end: Sequence[float], other: Sequence[float]) -> bool:
     """A line end on a small circle's rim with the circle behind it, away from the line: where
     TikZ stops a line at a Circle tip's back (a dot a line runs into has the end at its centre)."""
@@ -722,7 +745,7 @@ class FiguresMixin(ParagraphsMixin):
                 else:
                     nodes.append(node)
             elif d["type"] == "s" and set(ops) == {"l"} and max(r.w, r.h) > 6:
-                segments = [(tuple(a), tuple(b)) for _, (a, b) in path]
+                segments = straight_runs([(tuple(a), tuple(b)) for _, (a, b) in path])
                 stroke, width = d["stroke"] or "#000000", d["width"] or 0.4
                 first = len(lines)
                 (p0, p1), (p1b, p2) = segments[0], segments[-1]

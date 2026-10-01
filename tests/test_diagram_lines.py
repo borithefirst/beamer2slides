@@ -11,7 +11,7 @@ import pytest
 
 from beamer2slides import ir, ir_types, pdf
 from beamer2slides.classify import classify
-from beamer2slides.classify_figures import closed_path, dash_style, on_rim, tip_corners, tip_head
+from beamer2slides.classify_figures import closed_path, dash_style, on_rim, straight_runs, tip_corners, tip_head
 from beamer2slides.classify_graphics import arrow_shaft
 from beamer2slides.classify_model import Rect
 from beamer2slides.emit import FontMapper, diagram_requests
@@ -309,3 +309,14 @@ def test_the_sandbox_carries_dashes():
     finally:
         ours.close()
         theirs.close()
+
+
+def test_a_polyline_drops_its_points_and_joins_its_straight_runs() -> None:
+    """A |-| edge to a child straight below its parent: three segments, the middle one a point
+    (Slides refused the line of no size, and the whole org chart became a picture)."""
+    down = [((181.37, 119.5), (181.37, 127.8)), ((181.37, 127.8), (181.37, 127.8)), ((181.37, 127.8), (181.37, 136.11))]
+    assert straight_runs(down) == [((181.37, 119.5), (181.37, 136.11))]
+    elbow = [((0.0, 0.0), (0.0, 10.0)), ((0.0, 10.0), (20.0, 10.0))]
+    assert straight_runs(elbow) == elbow
+    back = [((0.0, 0.0), (0.0, 10.0)), ((0.0, 10.0), (0.0, 5.0))]  # (turning back is no run)
+    assert straight_runs(back) == back

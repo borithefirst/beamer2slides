@@ -228,6 +228,9 @@ def test_preset_text_rectangles() -> None:
 
 def test_preset_connection_sites() -> None:
     assert connection_sites("CAN", (0, 0, 40, 40), 0.2)[0] == (0.5, 0.2), "the top site on the near rim"
+    # Google's can, measured live (a line connected to each index, read back): five sites, the
+    # bottom at 3 - a line to the bottom connected at OOXML's 2 was moved to the left side.
+    assert connection_sites("CAN", (0, 0, 40, 40), 0.2)[1:] == [(0.5, 0), (0, 0.5), (0.5, 1), (1, 0.5)]
     nodes = [node([0, 0, 48, 42], "HEXAGON", 0.25, 10), node([100, 0, 160, 24], "OCTAGON", 0.25, 10)]
     assert connection([48, 21], nodes, ["h", "o"]) == {"connectedObjectId": "h", "connectionSiteIndex": 0}
     assert connection([106, 0], nodes, ["h", "o"]) == {"connectedObjectId": "o", "connectionSiteIndex": 6}, \

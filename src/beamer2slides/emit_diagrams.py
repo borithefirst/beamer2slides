@@ -95,7 +95,9 @@ def connection_sites(shape: TemplateKind | None, bbox: Box, adjust: float | None
     ss = min(w, h)
     a = adjust_of(shape, adjust)
     if shape == "CAN" and a is not None:
-        return [(0.5, min(0.5, a) * ss / h), (0, 0.5), (0.5, 1), (1, 0.5)]
+        # (Google's can has five sites, the lid's front first: measured live, a line connected
+        # to site i read back - OOXML's four had the bottom at 2, where Google has the left side)
+        return [(0.5, min(0.5, a) * ss / h), (0.5, 0), (0, 0.5), (0.5, 1), (1, 0.5)]
     if shape == "HEXAGON" and a is not None:
         fx = min(a * ss / w, 0.5)
         return [(1, 0.5), (1 - fx, 1), (fx, 1), (0, 0.5), (fx, 0), (1 - fx, 0)]
