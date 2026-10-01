@@ -548,6 +548,12 @@ markers.
   and `tools/text_fit.py <pdf> --out <folder> [--crops]` after `convert` + `fidelity`: wrap, drift,
   width, crowded, grown, touch, line by line on Google's renderer (`devtools/text_fit.py`,
   `tests/test_text_fit.py` on synthetic pages). Open findings: docs/project-notes.md "Text fit".
+- **TikZ diagrams**: `tests/decks/29_tikz_diagrams.tex` (37 frames, one way of drawing each) and
+  `tools/diagram_score.py <pdf> [--save F] [--against F]`: native or picture per frame, and why
+  `diagram_from` refused (`classify_state.Refusal`, `DiagramRefusal`, `PageState.diagram_refusals`);
+  pinned in `tests/test_diagram_score.py` (`BOARD`). Curves in a .pptx: `tools/probe_curves.py`
+  (custGeom keeps its path and dash but drops arrow heads; the `arc` preset and curvedConnector3
+  keep theirs).
 - **Edit hunt** (`devtools/edit_hunt.py start|edit|sync|pull --journey J`): a person's edits, a
   source revision, sync, judged by the oracles and by eye (Sonnet hunters, Haiku blind judges,
   Sonnet skeptics) under `out/edithunt/`. Findings and fixes: docs/project-notes.md "Edit hunt".

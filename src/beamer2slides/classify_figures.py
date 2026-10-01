@@ -13,6 +13,7 @@ from .classify_model import (
     polygon_shape, union_all, upright_ellipse,
 )
 from .classify_paragraphs import ParagraphsMixin
+from .classify_state import DiagramRefusal, Refusal
 from .classify_text import EQ_NUMBER_RE, card_text, family_of, math_text, span_runs
 from .ir import (
     Arrow, BeforeWord, DiagramElement, DiagramLine, Element, ImageElement, Mark, Node, ShapeElement, TemplateKind,
@@ -164,7 +165,10 @@ class FiguresMixin(ParagraphsMixin):
             return out
         rects = regions + [s.rect for s in label_spans] + self.title_bridges + self.column_bridges
         for c in cluster_rects(rects, gap=0.8 * self.body):
-            if max(c.w, c.h) < 25 or c.w * c.h > 0.8 * self.W * self.H:
+            if max(c.w, c.h) < 25:
+                continue
+            if c.w * c.h > 0.8 * self.W * self.H:
+                self.diagram_refusals.append(DiagramRefusal(box=c, reason="too_large", detail=f"{c.w:.0f}x{c.h:.0f} pt"))
                 continue
             if (c.y1 <= 0.15 * self.H or c.y0 >= 0.88 * self.H) and c.h <= 0.1 * self.H:
                 continue  # navigation dots and ornaments in the header/footer band
@@ -177,9 +181,14 @@ class FiguresMixin(ParagraphsMixin):
             if table:
                 out.append(table)  # shaded cells edge to edge: a table, not a diagram of boxes
                 continue
-            diagram = None if over_text else self.diagram_from(c, label_spans, len(out))
-            if diagram and self.splits_cells(diagram, label_spans):
-                diagram = None  # a ruled grid table_from could not read: a picture, not merged rows
+            drafted = DiagramRefusal(box=c, reason="over_text", detail="") if over_text \
+                else self.diagram_from(c, label_spans, len(out))
+            if not isinstance(drafted, DiagramRefusal) and self.splits_cells(drafted, label_spans):
+                # a ruled grid table_from could not read: a picture, not merged rows
+                drafted = DiagramRefusal(box=c, reason="splits_cells", detail="")
+            diagram = None if isinstance(drafted, DiagramRefusal) else drafted
+            if isinstance(drafted, DiagramRefusal):
+                self.diagram_refusals.append(drafted)
             if diagram and any(n["text"] for n in diagram["nodes"]):
                 out.append(diagram)  # frames around their own text (a framed paragraph), not marks on prose
                 continue
@@ -537,13 +546,20 @@ class FiguresMixin(ParagraphsMixin):
                     nodes.append(DraftNode(rect=rect, shape="RECTANGLE", spans=[], fill=None,
                                            stroke=top["stroke"], width=top["width"], radius=None))
 
-    def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> DiagramElement | None:
+    def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> DiagramElement | DiagramRefusal:
         """A figure cluster made only of simple nodes (rectangles, rounded rectangles, ellipses)
         with their text inside, straight lines and arrow tips: rebuilt from native Slides
-        shapes and lines. Anything else (curves, images, math, loose labels) keeps it a picture."""
+        shapes and lines. Anything else (curves, images, math, loose labels) keeps it a picture,
+        and the refusal says which."""
         box = c.expand(0.5)
-        if any(box.contains_rect(Rect.of(im["bbox"]), tol=0.5) for im in self.raw["images"]) or self.holds_other_text(c, label_spans):
-            return None
+
+        def refused(reason: Refusal, detail: str) -> DiagramRefusal:
+            return DiagramRefusal(box=c, reason=reason, detail=detail)
+        inside = [im for im in self.raw["images"] if box.contains_rect(Rect.of(im["bbox"]), tol=0.5)]
+        if inside:
+            return refused("image_inside", f"{len(inside)} image(s), {inside[0]['id']}")
+        if self.holds_other_text(c, label_spans):
+            return refused("other_text", "")
         nodes: list[DraftNode] = []
         lines: list[DiagramLine] = []
         tips: list[tuple[Rect, Arrow, list[list[float]], float]] = []
@@ -553,11 +569,11 @@ class FiguresMixin(ParagraphsMixin):
                 continue
             path = d.get("path")
             if path is None:
-                return None
+                return refused("unreadable_path", d["id"])
             if d.get("soft_mask") or d.get("fill_opacity", 1.0) < 0.99 or d.get("stroke_opacity", 1.0) < 0.99:
                 # A see-through node or line (opacity=0.3 on the steps still to come, a
                 # multiplied fill): native shapes came out opaque, the dimmed step drawn in full.
-                return None
+                return refused("see_through", d["id"])
             ops = "".join(op for op, _ in path)
             shapes: dict[str, TemplateKind | None] = {
                 "re": "RECTANGLE", "lclclclc": "ROUND_RECTANGLE", "clclclcl": "ROUND_RECTANGLE",
@@ -602,10 +618,12 @@ class FiguresMixin(ParagraphsMixin):
                 points = [p for _, pts in path for p in pts]
                 tips.append((r, head, points, d["width"] if "s" in d["type"] and d["width"] else 0.0))
             else:
-                return None
+                curve = d["type"] == "s" and "c" in ops and set(ops) <= {"c", "l"}
+                return refused("curve" if curve else "unknown_shape",
+                               f"{d['id']} {d['type']} {ops[:24]} {r.w:.0f}x{r.h:.0f} pt")
         self.closed_frames(nodes, lines)
         if not nodes:
-            return None
+            return refused("no_nodes", f"{len(lines)} line(s)")
         # Shapes that cross each other (a Venn diagram): its words are placed by region - the
         # lens, one circle's own part - and a node's text is set centred in all of it.
         for i, a in enumerate(nodes):
@@ -613,11 +631,11 @@ class FiguresMixin(ParagraphsMixin):
                 ra, rb = a.rect, b.rect
                 if overlap(ra, rb) > 0.05 * min(ra.w * ra.h, rb.w * rb.h) and \
                         not ra.contains_rect(rb, tol=0.5) and not rb.contains_rect(ra, tol=0.5):
-                    return None
+                    return refused("nodes_cross", f"{a.shape} {ra.as_list()} and {b.shape} {rb.as_list()}")
         for tip, head, points, outline in tips:
             ends = [(ln, end) for ln in lines for end in ENDS if tip.expand(1).contains(*ln[end])]
             if not ends:
-                return None
+                return refused("loose_arrow_tip", f"{head} at {tip.as_list()}")
             ln, end = ends[0]
             if end == "from":
                 ln["arrow_from"] = head
@@ -641,19 +659,25 @@ class FiguresMixin(ParagraphsMixin):
         spans = [s for s in label_spans if box.contains_rect(s.rect, tol=0.5)]
         # A label with a script (R_s, C_dl in a circuit) is a formula: set as one run of plain
         # text it read "Rs", and a free label ran into the next ("ct Z").
-        if any(b is not a and -0.05 * a.size <= b.rect.x0 - a.rect.x1 <= 0.15 * a.size and b.size < 0.85 * a.size
-               and 0.1 * a.size < abs(b.baseline - a.baseline) < 0.6 * a.size for a in spans for b in spans):
-            return None
+        scripted = [(a, b) for a in spans for b in spans
+                    if b is not a and -0.05 * a.size <= b.rect.x0 - a.rect.x1 <= 0.15 * a.size and b.size < 0.85 * a.size
+                    and 0.1 * a.size < abs(b.baseline - a.baseline) < 0.6 * a.size]
+        if scripted:
+            return refused("scripted_label", f"{scripted[0][0].text!r} with {scripted[0][1].text!r}")
         free: list[Span] = []
 
         def area(n: DraftNode) -> float:
             return n.rect.w * n.rect.h
         seen: list[Span] = []
         for s in spans:
-            if s.info.family in ("math", "icon") or "�" in s.text or not s.horizontal:
-                # (an icon font's glyph has no Unicode: as a node's label it read U+FFFD, a
-                # diamond with a question mark, where the picture shows the icon)
-                return None
+            # (an icon font's glyph has no Unicode: as a node's label it read U+FFFD, a
+            # diamond with a question mark, where the picture shows the icon)
+            if s.info.family == "math":
+                return refused("math_label", repr(s.text))
+            if s.info.family == "icon" or "�" in s.text:
+                return refused("icon_label", repr(s.text))
+            if not s.horizontal:
+                return refused("rotated_label", repr(s.text))
             # A node drawn again on a later overlay step (\node<2->[fill=yellow] at (a) {A})
             # paints its label a second time on the same spot: one label, and it goes to the
             # copy on top - the last drawn of the smallest nodes around it. Given to the first,
@@ -668,8 +692,9 @@ class FiguresMixin(ParagraphsMixin):
                 [n for n in owners if area(n) <= 1.02 * smallest + 0.01][-1].spans.append(s)
             else:
                 free.append(s)  # edge labels and captions: a text box in the group
-        if sum(n.shape is not None and not n.spans for n in nodes) > MAX_PLAIN_RECTANGLES:
-            return None  # a QR code, a pixel grid: modules, not nodes
+        empty = sum(n.shape is not None and not n.spans for n in nodes)
+        if empty > MAX_PLAIN_RECTANGLES:
+            return refused("too_many_rectangles", f"{empty} empty nodes")  # a QR code, a pixel grid
         # Free labels on one baseline and close together are one label. (Close on both sides:
         # two edge labels whose baselines round apart sort right to left, and the one-sided gap
         # joined them across the node between - "connect SYN+ACK" over two arrows.)

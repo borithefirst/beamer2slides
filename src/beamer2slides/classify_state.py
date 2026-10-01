@@ -12,9 +12,46 @@ dataclasses; what becomes deck.json is built as `ir.py` says, elsewhere.
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 from .classify_model import Line, Paragraph, Rect, Span
 from .raw_types import RawColor, RawDrawing, RawImage, RawPage
+
+Refusal = Literal[
+    "too_large",            # the cluster is most of the page (or more): left in the background
+    "over_text",            # drawn over native text: an overlay or nothing
+    "image_inside",         # a raster image (or a shading) among the drawings
+    "other_text",           # text inside that is none of its labels
+    "unreadable_path",      # a drawing whose path extract could not read
+    "see_through",          # opacity or a soft mask (a shadow)
+    "curve",                # a stroked line with Bezier segments (bend, in/out, loops, braces)
+    "unknown_shape",        # a closed path that is no node shape we know
+    "no_nodes",             # lines and labels only
+    "nodes_cross",          # nodes overlapping without nesting (a Venn diagram)
+    "loose_arrow_tip",      # an arrow head at no line's end
+    "scripted_label",       # a label with a sub- or superscript
+    "math_label",           # a label in a math font
+    "icon_label",           # a label in an icon font, or with no Unicode
+    "rotated_label",        # a label not set horizontally (sloped)
+    "too_many_rectangles",  # a QR code, a pixel grid
+    "splits_cells",         # a ruled grid table_from could not read
+]
+"""Why a figure cluster did not become a native diagram (`DiagramRefusal`)."""
+REFUSALS: tuple[Refusal, ...] = (
+    "too_large", "over_text", "image_inside", "other_text", "unreadable_path", "see_through", "curve",
+    "unknown_shape", "no_nodes", "nodes_cross", "loose_arrow_tip", "scripted_label", "math_label", "icon_label",
+    "rotated_label", "too_many_rectangles", "splits_cells")
+"""Every `Refusal`, to read one back from JSON (`tests/test_diagram_score.py` holds them equal)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class DiagramRefusal:
+    """A figure cluster that stays a picture (or in the background) instead of becoming a
+    diagram, and why: what an experiment on diagrams counts (`devtools/diagram_score.py`).
+    `detail` names the drawing or label that decided it."""
+    box: Rect
+    reason: Refusal
+    detail: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -134,3 +171,5 @@ class PageState:
         self.bullet_boxes: list[Rect] = []
         self.icon_bullets: list[Rect] = []
         """Item labels that became pictures."""
+        self.diagram_refusals: list[DiagramRefusal] = []
+        """Figure clusters that did not become native diagrams, and why (`figures`)."""

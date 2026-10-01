@@ -556,7 +556,9 @@ def trace(segments: Sequence[Segment], filled: bool) -> tuple[list[DrawingItem],
             lines = []
         elif cmd[0] == "l":
             p = cmd[1]
-            rect = _grown(rect, p)
+            # (and where the line starts: after a second move, the start is in no earlier item -
+            # a battery's long plate drawn after its short one lost its far end from the box)
+            rect = _grown(_grown(rect, last), p)
             line: LineItem = ("l", last, p)
             items.append(line)
             lines.append(line)
@@ -566,7 +568,7 @@ def trace(segments: Sequence[Segment], filled: bool) -> tuple[list[DrawingItem],
         elif cmd[0] == "c":
             _, c1, c2, to = cmd
             lines = []
-            for q in curve_extremes(last, c1, c2, to):
+            for q in [last, *curve_extremes(last, c1, c2, to)]:
                 rect = _grown(rect, q)
             items.append(("c", last, c1, c2, to))
             last = to

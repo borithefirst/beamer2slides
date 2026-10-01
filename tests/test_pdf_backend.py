@@ -559,3 +559,17 @@ def test_the_backend_is_chosen_from_outside(tmp_path: Path, monkeypatch: pytest.
         assert pdf.Document(b"%PDF") == "a document"
     finally:
         pdf.set_backend(old)
+
+
+def test_a_later_subpath_starts_inside_the_box() -> None:
+    """A path of two subpaths: the second's start is in the box though no earlier item ends
+    there (circuitikz's battery, short plate then long: the long one's far end was cut off and
+    left out of every picture)."""
+    short = [(api.SEG_MOVE, 93.0, 141.0, False), (api.SEG_LINE, 105.0, 141.0, False)]
+    long = [(api.SEG_MOVE, 86.0, 145.0, False), (api.SEG_LINE, 111.0, 145.0, False)]
+    traced = api.trace(short + long, False)
+    assert traced is not None
+    assert traced[1] == (86.0, 141.0, 111.0, 145.0)
+    curved = api.trace(short + [(api.SEG_MOVE, 80.0, 150.0, False), (api.SEG_BEZIER, 81.0, 151.0, False),
+                                (api.SEG_BEZIER, 82.0, 151.0, False), (api.SEG_BEZIER, 83.0, 150.0, False)], False)
+    assert curved is not None and curved[1][0] == 80.0
