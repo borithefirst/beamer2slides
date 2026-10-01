@@ -192,7 +192,13 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   has scripts; an ellipse must be upright (`upright_ellipse`), a redrawn node keeps its label on the
   top copy. See-through (opacity, blend) drawings and clusters of more than `MAX_PLAIN_RECTANGLES`
   rectangles stay pictures; elbows are written |- (a -| one from its other end); a panel under a
-  stroke drawn after it stays in the background (a frame's own rules excepted).
+  stroke drawn after it stays in the background (a frame's own rules excepted). Every refusal
+  names its reason (`classify_state.Refusal`, `tools/diagram_score.py`). Node presets beyond the
+  box (CAN, CLOUD, polygons, punched tape, pill; a split rectangle is stacked nodes) are
+  `classify_shapes.preset_shape`, their `adjust` carried by .pptx templates; connection sites are
+  Google's, measured live (its CAN has five). A curved stroke is a chain of ARC template copies
+  (`curves.path_pieces`, line `sweep`): custGeom would lose its arrow heads. Dashes come from the
+  PDF (drawing `dash`, `classify_figures.dash_style`); circle/square/diamond tips are heads.
 - `shape`: opaque panels such as beamer blocks (title bar + body built to survive resizing).
   Frames (`frame_of`): a fully framed box (`\fcolorbox`, tcolorbox, `frame=single`) is a panel
   with an outline, a partial or bare frame rule shapes (`rule_frames`); `emit.grown_panels`
