@@ -4,12 +4,15 @@ ToUnicode misnames. Synthetic characters, no PDF."""
 
 import dataclasses
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import NoReturn
+
+import pytest
 
 from beamer2slides import extract
 from beamer2slides.arrays import Pixels
 from beamer2slides.extract import readable
-from beamer2slides.pdf import Char, char_box
+from beamer2slides.pdf import Char, Document, char_box
 from beamer2slides.pdf.api import Box, Drawing, EmbeddedImage, ImageInfo, Link, PageObject
 from beamer2slides.raw_types import RawSpan
 
@@ -18,6 +21,7 @@ SIZE = 10.0
 X0 = 20.0        # where the first piece starts
 WIDTH = 0.5      # em, every glyph's advance
 BASELINE = 100.0
+DECKS = Path(__file__).parent / "decks" / "out"
 
 
 def glyphs(pieces: list[tuple[str, float]], *, font: str, size: float) -> list[Char]:
@@ -154,6 +158,59 @@ def test_an_italic_accent_past_its_advance_leaves_the_word_space() -> None:
     assert extract._accent_overhang(Page(chars, {"ì": 3.5}), chars)[1].advance == 3.51
     upright = [dataclasses.replace(ch, font="Calibri") for ch in chars]
     assert extract._accent_overhang(Page(upright, {"ì": 2.5}), upright)[1].advance == 3.51
+
+
+def line_of(pieces: list[tuple[str, str, float, float]], *, size: float) -> list[Char]:
+    """Characters of (character, font, advance em, pen gap em before it) on one baseline."""
+    out: list[Char] = []
+    x = X0
+    for c, font, advance, gap in pieces:
+        x += gap * size
+        adv = advance * size
+        out.append(Char(c=c, font=font, size=size, color=0, alpha=255, origin=(x, BASELINE),
+                        box=char_box(x, BASELINE, 1.0, 0.0, adv, size, 0.8, -0.2), dir=(1.0, 0.0), obj=len(out),
+                        font_id=0, advance=adv, synthetic=False, ascent=0.8, descent=-0.2, exact_advance=False))
+        x += adv
+    return out
+
+
+def test_a_math_italic_correction_is_no_space() -> None:
+    # 29_tikz_diagrams p17, $h_t = f(h_{t-1}, x_t)$ in beamer's sans math: CMSSI10's f (advance
+    # 0.305 em at 10.95 pt) and the '(' 0.217 em after it, f's TFM italic correction (0.21705):
+    # it read 'f (h' in Slides
+    f_paren = line_of([("f", "CMSSI10", 0.305, 0), ("(", "CMSS10", 0.389, 0.217), ("h", "CMSSI10", 0.5, 0)], size=10.95)
+    assert texts(f_paren, {}) == ["f", "(", "h"]  # (before: "f", " (", "h")
+    f = next(s for s in extract.spans(Page(f_paren, {}), Shown(), False, f_paren, {}) if s.text == "f")
+    assert abs(f.bbox[2] - f_paren[1].origin[0]) < 1e-9  # TeX's box of f reaches the '('
+    # CMMI's V (0.222 em, a medium space's width), lmodern's name for it, pdflatex's bitmap ECSI
+    assert texts(line_of([("V", "CMMI10", 0.583, 0), ("(", "CMR10", 0.389, 0.222)], size=10), {}) == ["V", "("]
+    assert extract.italic_correction("ABCDEF+LMMathItalic10-Regular", "V") == 0.222
+    assert extract.italic_correction("ECSI1095", "f") == 0.224
+    assert extract.italic_correction("CMSSI10", "a") is None
+
+
+def test_a_space_after_an_italic_letter_stays() -> None:
+    # 02_math p2, 28_display_math p6: TeX's thick and medium spaces after CMSSI10's a and b come on
+    # top of their corrections (0.010 + 0.278, 0.031 + 0.222)
+    assert texts(line_of([("a", "CMSSI10", 0.48, 0), ("=", "CMSS10", 0.778, 0.287)], size=10.95), {}) == ["a", " ="]
+    assert texts(line_of([("b", "CMSSI10", 0.516, 0), ("+", "CMSS10", 0.778, 0.253)], size=10.95), {}) == ["b", " +"]
+    # 28_line_breaks p2: a shrunk word space after an oblique f (0.267 em; its correction 0.218)
+    word = line_of([("o", "LMSans9-Oblique", 0.5, 0), ("f", "LMSans9-Oblique", 0.314, 0),
+                    ("p", "LMSans9-Oblique", 0.53, 0.267)], size=9)
+    assert texts(word, {}) == ["of p"]
+    # a thin space after the correction ($f\,(x)$: 0.384 em) is a word gap, the advance its own
+    thin = line_of([("f", "CMSSI10", 0.305, 0), ("(", "CMSS10", 0.389, 0.384)], size=10.95)
+    assert extract._italic_corrections(thin)[0].advance == thin[0].advance
+
+
+@pytest.mark.needs_decks("out/29_tikz_diagrams.pdf")
+def test_the_tikz_deck_reads_f_of_h() -> None:
+    doc = Document(DECKS / "29_tikz_diagrams.pdf")
+    try:
+        text = "".join(s.text for s in extract.shown_spans(doc[16]))
+    finally:
+        doc.close()
+    assert "f(h" in text and "f (" not in text
 
 
 def test_misnamed_characters_read_as_their_words() -> None:

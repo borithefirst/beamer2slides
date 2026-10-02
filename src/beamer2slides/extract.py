@@ -271,6 +271,104 @@ def _accent_overhang(page: Page, chars: list[Char]) -> list[Char]:
     return out
 
 
+# TeX's italic correction: in math every letter's box is widened by its font's italic correction
+# (TFM), a kern the PDF does not draw, so the pen gap after an italic letter is that correction
+# plus whatever space TeX set (in text, \/ and \emph/\textit's automatic one before ')' or ';').
+# Beamer's sans math draws $f(h)$ with CMSSI10's f, whose correction is 0.21705 em: the gap to '('
+# measured 0.21700 em on every built deck (02_math, 13_inline_math, 28_display_math, 29_tikz p17),
+# over JOIN_GAP, and became a space ('f (h' in Slides). CMMI's V and Y have 0.222 em, a medium
+# space's width. The real spaces after italic letters on the built decks are a space plus the
+# correction (CMSSI10 a 0.010 + 0.278 thick before '=', b 0.031 + 0.222 medium before '+') or a
+# word space (LMSans9-Oblique 'f' then 'p' at 0.267, f's correction 0.218). So a gap within
+# ITALIC_MATCH of the letter's correction is the correction itself and the letter's advance takes
+# it; anything else is as before. Over the hunt's 528 PDFs, 228 gaps after a letter of the table
+# were its correction to 0.001 em (CMMI10 V before '(' '|' '.', CMSSI9 W before ')', LMSans10 V
+# before ',', CMMI8 T before '='); the nearest other gap was 0.007 em off (LMSans10-Oblique 'W h'),
+# then 0.026. 0.003 em also keeps CMSSI10's f clear of a fully shrunk word space (0.2222).
+# (cm-super's SFSI f, 0.223 - 0.225, is within it: only a justified line shrunk to the limit
+# after an italic f without \/ would lose its space.) The table: TFM italic corrections of
+# TeX's italic Type 1 faces (OML CMMI/CMMIB, LM's LMMathItalic = lmmi = cmmi metrics; OT1
+# CMSSI/CMTI; T1 cm-super SFSI/SFTI, Type 3 ECSI/ECTI; LM LMSans-Oblique/LMRoman-Italic), letters
+# whose correction reaches JOIN_GAP - ITALIC_MATCH; smaller ones never made a space. (OpenType
+# faces under xelatex/lualatex are not in it: their correction is the glyph's ink past its advance,
+# which `Char` does not carry.)
+ITALIC_MATCH = 0.003  # em of the italic glyph
+ITALIC_CORRECTIONS: dict[str, dict[str, float]] = {
+    "CMMI5": {"VY": 0.278, "ΓΥFPTW": 0.174}, "CMMI6": {"VY": 0.259, "ΓΥFPTW": 0.162},
+    "CMMI7": {"VY": 0.246, "ΓΥFPTW": 0.154}, "CMMI8": {"VY": 0.236, "ΓΥFPTW": 0.148},
+    "CMMI9": {"VY": 0.228}, "CMMI10": {"VY": 0.222}, "CMMI12": {"VY": 0.218},
+    "CMMIB5": {"VY": 0.322, "ΓΥFPTW": 0.201}, "CMMIB6": {"VY": 0.3, "ΓΥFPTW": 0.188},
+    "CMMIB7": {"VY": 0.284, "ΓΥFPTW": 0.178}, "CMMIB8": {"VY": 0.272, "ΓΥFPTW": 0.17},
+    "CMMIB9": {"VY": 0.263, "ΓΥFPTW": 0.164}, "CMMIB10": {"VY": 0.256, "ΓΥFPTW": 0.16},
+    "CMSSI8": {"ﬀf": 0.221, "Y": 0.174, "VW": 0.162}, "CMSSI9": {"ﬀf": 0.219, "Y": 0.173, "VW": 0.162},
+    "CMSSI10": {"ﬀf": 0.217, "Y": 0.173, "VW": 0.161}, "CMSSI12": {"ﬀf": 0.216, "Y": 0.172, "VW": 0.161},
+    "CMSSI17": {"ﬀf": 0.213, "Y": 0.171, "VW": 0.161},
+    "CMTI7": {"ﬀf": 0.218, "Y": 0.197, "VW": 0.186, "IX": 0.156, "Ξ": 0.15, "ΠHMNU": 0.148},
+    "CMTI8": {"ﬀf": 0.215, "Y": 0.196, "VW": 0.185, "IX": 0.157, "ΠHMNU": 0.154, "Ξ": 0.152},
+    "CMTI9": {"ﬀf": 0.213, "Y": 0.194, "VW": 0.184, "ΠHMNU": 0.16, "IX": 0.158, "Ξ": 0.152},
+    "CMTI10": {"ﬀf": 0.212, "Y": 0.194, "VW": 0.184, "ΠHMNU": 0.164, "IX": 0.158, "Ξ": 0.153},
+    "CMTI12": {"ﬀf": 0.211, "Y": 0.193, "VW": 0.183, "IX": 0.158, "ΠHMNU": 0.157, "Ξ": 0.153},
+    "SFSI0800": {"ﬀf": 0.225, "Y": 0.174, "VW": 0.162}, "SFSI0900": {"ﬀf": 0.225, "Y": 0.173, "VW": 0.162},
+    "SFSI1000": {"ﬀf": 0.223, "Y": 0.173, "VW": 0.161}, "SFSI1095": {"ﬀf": 0.224, "Y": 0.172, "VW": 0.161},
+    "SFSI1200": {"ﬀf": 0.223, "Y": 0.172, "VW": 0.161}, "SFSI1440": {"ﬀf": 0.218, "Y": 0.17, "VW": 0.159},
+    "SFSI1728": {"ﬀf": 0.217, "Y": 0.169, "VW": 0.158}, "SFSI2074": {"ﬀf": 0.216, "Y": 0.168, "VW": 0.157},
+    "SFSI2488": {"ﬀf": 0.214, "Y": 0.167, "VW": 0.157},
+    "SFTI0800": {"ﬀf": 0.215, "Y": 0.195, "VW": 0.185, "IX": 0.157, "HMNU": 0.154},
+    "SFTI0900": {"ﬀf": 0.213, "Y": 0.194, "VW": 0.184, "HMNU": 0.16, "IX": 0.158},
+    "SFTI1000": {"ﬀf": 0.212, "Y": 0.194, "VW": 0.184, "HMNU": 0.164, "IX": 0.158},
+    "SFTI1095": {"ﬀf": 0.212, "Y": 0.194, "VW": 0.183, "HIMNUX": 0.158},
+    "SFTI1200": {"ﬀf": 0.211, "Y": 0.193, "VW": 0.183, "IX": 0.158, "HMNU": 0.157},
+    "SFTI1440": {"ﬀf": 0.21, "Y": 0.193, "VW": 0.183, "IX": 0.159, "HMNU": 0.154},
+    "SFTI1728": {"ﬀf": 0.21, "Y": 0.192, "VW": 0.183, "IX": 0.159, "HMNU": 0.151},
+    "SFTI2074": {"ﬀf": 0.209, "Y": 0.192, "VW": 0.183, "IX": 0.159, "HMNU": 0.149, "CKZ": 0.147},
+    "SFTI2488": {"ﬀf": 0.209, "Y": 0.192, "VW": 0.182, "IX": 0.159, "CHKMNUZ": 0.147},
+    "LMSans8-Oblique": {"ﬀf": 0.219, "Y": 0.171, "VW": 0.159},
+    "LMSans9-Oblique": {"ﬀf": 0.218, "Y": 0.172, "VW": 0.161},
+    "LMSans10-Oblique": {"ﬀf": 0.217, "Y": 0.172, "V": 0.161, "W": 0.16},
+    "LMSans12-Oblique": {"ﬀf": 0.216, "Y": 0.172, "VW": 0.16},
+    "LMSans17-Oblique": {"ﬀf": 0.214, "Y": 0.172, "VW": 0.162},
+    "LMRoman7-Italic": {"ﬀf": 0.162}, "LMRoman8-Italic": {"ﬀf": 0.171, "Y": 0.152},
+    "LMRoman9-Italic": {"ﬀf": 0.172, "Y": 0.156, "VW": 0.15},
+    "LMRoman10-Italic": {"ﬀf": 0.173, "Y": 0.158, "VW": 0.153},
+    "LMRoman12-Italic": {"ﬀf": 0.173, "Y": 0.161, "VW": 0.153},
+}
+LM_MATH_ITALIC = re.compile(r"LMMathItalic(\d+)-(Regular|Bold)")
+TYPE3_ITALIC = re.compile(r"EC(SI|TI)(\d{4})")
+
+
+def italic_correction(font: str, c: str) -> float | None:
+    """TeX's italic correction of the glyph `c` in `font`, em (`ITALIC_CORRECTIONS`), None when
+    the table has none for it."""
+    name = font.split("+", 1)[-1]
+    if m := LM_MATH_ITALIC.fullmatch(name):
+        name = ("CMMI" if m.group(2) == "Regular" else "CMMIB") + m.group(1)
+    elif m := TYPE3_ITALIC.fullmatch(name):  # pdflatex's bitmap EC fonts: cm-super's metrics
+        name = "SF" + m.group(1) + m.group(2)
+    return next((ic for letters, ic in ITALIC_CORRECTIONS.get(name, {}).items() if c in letters), None)
+
+
+def _italic_corrections(chars: list[Char]) -> list[Char]:
+    """An italic letter followed on its line at the distance of its italic correction
+    (`ITALIC_MATCH`) is as wide as TeX's box of it: its advance takes the correction, so no
+    space is read after it, inside a span or between two."""
+    out = list(chars)
+    for k, (prev, ch) in enumerate(zip(chars, chars[1:])):
+        if prev.synthetic or ch.dir != prev.dir or combining_mark(ch.c) or not ch.c.strip():
+            continue
+        ic = italic_correction(prev.font, prev.c)
+        if ic is None:
+            continue
+        ux, uy = prev.dir
+        px, py = prev.origin[0] + ux * prev.advance, prev.origin[1] + uy * prev.advance
+        gap = (ch.origin[0] - px) * ux + (ch.origin[1] - py) * uy
+        offset = abs((ch.origin[0] - px) * uy - (ch.origin[1] - py) * ux)
+        if offset < SAME_BASELINE * max(ch.size, 0.01) and abs(gap - ic * prev.size) <= ITALIC_MATCH * prev.size:
+            width = prev.advance + gap
+            out[k] = dataclasses.replace(prev, advance=width, exact_advance=False, box=char_box(
+                prev.origin[0], prev.origin[1], ux, uy, width, prev.size, prev.ascent, prev.descent))
+    return out
+
+
 def combining_mark(c: str) -> bool:
     """The character is nothing but combining marks (a macron, an acute): no width of its own."""
     return bool(c) and all(unicodedata.combining(u) for u in c)
@@ -539,7 +637,7 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
     shown = [ch for ch in chars
              if not (ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1)
              and visibility.hidden(ch) == hidden]
-    shown = _accent_overhang(page, shown)
+    shown = _italic_corrections(_accent_overhang(page, shown))
     tracks: dict[int, float] = {}
     tracked, narrow = tracked_gaps(shown, tracks), narrow_spaces(shown)
 
