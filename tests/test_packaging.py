@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from beamer2slides import emit, google_auth, paths, type3
+from beamer2slides import emit, google_auth, notes, paths, type3
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,6 +25,7 @@ def test_the_wheel_declares_the_calibration_and_the_command():
     meta = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     data = meta["tool"]["setuptools"]["package-data"]["beamer2slides"]
     assert any(emit.CALIBRATION.name in pattern or pattern.endswith("*.json") for pattern in data)
+    assert "tex/*.sty" in data and (resources.files("beamer2slides") / "tex" / notes.PACKAGE).is_file()
     assert meta["project"]["scripts"]["beamer2slides"] == "beamer2slides.__main__:main"
 
 

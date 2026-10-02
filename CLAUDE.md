@@ -84,10 +84,12 @@ decorations) is a picture, or baked into a per-slide background picture.
   `--overlays all` keeps every page.
 - **Speaker notes** (`notes.py`, docs/speaker-notes.md): note pages of the default, compressed
   and plain templates and a second screen are read as text (paragraphs, `• `/`1. ` items, math as
-  Unicode, links as `words (uri)`, a `\note<2>` carried to the kept step). A PDF without them gets
-  notes only when a person names the source (`classify`/`convert --tex`: compiled once with notes
-  shown, pages paired by words); sync from such a PDF keeps each slide's base notes
-  (`build_ours`). Scoreboard: `tools/notes_score.py`, `tests/decks/30_speaker_notes.tex`.
+  Unicode, links as `words (uri)`, a `\note<2>` carried to the kept step). Our
+  `src/beamer2slides/tex/b2snotes.sty` (`notes-package` writes it) makes the PDF one presents from
+  carry its notes two page widths right of each page (`notes.carried_blocks`, mode `carried`; no
+  TeX on our side). A PDF with neither gets notes only when a person names the source
+  (`classify`/`convert --tex`: compiled once with notes shown, pages paired by words); sync from
+  such a PDF keeps each slide's base notes (`build_ours`). Scoreboard: `tools/notes_score.py`, `tests/decks/30_speaker_notes.tex`.
 
 ## What becomes native (deck.json element kinds)
 Details, measurements and edge cases: docs/project-notes.md "What becomes native".
@@ -322,6 +324,7 @@ python -m beamer2slides pull --deck <...> --tex main.tex [--apply]
 python -m beamer2slides adopt --deck <...|files dir|.zip> --tex main.tex
 python -m beamer2slides deck-files --deck <url|id> --out DIR [--zip]   # everything adopt reads, for offline
 python -m beamer2slides label main.tex [--apply]
+python -m beamer2slides notes-package [--out DIR]   # b2snotes.sty: the PDF carries its speaker notes
 python -m beamer2slides docs push|sync|adopt ...
 python -m beamer2slides playground
 ```

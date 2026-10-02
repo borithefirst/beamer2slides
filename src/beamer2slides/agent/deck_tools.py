@@ -114,7 +114,7 @@ def _classify_into(j: Job, source: Path, out: Path, overlays: str,
 
     prepared = prepare_notes(source, out)
     pdf = prepared.pdf
-    if not prepared.mode and (out / "slides.pdf").exists():
+    if pdf != out / "slides.pdf" and (out / "slides.pdf").exists():
         (out / "slides.pdf").unlink()  # stale from an earlier run of a PDF that had notes
     raw = extract(pdf, prepared.labels)
     for page in raw["pages"]:

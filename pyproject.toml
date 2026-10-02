@@ -84,6 +84,7 @@ where = ["src"]
 beamer2slides = ["calibration/*.json",   # the measured font substitutes emit needs
                  "playground/static/*",  # the playground's page (docs/playground.md)
                  "agent/*.md",           # the guide that travels with the agent tools
+                 "tex/*.sty",            # b2snotes.sty, `notes-package` (docs/speaker-notes.md)
                  "devtools/showcase/template.html", "devtools/showcase/decks.json"]  # the public gallery
 
 [tool.ruff]

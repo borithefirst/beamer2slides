@@ -1,0 +1,121 @@
+%% b2snotes.sty - a beamer deck's speaker notes, carried in its own PDF (beamer2slides).
+%%
+%% Put \usepackage{b2snotes} in a beamer preamble. While the notes are hidden (beamer's default),
+%% each slide's \note text is typeset beside its page, outside the page's box: no viewer shows it
+%% and nothing prints it, and beamer2slides reads it as that slide's speaker notes, from the very
+%% PDF the deck is presented from (docs/speaker-notes.md). With the notes shown (note pages, a
+%% second screen) it does nothing: beamer's own notes are read then.
+%%
+%% Each page's notes are one block two page widths to the right of its top left corner, opened by
+%% the line `beamer2slides notes'; a \note written after a frame (beamer puts it on a note page
+%% after that frame's) rides on the next page in a block opened by `beamer2slides notes before'.
+%% A text search in a PDF viewer finds the notes' words, like any text in the file.
+%%
+%% Written for beamer2slides; may be distributed and modified under the LaTeX Project Public
+%% License 1.3c or later.
+\NeedsTeXFormat{LaTeX2e}[2020/10/01]
+\ProvidesPackage{b2snotes}[2026/10/02 v1 beamer speaker notes carried beside each page]
+
+\newbox\bsnotes@here
+\newbox\bsnotes@before
+\newif\ifbsnotes@hooked
+
+% What beamer2slides looks for (notes.CARRIED, notes.CARRIED_BEFORE): keep them as they are.
+\def\bsnotes@markhere{beamer2slides notes}
+\def\bsnotes@markbefore{beamer2slides notes before}
+
+% #1: the block's first line, #2: the notes. As beamer sets a note page: black text, plain
+% bullets and numbers; a paragraph's room between paragraphs.
+\long\def\bsnotes@block#1#2{%
+  \parbox[t]{\dimexpr\paperwidth-2cm\relax}{%
+    \normalfont\small\color{black}%
+    \setbeamertemplate{itemize item}{\textbullet}%
+    \setbeamertemplate{itemize subitem}{--}%
+    \setbeamertemplate{enumerate item}{\insertenumlabel.}%
+    \setbeamertemplate{enumerate subitem}{\insertenumlabel.\insertsubenumlabel}%
+    \setbeamercolor{item}{fg=black,bg=white}%
+    \parskip=0.6\baselineskip\relax
+    \mbox{#1}\par
+    #2\par}}
+
+% The slide's notes, at the end of each slide (beamer's \beamer@framenotesend): its \note<2>s
+% are already chosen for this step.
+\def\bsnotes@slide{%
+  \ifbeamer@notes\else
+    \ifx\beamer@notes\@empty
+      \ifx\beamer@noteitems\@empty\else\bsnotes@keep\fi
+    \else
+      \bsnotes@keep
+    \fi
+  \fi}
+
+\def\bsnotes@keep{%
+  \global\setbox\bsnotes@here\hbox{\bsnotes@block\bsnotes@markhere{%
+    \beamer@notes
+    \ifx\beamer@noteitems\@empty\else
+      \begin{enumerate}\itemsep=0pt\parskip=0pt\beamer@noteitems\end{enumerate}%
+    \fi}}%
+  \bsnotes@hook}
+
+% A \note outside a frame: beamer's own while the notes are shown, else kept for the next page.
+\def\bsnotes@afterframe{%
+  \ifbeamer@notes
+    \expandafter\bsnotes@note
+  \else
+    \expandafter\bsnotes@outside
+  \fi}
+
+\newcommand\bsnotes@outside[2][]{%
+  \beamer@savemode
+  \ifbeamer@inlecture
+    \begingroup
+      \def\beamer@noteenvstart{}%
+      \def\beamer@noteenvend{}%
+      \setkeys{beamernotes}{#1}%
+      \global\setbox\bsnotes@before\vbox{%
+        \ifvoid\bsnotes@before\else\unvbox\bsnotes@before\fi
+        \hbox{\bsnotes@block\bsnotes@markbefore{\beamer@noteenvstart#2\beamer@noteenvend}}}%
+    \endgroup
+    \bsnotes@hook
+  \fi
+  \beamer@resumemode}
+
+\def\bsnotes@hook{%
+  \ifbsnotes@hooked\else
+    \global\bsnotes@hookedtrue
+    \AddToHookNext{shipout/foreground}{\bsnotes@shipout}%
+  \fi}
+
+% In the shipped page's foreground picture, whose origin is the page's top left corner: the
+% blocks hang down from two page widths to its right.
+\def\bsnotes@shipout{%
+  \global\bsnotes@hookedfalse
+  \put(0,0){\hbox to\z@{\hskip2\paperwidth\vtop{\vskip\z@
+    \ifvoid\bsnotes@before\else\box\bsnotes@before\fi
+    \ifvoid\bsnotes@here\else\box\bsnotes@here\fi}\hss}}%
+  \global\setbox\bsnotes@before\box\voidb@x
+  \global\setbox\bsnotes@here\box\voidb@x}
+
+% (beamer typesets a frame's note page through \beamer@outsideframenote too, so it is \note
+% itself, outside a frame, that is caught)
+\AtBeginDocument{%
+  \ifcsname beamer@inframenote\endcsname
+    \let\bsnotes@framenotesend\beamer@framenotesend
+    \def\beamer@framenotesend{\bsnotes@slide\bsnotes@framenotesend}%
+    \let\bsnotes@note\note
+    \def\note{%
+      \ifbeamer@inframe
+        \expandafter\bsnotes@note
+      \else
+        \expandafter\bsnotes@afterframe
+      \fi}%
+  \else
+    \PackageWarningNoLine{b2snotes}{This is no beamer presentation: its notes are not carried}%
+  \fi}
+
+\AddToHook{enddocument/afterlastpage}{%
+  \ifbsnotes@hooked
+    \PackageWarningNoLine{b2snotes}{A \string\note\space after the last frame is on no page:
+      it is not carried (write it inside the frame)}%
+  \fi}
+\endinput

@@ -14,6 +14,10 @@ after its words, and every word of a note that runs past the bottom of its page.
 overlay steps each get their note page; the last step of the frame (the one `convert` keeps)
 carries every step's note (`carried`).
 
+A third way needs nothing but the PDF one presents from: a deck using our b2snotes.sty
+(`notes-package` writes it) has its notes hidden, each page carrying its slide's notes beside it,
+off the page (`carried_notes`). Its pages are the slides, untouched.
+
 A PDF compiled without its notes gets them from its source: `notes_from_source` compiles the
 .tex the person names once more with notes shown and pairs those note pages with the PDF's pages.
 """
@@ -25,6 +29,7 @@ import shutil
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, replace
+from importlib import resources
 from pathlib import Path
 from typing import Literal
 
@@ -34,7 +39,7 @@ from .fonts import font_info
 from .pdf import Char, Document, Page, PdfDocument
 
 Box = tuple[float, float, float, float]
-NotesMode = Literal["note pages", "second screen"]
+NotesMode = Literal["note pages", "second screen", "carried"]
 
 
 def _contains(outer: Box, inner: Box) -> bool:
@@ -263,20 +268,30 @@ def read_line(line: list[Char], links: dict[int, str]) -> NoteLine:
                     text=text)
 
 
+def uri_links(page: Page) -> list[tuple[Box, str]]:
+    """The page's web links: where each lies and its address."""
+    out: list[tuple[Box, str]] = []
+    for link in page.links():
+        uri = link.get("uri")
+        if isinstance(uri, str):
+            out.append((link["bbox"], uri))
+    return out
+
+
+def links_in(links: list[tuple[Box, str]], area: Box) -> list[tuple[Box, str]]:
+    """The `links` within `area`'s columns."""
+    return [(box, uri) for box, uri in links if box[0] >= area[0] - 1 and box[2] <= area[2] + 1]
+
+
 def web_links(page: Page, area: Box, chars: list[Char]) -> list[tuple[Box, str]]:
     """The page's web links over `area`. On a second screen's right half (`area` not starting at
     the page's left edge) pgfpages leaves a note's links where the note page had them, over the
     slide's half: such a link, over none of the slide's own glyphs, is moved onto the note."""
-    out: list[tuple[Box, str]] = []
+    links = uri_links(page)
+    out = links_in(links, area)
     shift = area[0]
-    for link in page.links():
-        uri = link.get("uri")
-        if not isinstance(uri, str):
-            continue
-        x0, y0, x1, y1 = link["bbox"]
-        if x0 >= area[0] - 1 and x1 <= area[2] + 1:
-            out.append(((x0, y0, x1, y1), uri))
-        elif shift > 0 and x1 <= shift + 1 and not any(
+    for (x0, y0, x1, y1), uri in links:
+        if shift > 0 and x1 <= shift + 1 and x0 < area[0] - 1 and not any(
                 x0 <= (c.box[0] + c.box[2]) / 2 <= x1 and y0 <= (c.box[1] + c.box[3]) / 2 <= y1 for c in chars):
             out.append(((x0 + shift, y0, x1 + shift, y1), uri))
     return out
@@ -395,6 +410,62 @@ def read_note(page: Page, area: Box, top: float) -> str:
         return ""
     links = link_marks(glyphs, web_links(page, area, chars))
     return note_text([read_line(line, links) for line in split_lines(glyphs) if any(not c.c.isspace() for c in line)])
+
+
+# --- notes carried beside the page (b2snotes.sty) ------------------------------------------------------
+
+# The first line of each block b2snotes.sty sets beside a page (its \bsnotes@markhere and
+# \bsnotes@markbefore): this page's notes, and those of a \note written after the frame before.
+CARRIED = "beamer2slides notes"
+CARRIED_BEFORE = "beamer2slides notes before"
+CARRIED_FROM = 1.5   # page widths: the blocks stand two page widths right of the page's left edge
+PACKAGE = "b2snotes.sty"
+
+
+@dataclass(frozen=True, kw_only=True)
+class CarriedNotes:
+    """The notes a page carries (b2snotes.sty): its own, and those it carries for the page before
+    ("" for none)."""
+    here: str
+    before: str
+
+
+def carried_notes(page: Page) -> CarriedNotes:
+    """The b2snotes blocks beside `page` (`carried_blocks`)."""
+    return carried_blocks(page_chars(page)[0], page.width, uri_links(page))
+
+
+def carried_blocks(chars: list[Char], width: float, uris: list[tuple[Box, str]]) -> CarriedNotes:
+    """The b2snotes blocks among a page's glyphs (`width`: the page's), read as a note page's note
+    is. A block is the lines below its first line, in that line's column (one page wide): beamer's
+    hidden overlay steps are also drawn far off the page, but elsewhere."""
+    off = [c for c in chars if c.dir[0] > 0.99 and not c.synthetic and c.c and c.origin[0] >= CARRIED_FROM * width]
+    lines = [line for line in split_lines(off) if any(not c.c.isspace() for c in line)]
+    heads = [line for line in lines if read_line(line, {}).text in (CARRIED, CARRIED_BEFORE)]
+    if not heads:
+        return CarriedNotes(here="", before="")
+    left = min(line[0].box[0] for line in heads)
+    area: Box = (left, min(line[0].box[1] for line in heads), left + width, float("inf"))
+    column = [line for line in lines if area[0] - 1 <= line[0].box[0] <= area[2] and line[0].box[1] >= area[1]]
+    links = link_marks([c for line in column for c in line], links_in(uris, area))
+    blocks: dict[str, list[NoteLine]] = {CARRIED: [], CARRIED_BEFORE: []}
+    into: list[NoteLine] | None = None
+    for line in column:
+        read = read_line(line, links)
+        if any(line is head for head in heads):
+            into = blocks[read.text]
+        elif into is not None:
+            into.append(read)
+    return CarriedNotes(here=note_text(blocks[CARRIED]), before=note_text(blocks[CARRIED_BEFORE]))
+
+
+def write_package(folder: Path) -> Path:
+    """b2snotes.sty written into `folder` (made when missing): what a preamble's
+    `\\usepackage{b2snotes}` finds beside the .tex."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / PACKAGE
+    path.write_bytes((resources.files("beamer2slides") / "tex" / PACKAGE).read_bytes())
+    return path
 
 
 # --- which pages are notes ---------------------------------------------------------------------------
@@ -562,7 +633,7 @@ def _prepare(doc: PdfDocument, pdf: Path, out: Path) -> Prepared:
         headers = {k: 0.0 for k in plain_notes(bare, [_label(doc.label(k), k) if doc.label(k) else ""
                                                       for k in everything])}
     if not headers:
-        return Prepared(pdf=pdf, notes={}, mode=None, labels=None, kept=everything)
+        return _carried(doc, pdf, given)
     keep = [k for k in everything if k not in headers]
     for k, header in headers.items():
         page = doc[k]
@@ -577,6 +648,25 @@ def _prepare(doc: PdfDocument, pdf: Path, out: Path) -> Prepared:
     asked = _steps_in_question(found, labels)
     views = {i: _frame_view(shown_spans(doc[keep[i]]), doc[keep[i]], doc[keep[i]].rect) for i in sorted(asked)}
     return Prepared(pdf=path, notes=carried(found, labels, views), mode="note pages", labels=labels, kept=keep)
+
+
+def _carried(doc: PdfDocument, pdf: Path, labels: list[str]) -> Prepared:
+    """The notes b2snotes.sty carries beside the pages, or none: the PDF is the slides as it is
+    (extract never reads beyond a page's edges)."""
+    found: dict[int, str] = {}
+    for page in doc:
+        notes = carried_notes(page)
+        if notes.before and page.index:
+            # a \note after a frame: beamer's note page would follow that frame's own
+            found[page.index - 1] = (found.get(page.index - 1, "") + "\n" + notes.before).strip()
+        if notes.here:
+            found[page.index] = notes.here
+    everything = list(range(len(doc)))
+    if not found:
+        return Prepared(pdf=pdf, notes={}, mode=None, labels=None, kept=everything)
+    asked = _steps_in_question(found, labels)
+    views = {k: _frame_view(shown_spans(doc[k]), doc[k], doc[k].rect) for k in sorted(asked)}
+    return Prepared(pdf=pdf, notes=carried(found, labels, views), mode="carried", labels=None, kept=everything)
 
 
 # --- notes from the source ---------------------------------------------------------------------------

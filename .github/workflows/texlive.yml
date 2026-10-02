@@ -47,7 +47,8 @@ jobs:
         run: |
           status=0   # (bash -e: a failing pytest would end the script before its summary)
           /opt/venv/bin/python -m pytest -q -n auto -rfEs tests/test_adopt_compiles.py tests/test_adopt_macros.py \
-            tests/test_adopt_tables.py tests/test_adopt_scripts.py > /tmp/pytest.txt 2>&1 || status=$?
+            tests/test_adopt_tables.py tests/test_adopt_scripts.py \
+            tests/test_speaker_notes.py::test_the_package_the_cli_writes_carries_the_notes > /tmp/pytest.txt 2>&1 || status=$?
           cat /tmp/pytest.txt
           # the summary and each failure where anyone can read them (a job's log needs admin rights)
           # (a comma ends a workflow command's property: %2C; and under pipefail a grep that finds no

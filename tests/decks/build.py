@@ -11,6 +11,7 @@ shows speaker notes (docs/speaker-notes.md), compiled from the same source.
 Usage: python tests/decks/build.py [deck-name ...]
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ NOTES = OUT / "notes"
 RERUN = re.compile(r"Rerun to get|rerun LaTeX|Label\(s\) may have changed|may have changed\. Rerun", re.I)
 
 SHOW_NOTES = r"\PassOptionsToClass{notes=show}{beamer}"
+CARRY_NOTES = r"\AddToHook{class/beamer/after}{\RequirePackage{b2snotes}}"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -48,7 +50,15 @@ VARIANTS = {
                               prefix=SHOW_NOTES + r"\AtBeginDocument{\setbeamertemplate{note page}[compressed]}",
                               engine=None),
     "notes-xelatex": Build(suffix="-notes-xelatex", folder=NOTES, prefix=SHOW_NOTES, engine="xelatex"),
+    # the notes hidden, carried beside each page by b2snotes.sty (the PDF one presents from)
+    "notes-carried": Build(suffix="-notes-carried", folder=NOTES, prefix=CARRY_NOTES, engine=None),
+    "notes-carried-xelatex": Build(suffix="-notes-carried-xelatex", folder=NOTES, prefix=CARRY_NOTES,
+                                   engine="xelatex"),
+    "notes-carried-lualatex": Build(suffix="-notes-carried-lualatex", folder=NOTES, prefix=CARRY_NOTES,
+                                    engine="lualatex"),
 }
+# beamer2slides' own LaTeX packages (b2snotes.sty), found before the TeX tree's
+PACKAGES = HERE.parent.parent / "src" / "beamer2slides" / "tex"
 
 
 def engine_for(tex: Path) -> str:
@@ -83,8 +93,10 @@ def compile_deck(tex: Path, build: Build) -> Path:
     # The .aux settling is the test, as in latexmk: tikzmark does not always say so.
     log, aux = build.folder / f"{jobname}.log", build.folder / f"{jobname}.aux"
     before = None
+    # (an empty last entry: the TeX tree's own path after it)
+    env = {**os.environ, "TEXINPUTS": os.pathsep.join([".", str(PACKAGES), os.environ.get("TEXINPUTS", "")])}
     for n in range(5):
-        result = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, errors="replace")
+        result = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, errors="replace", env=env)
         text = log.read_text(errors="replace") if log.exists() else result.stdout
         if result.returncode != 0:
             raise RuntimeError(f"{tex.name} ({jobname}) failed:\n{text[-3000:]}")

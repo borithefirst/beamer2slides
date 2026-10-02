@@ -16,7 +16,8 @@ import pytest
 
 from beamer2slides import notes
 from beamer2slides.devtools import notes_score
-from beamer2slides.inverse import tex_env
+from beamer2slides.extract import extract
+from beamer2slides.inverse import Workspace, tex_env
 from beamer2slides.notes import NoteLine, NotesMode, Prepared, SourceNotes
 from beamer2slides.pdf import Char, char_box
 
@@ -64,6 +65,9 @@ BOARD: dict[str, tuple[NotesMode | None, set[str]]] = {
     "notes-plain": ("note pages", set()),
     "notes-compressed": ("note pages", set()),
     "notes-xelatex": ("note pages", set()),
+    "notes-carried": ("carried", set()),
+    "notes-carried-xelatex": ("carried", set()),
+    "notes-carried-lualatex": ("carried", set()),
 }
 
 
@@ -96,6 +100,56 @@ def test_a_pdf_without_notes_has_none(tmp_path: Path) -> None:
     prepared = notes.prepare(PLAIN_BUILD, tmp_path)
     assert (prepared.mode, prepared.notes, prepared.pdf) == (None, {}, PLAIN_BUILD)
     assert prepared.kept == list(range(16))
+
+
+@pytest.mark.needs_decks("out/30_speaker_notes.pdf")
+def test_carried_notes_leave_the_slides_as_they_are(tmp_path: Path) -> None:
+    """b2snotes.sty's PDF is the plain build with words beyond its pages' edges: the same pages,
+    and nothing of the notes reaches what classify reads (no word, no link)."""
+    pdf = build("notes-carried")
+    if not pdf.exists():
+        pytest.skip(f"{pdf.name} not built (tests/decks/build.py 30_speaker_notes)")
+    prepared = notes.prepare(pdf, tmp_path)
+    assert (prepared.pdf, prepared.labels, prepared.kept) == (pdf, None, list(range(16)))
+    assert extract(pdf, None)["pages"] == extract(PLAIN_BUILD, None)["pages"]
+
+
+@pytest.mark.needs_decks("30_speaker_notes.tex")
+def test_the_package_the_cli_writes_carries_the_notes(tmp_path: Path) -> None:
+    """`notes-package` writes b2snotes.sty beside the source; a preamble using it gives the PDF
+    one presents from (no note pages) every note."""
+    require_tex("pdflatex")
+    tex = source_copy(tmp_path, TEX.read_text(encoding="utf-8").replace(
+        "\\documentclass{beamer}\n", "\\documentclass{beamer}\n\\usepackage{b2snotes}\n"))
+    assert notes.write_package(tex.parent) == tex.parent / "b2snotes.sty"
+    ws = Workspace(tex, tmp_path / "work", handout=False, engine=None, fresh=True)
+    pdf, error = ws.compile()
+    assert pdf is not None, error
+    prepared = notes.prepare(pdf, tmp_path / "out")
+    assert (prepared.mode, prepared.pdf, len(prepared.kept)) == ("carried", pdf, 16)
+    assert missed(notes_score.score(pdf, None)) == set()
+
+
+def test_a_page_carries_its_notes_and_those_of_a_note_after_the_frame_before() -> None:
+    """The blocks beside a page, two page widths right: this page's under `beamer2slides notes`,
+    the page before's under `beamer2slides notes before`; overlay steps beamer hides further off
+    are no note."""
+    def text_line(text: str, x: float, y: float) -> list[Char]:
+        out: list[Char] = []
+        for w in text.split():
+            out += word(w, x, y=y, size=10.0, font="CMR10")
+            x += 5.0 * len(w) + 4.0
+        return out
+    glyphs = (text_line("Hidden step", 2036.0, -1868.0) + text_line("beamer2slides notes before", 726.0, 14.0)
+              + text_line("After it.", 726.0, 33.0) + text_line("beamer2slides notes", 726.0, 52.0)
+              + text_line("Mine.", 726.0, 71.0) + text_line("On the slide", 20.0, 100.0))
+    assert notes.carried_blocks(glyphs, 362.8, []) == notes.CarriedNotes(here="Mine.", before="After it.")
+    assert notes.carried_blocks(text_line("Hidden step", 2036.0, -1868.0), 362.8, []) == \
+        notes.CarriedNotes(here="", before="")
+    # a link's address, from the links beside the page only
+    linked = text_line("beamer2slides notes", 726.0, 14.0) + text_line("See here.", 726.0, 33.0)
+    uris = [((744.0, 24.0, 772.0, 36.0), "https://example.com/a"), ((0.0, 0.0, 360.0, 270.0), "https://x.org/")]
+    assert notes.carried_blocks(linked, 362.8, uris).here == "See here. (https://example.com/a)"
 
 
 # --- reading rules, on made-up lines ------------------------------------------------------------------

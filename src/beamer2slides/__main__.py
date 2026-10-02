@@ -59,24 +59,28 @@ def check_labels(deck: "Mapping[str, Json]", mode: str) -> None:
         raise SystemExit("--check-labels error: the frames above need labels of their own")
 
 
+PACKAGE_HINT = "`python -m beamer2slides notes-package` writes it"
+
+
 def notes_of(pdf: Path, out: Path, tex: Path | None) -> Prepared:
     """The PDF's speaker notes (docs/speaker-notes.md): its note pages, or, when it has none and
     the person named its source (`--tex`), the source compiled once more with its notes shown,
     paired page by page. Without TeX the deck is converted without notes; a source that does not
     compile or is not this PDF's refuses. A source is never compiled unless named."""
     prepared = prepare_notes(pdf, out)
+    if prepared.pdf != out / "slides.pdf" and (out / "slides.pdf").exists():
+        (out / "slides.pdf").unlink()  # stale from an earlier run of a PDF that had note pages
     if prepared.mode:
         print(f"speaker notes ({prepared.mode}): found notes for {len(prepared.notes)} pages")
         if tex is not None:
             print(f"  (--tex {tex.name} is not compiled: the PDF carries its notes)")
         return prepared
-    if (out / "slides.pdf").exists():
-        (out / "slides.pdf").unlink()  # stale from an earlier run of a PDF that had notes
     if tex is None:
         beside = source_beside(pdf)
         if beside is not None:
             print(f"speaker notes: {pdf.name} has none, but {beside.name} beside it writes \\note: "
-                  f"--tex {beside.name} brings them")
+                  f"\\usepackage{{b2snotes}} in its preamble carries them in the PDF ({PACKAGE_HINT}), "
+                  f"or --tex {beside.name} brings them now")
         return prepared
     found = notes_from_source(tex, pdf, out / "notes-source")
     match found.outcome:
@@ -524,6 +528,10 @@ def main() -> None:
     c.add_argument("tex", type=Path, help="the main .tex (its \\input files are labelled too)")
     c.add_argument("--apply", action="store_true",
                    help="edit the source in place (what was there is kept as <file>.bak, .bak2, ...)")
+    c = sub.add_parser("notes-package", help="write b2snotes.sty: \\usepackage{b2snotes} makes the PDF one presents "
+                                             "from carry its speaker notes (docs/speaker-notes.md)")
+    c.add_argument("--out", type=Path, default=Path("."), help="the folder to write it into (default: here), "
+                   "the one holding the deck's .tex")
     c = sub.add_parser("playground", help="a web app that runs the pipeline on a talk typed or uploaded (docs/playground.md)")
     c.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to serve other machines (default: this one only)")
     c.add_argument("--port", type=int, default=7860)
@@ -541,6 +549,10 @@ def main() -> None:
         return serve(args.host, args.port)
     if args.command == "label":
         return cmd_label(args.tex, args.apply)
+    if args.command == "notes-package":
+        from .notes import write_package
+        print(f"wrote {write_package(args.out)}: put \\usepackage{{b2snotes}} in the deck's preamble")
+        return
     if args.command == "docs":
         return cmd_docs(args)
     if args.command == "deck-files":
