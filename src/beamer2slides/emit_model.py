@@ -580,13 +580,15 @@ def node_look_of(d: JsonMap) -> NodeLook:
                     adjust=_opt_num(d.get("adjust"), "adjust"))
 
 
-NodeSite = tuple[Box, TemplateKind | None, float | None]
-"""A node as a line's connection reads it: its box, its shape and its preset's adjustment."""
+NodeSite = tuple[Box, TemplateKind | None, float | None, float | None]
+"""A node as a line's connection reads it: its box, its shape, its preset's adjustment and its
+turn (ir.Node `rotation`: the box is the one before it)."""
 
 
 def node_site_of(d: JsonMap) -> NodeSite:
     """A node dict as `connection` reads it."""
-    return _box(d["bbox"], "bbox"), _template_kind(d["shape"]), _opt_num(d.get("adjust"), "adjust")
+    return (_box(d["bbox"], "bbox"), _template_kind(d["shape"]), _opt_num(d.get("adjust"), "adjust"),
+            _opt_num(d.get("rotation"), "rotation"))
 
 
 ObjectMap = Mapping[str, object]

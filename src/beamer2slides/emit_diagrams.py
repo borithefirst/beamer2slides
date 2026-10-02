@@ -19,7 +19,9 @@ from .emit_model import (
 )
 from .emit_pptx import arc_kind, template_key
 from .emit_text import baseline_offset, in_sentence_of, run_sizes_of, text_box_requests_of
-from .google_types import LineConnection, LineProperties, Outline, ShapeProperties, SlidesRequest, slides_text_style
+from .google_types import (
+    AffineTransform, LineConnection, LineProperties, Outline, ShapeProperties, SlidesRequest, slides_text_style,
+)
 from .gslides import EMU_PER_PT, emu, pt, rgb_color, text_color
 from .ir import Arrow, Bend, TemplateKind
 from .ir_types import Box, DiagramElement, DiagramLine, Point
@@ -227,12 +229,12 @@ def connection(point: Sequence[float], nodes: Sequence[JsonMap], oids: Sequence[
 
 def connection_of(point: Point, nodes: Sequence[NodeSite], oids: Sequence[str]) -> LineConnection | None:
     """The node connection site a line end sits on (PDF pt, within 1.5 pt), if any. `nodes`: each
-    node's box, shape and adjustment."""
+    node's box, shape, adjustment and turn (a turned node's sites turn with it)."""
     best: tuple[float, LineConnection] | None = None
-    for (bbox, shape, adjust), oid in zip(nodes, oids):
-        x0, y0, x1, y1 = bbox
+    for (bbox, shape, adjust, rotation), oid in zip(nodes, oids):
         for index, (fx, fy) in enumerate(connection_sites(shape, bbox, adjust)):
-            d = math.hypot(point[0] - (x0 + fx * (x1 - x0)), point[1] - (y0 + fy * (y1 - y0)))
+            sx, sy = site_point(bbox, fx, fy, rotation)
+            d = math.hypot(point[0] - sx, point[1] - sy)
             if d <= 1.5 and (best is None or d < best[0]):
                 best = (d, {"connectedObjectId": oid, "connectionSiteIndex": index})
     return best[1] if best else None
@@ -264,6 +266,55 @@ def _copied(template: Template, oid: str, sx: float, sy: float, x: float, y: flo
     return [{"duplicateObject": {"objectId": template.id, "objectIds": {template.id: oid}}},
             _transform(oid, sx, sy, x, y),
             {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
+
+
+def turned_transform(w: float, h: float, sx: float, sy: float, box: Box, rotation: float) -> AffineTransform:
+    """The transform putting an object of its own size `w` x `h` (pt), scaled by `sx`, `sy`, on
+    `box` (slide pt, the box before the turn) turned `rotation` degrees clockwise about the box's
+    centre: rotation . scale, translated so the object's centre lands on the box's."""
+    x0, y0, x1, y1 = box
+    angle = math.radians(rotation)
+    cos, sin = math.cos(angle), math.sin(angle)
+    a, b, c, d = cos * sx, -sin * sy, sin * sx, cos * sy
+    tx = (x0 + x1) / 2 - (a * w + b * h) / 2
+    ty = (y0 + y1) / 2 - (c * w + d * h) / 2
+    return {"scaleX": round(a, 6), "shearX": round(b, 6), "shearY": round(c, 6), "scaleY": round(d, 6),
+            "unit": "EMU", "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)}
+
+
+def box_transform(box: Box, rotation: float | None) -> AffineTransform:
+    """A created shape's transform (its size `box`'s): at the box's corner, or turned about the
+    box's centre (ir.Node `rotation`)."""
+    x0, y0, x1, y1 = box
+    if rotation is None:
+        return {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                "translateX": round(x0 * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}
+    return turned_transform(x1 - x0, y1 - y0, 1.0, 1.0, box, rotation)
+
+
+def copied_on(template: Template, oid: str, box: Box, rotation: float | None) -> list[SlidesRequest]:
+    """A template copied onto a node's box (`_copied`), turned about its centre when the node is
+    (ir.Node `rotation`)."""
+    x0, y0, x1, y1 = box
+    sx, sy = (x1 - x0) / template.w, (y1 - y0) / template.h
+    if rotation is None:
+        return _copied(template, oid, sx, sy, x0, y0)
+    return [{"duplicateObject": {"objectId": template.id, "objectIds": {template.id: oid}}},
+            {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE",
+                                            "transform": turned_transform(template.w, template.h, sx, sy, box, rotation)}},
+            {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
+
+
+def site_point(box: Box, fx: float, fy: float, rotation: float | None) -> Point:
+    """Where a connection site (fractions of the box) is on the page: on the box, or turned with
+    it about its centre."""
+    x0, y0, x1, y1 = box
+    if rotation is None:
+        return x0 + fx * (x1 - x0), y0 + fy * (y1 - y0)
+    angle = math.radians(rotation)
+    cos, sin = math.cos(angle), math.sin(angle)
+    dx, dy = (fx - 0.5) * (x1 - x0), (fy - 0.5) * (y1 - y0)
+    return (x0 + x1) / 2 + cos * dx - sin * dy, (y0 + y1) / 2 + sin * dx + cos * dy
 
 
 CHORD_STEP = 15.0  # degrees of an arc one straight piece stands for, where no template is at hand
@@ -387,13 +438,11 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                 outline["dashStyle"] = node.dash
                 fields.append("outline.dashStyle")
             if template is not None and node_templated_of(look):
-                tpl = template(node_template_key_of(look))
-                reqs += _copied(tpl, oid, (x1 - x0) / tpl.w, (y1 - y0) / tpl.h, x0, y0)
+                reqs += copied_on(template(node_template_key_of(look)), oid, (x0, y0, x1, y1), node.rotation)
             else:
                 reqs.append({"createShape": {"objectId": oid, "shapeType": node.shape, "elementProperties": {
                     "pageObjectId": slide_id, "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
-                    "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
-                                  "translateX": round(x0 * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}})
+                    "transform": box_transform((x0, y0, x1, y1), node.rotation)}}})
             reqs.append({"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}})
             members.append(oid)
         if card:
@@ -411,8 +460,8 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                 made: list[SlidesRequest] = [
                     {"createShape": {"objectId": target, "shapeType": "TEXT_BOX", "elementProperties": {
                         "pageObjectId": slide_id, "size": {"width": emu(w), "height": emu(y1 - y0)},
-                        "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
-                                      "translateX": round((cx - w / 2) * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}},
+                        # (a turned node's or a sloped label's box turns with it)
+                        "transform": box_transform((cx - w / 2, y0, cx + w / 2, y1), node.rotation)}}},
                     {"updateShapeProperties": {"objectId": target, "fields": "contentAlignment,autofit.autofitType",
                                                "shapeProperties": {"contentAlignment": "MIDDLE",
                                                                    "autofit": {"autofitType": "NONE"}}}},
@@ -453,7 +502,7 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
             members = [f"{object_id}_g{j}"]
         children += members
     # Edges follow the nodes they start or end on.
-    sites = [(n.bbox, n.shape, n.adjust) for n in el.nodes]
+    sites = [(n.bbox, n.shape, n.adjust, n.rotation) for n in el.nodes]
     for oid, start_at, end_at, ln in segments:
         if ln.sweep is not None:
             continue  # (an arc is a shape: only lines connect)

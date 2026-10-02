@@ -23,6 +23,7 @@ node from), `ss` being the box's shorter side:
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from .classify_model import Rect
 from .ir import TemplateKind
@@ -332,16 +333,52 @@ def preset_shape(path: list[PathItem], r: Rect, filled: bool) -> Preset | None:
     return None
 
 
-def turned_angle(path: list[PathItem], r: Rect) -> float | None:
-    """How far (degrees, counterclockwise as the page shows it) an ellipse or a rectangle is
-    turned (TikZ's `rotate=30`), or None for one standing upright or a path that is neither. A
-    node is not turned yet (it would take a rotation in the IR, a turned transform in emit, its
-    label measured along it and sync reading a turned box back): `diagram_from` says so rather
-    than calling it an unknown shape."""
+TurnedKind = Literal["RECTANGLE", "ROUND_RECTANGLE", "ELLIPSE"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Turned:
+    """An ellipse or a rectangle turned on the page (TikZ's `rotate=30`): what it is, its box as it
+    stands before the turn - centred where the shape's centre is, its true width and height - and
+    the turn, degrees clockwise on the page as Slides shows one (ir.Node `rotation`)."""
+    shape: TurnedKind
+    rect: Rect
+    rotation: float
+
+
+def _turned(shape: TurnedKind, centre: Point, u: Point, v: Point) -> Turned | None:
+    """A shape on two perpendicular axes (full-length vectors, page pt, y down), framed so its
+    width runs along the axis nearer the page's horizontal (|turn| <= 45): None when that turn is
+    under a degree (an upright shape)."""
+    for along, across in ((u, v), (v, u)):
+        if along[0] < 0:
+            along = (-along[0], -along[1])
+        angle = math.degrees(math.atan2(along[1], along[0]))
+        if abs(angle) <= 45:
+            if abs(angle) <= 1:
+                return None
+            w, h = math.hypot(*along) / 2, math.hypot(*across) / 2
+            return Turned(shape=shape, rect=Rect(centre[0] - w, centre[1] - h, centre[0] + w, centre[1] + h),
+                          rotation=round(angle, 2))
+    return None
+
+
+@dataclass(frozen=True, kw_only=True)
+class Axes:
+    """An ellipse or a rectangle at any turn: its centre and its two perpendicular axes (full
+    length vectors, page pt, y down) - an ellipse's diameters, a rectangle's first two sides."""
+    shape: Literal["RECTANGLE", "ELLIPSE"]
+    centre: Point
+    u: Point
+    v: Point
+
+
+def shape_axes(path: list[PathItem], r: Rect) -> Axes | None:
+    """The axes of an ellipse (TikZ draws one as four quarters from the ends of its axes) or a
+    rectangle (four corners, opposite sides equal, every corner square) at any turn, else None."""
     tol = tolerance(r)
     ops = "".join(op for op, _ in path)
     if ops == "cccc" and chained(path, tol):
-        # TikZ draws an ellipse as four quarters from the ends of its axes
         joins = [(pts[0][0], pts[0][1]) for _, pts in path]
         a = (joins[0][0] - joins[2][0], joins[0][1] - joins[2][1])
         b = (joins[1][0] - joins[3][0], joins[1][1] - joins[3][1])
@@ -356,10 +393,7 @@ def turned_angle(path: list[PathItem], r: Rect) -> float | None:
             x, y = (px - centre[0]) * ux + (py - centre[1]) * uy, (py - centre[1]) * ux - (px - centre[0]) * uy
             if abs(math.hypot(x / (la / 2), y / (lb / 2)) - 1) > 0.08:
                 return None  # not an ellipse
-        major = a if la >= lb else b
-        angle = -math.degrees(math.atan2(major[1], major[0]))
-        angle = (angle + 90) % 180 - 90
-        return angle if min(abs(angle), 90 - abs(angle)) > 1 else None
+        return Axes(shape="ELLIPSE", centre=centre, u=a, v=b)
     if set(ops) == {"l"}:
         vs = corners_of([p for _, pts in path for p in pts], tol)
         if len(vs) != 4:
@@ -369,9 +403,60 @@ def turned_angle(path: list[PathItem], r: Rect) -> float | None:
         if min(lengths) <= tol or any(abs(lengths[k] - lengths[k + 2]) > tol for k in range(2)) \
                 or any(abs(s[0] * t[0] + s[1] * t[1]) > 0.05 * math.hypot(*s) * math.hypot(*t) for s, t in zip(sides, sides[1:])):
             return None  # no rectangle
-        angle = (-math.degrees(math.atan2(sides[0][1], sides[0][0])) + 45) % 90 - 45
-        return angle if abs(angle) > 1 else None
+        centre = (sum(v[0] for v in vs) / 4, sum(v[1] for v in vs) / 4)
+        return Axes(shape="RECTANGLE", centre=centre, u=sides[0], v=sides[1])
     return None
+
+
+def turned_shape(path: list[PathItem], r: Rect) -> Turned | None:
+    """An ellipse or a rectangle turned on the page, with its true size (`Turned`), or None for one
+    standing upright or a path that is neither."""
+    axes = shape_axes(path, r)
+    return _turned(axes.shape, axes.centre, axes.u, axes.v) if axes is not None else None
+
+
+def turned_rounded(path: list[PathItem], r: Rect) -> tuple[Turned, float] | None:
+    """A rounded rectangle (four sides and four corners, `lclclclc`) turned on the page: the turned
+    shape and its corner radius, or None for one standing upright (or a path that is none)."""
+    sides = [((pts[0][0], pts[0][1]), (pts[-1][0], pts[-1][1])) for op, pts in path if op == "l"]
+    tol = tolerance(r)
+    if len(sides) != 4 or len(path) != 8:
+        return None
+    vectors = [(b[0] - a[0], b[1] - a[1]) for a, b in sides]
+    lengths = [math.hypot(*v) for v in vectors]
+    if min(lengths) <= tol:
+        return None
+    u = (vectors[0][0] / lengths[0], vectors[0][1] / lengths[0])
+    v = (-u[1], u[0])
+    if any(abs(w[0] * v[0] + w[1] * v[1]) > 0.05 * n for w, n in ((vectors[0], lengths[0]), (vectors[2], lengths[2]))) \
+            or any(abs(w[0] * u[0] + w[1] * u[1]) > 0.05 * n for w, n in ((vectors[1], lengths[1]), (vectors[3], lengths[3]))):
+        return None  # sides not square to each other
+    mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in sides]
+    centre = (sum(m[0] for m in mids) / 4, sum(m[1] for m in mids) / 4)
+    w = abs((mids[1][0] - mids[3][0]) * u[0] + (mids[1][1] - mids[3][1]) * u[1])
+    h = abs((mids[0][0] - mids[2][0]) * v[0] + (mids[0][1] - mids[2][1]) * v[1])
+    radius = (w - lengths[0]) / 2
+    if radius < -tol or abs(radius - (h - lengths[1]) / 2) > tol:
+        return None  # corners of two sizes: no ROUND_RECTANGLE draws it
+    turned = _turned("ROUND_RECTANGLE", centre, (u[0] * w, u[1] * w), (v[0] * h, v[1] * h))
+    return (turned, max(0.0, radius)) if turned is not None else None
+
+
+def turned_angle(path: list[PathItem], r: Rect) -> float | None:
+    """How far (degrees, counterclockwise as the page shows it) an ellipse or a rectangle is
+    turned (TikZ's `rotate=30`), or None for one standing upright or a path that is neither: its
+    major axis's (an ellipse's) or its first side's (a rectangle's) turn. `turned_shape` says the
+    turned shape's true box."""
+    axes = shape_axes(path, r)
+    if axes is None:
+        return None
+    if axes.shape == "ELLIPSE":
+        major = axes.u if math.hypot(*axes.u) >= math.hypot(*axes.v) else axes.v
+        angle = -math.degrees(math.atan2(major[1], major[0]))
+        angle = (angle + 90) % 180 - 90
+        return angle if min(abs(angle), 90 - abs(angle)) > 1 else None
+    angle = (-math.degrees(math.atan2(axes.u[1], axes.u[0])) + 45) % 90 - 45
+    return angle if abs(angle) > 1 else None
 
 
 def split_rectangle(path: list[PathItem], r: Rect) -> list[Rect] | None:

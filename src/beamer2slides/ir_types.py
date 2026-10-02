@@ -526,6 +526,9 @@ class Node:
     """(optional) None: a solid outline."""
     adjust: float | None
     """(optional) The preset's adjustment, a share of the shorter side (ir.Node)."""
+    rotation: float | None
+    """(optional) Degrees clockwise about the box's centre, `bbox` the box before the turn
+    (ir.Node); None: upright."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1216,7 +1219,8 @@ def node(v: object, at: At) -> Node:
                paragraphs=f.req("paragraphs", tuple_of(tuple_of(plain_run))),
                baselines=f.req("baselines", tuple_of(number)), label_w=f.req("label_w", number),
                text=f.nullable("text", tuple_of(card_box)), radius=f.optional("radius", number),
-               dash=f.optional("dash", one_of(DASHES)), adjust=f.optional("adjust", number))
+               dash=f.optional("dash", one_of(DASHES)), adjust=f.optional("adjust", number),
+               rotation=f.optional("rotation", number))
     f.close()
     return out
 
@@ -1686,6 +1690,7 @@ def node_json(n: Node) -> JsonObject:
     _put(out, "radius", n.radius)
     _put(out, "dash", n.dash)
     _put(out, "adjust", n.adjust)
+    _put(out, "rotation", n.rotation)
     return out
 
 

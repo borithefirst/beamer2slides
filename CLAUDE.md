@@ -190,8 +190,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - `diagram`: node/line/arrow clusters as grouped shapes, connectors and labels (`diagram_from`).
   It refuses (the drawing stays a picture) when a node holds other text, nodes cross, or a label
   holds a big operator, fraction or radical (simple math and scripts are runs, as in cells; a
-  script is on its letter's line, `classify_figures.text_rows`/`scripted`); an ellipse must be upright (`upright_ellipse`), a redrawn node keeps its label on the
-  top copy. See-through (opacity, blend) drawings and clusters of more than `MAX_PLAIN_RECTANGLES`
+  script is on its letter's line, `classify_figures.text_rows`/`scripted`); a turned ellipse,
+  rectangle or rounded box and a sloped label carry node `rotation` (degrees clockwise, bbox the
+  unturned box; `classify_turned`, `classify_shapes.turned_shape`, `emit_diagrams.turned_transform`,
+  sites turned by `site_point`); a redrawn node keeps its label on the top copy. See-through (opacity, blend) drawings and clusters of more than `MAX_PLAIN_RECTANGLES`
   rectangles stay pictures; elbows are written |- (a -| one from its other end); a panel under a
   stroke drawn after it stays in the background (a frame's own rules excepted). Every refusal
   names its reason (`classify_state.Refusal`, `tools/diagram_score.py`). Node presets beyond the

@@ -26,13 +26,14 @@ Refusal = Literal[
     "see_through",          # opacity or a soft mask (a shadow)
     "curve",                # a stroked line with Bezier segments (bend, in/out, loops, braces)
     "unknown_shape",        # a closed path that is no node shape we know
-    "rotated_node",         # an ellipse or a rectangle turned (rotate=30): no node rotation yet
+    "rotated_node",         # a turned node whose words stand level (shape border rotate) or a turned card
     "no_nodes",             # lines and labels only
     "nodes_cross",          # nodes overlapping without nesting (a Venn diagram)
     "loose_arrow_tip",      # an arrow head at no line's end
     "math_label",           # a label with a big operator, a fraction or a radical
     "icon_label",           # a label in an icon font, or with no Unicode
-    "rotated_label",        # a label not set horizontally (sloped)
+    "rotated_label",        # a label set vertically or upside down, or sloped in an upright node, across a
+                            # turned one, or in two directions in one node (classify_figures.sloped_labels)
     "too_many_rectangles",  # a QR code, a pixel grid
     "splits_cells",         # a ruled grid table_from could not read
 ]

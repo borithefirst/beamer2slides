@@ -577,6 +577,11 @@ class Node(_NodeKeys, total=False):
     """The preset's adjustment as a share of the box's shorter side (OOXML adj / 100000), where
     its proportions take one: a CAN's ellipse height, a HEXAGON's or an OCTAGON's corner cut
     (`classify_shapes.Preset`)."""
+    rotation: float
+    """A turned node or free label (TikZ's `rotate=30`, a `sloped` label): degrees clockwise on the
+    page as Slides shows it, about the box's centre. `bbox` is then the box before the turn -
+    centred on the drawn shape's centre, its true width and height - and the label's baselines
+    are measured in it. Absent for one standing upright (and in a deck.json older than it)."""
 
 
 # (`from` is a keyword: this part is written the functional way)

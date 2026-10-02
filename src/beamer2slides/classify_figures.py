@@ -14,14 +14,15 @@ from .classify_model import (
     overlap, polygon_shape, union_all, upright_ellipse,
 )
 from .classify_paragraphs import ParagraphsMixin
-from .classify_shapes import preset_shape, split_rectangle, turned_angle
+from .classify_shapes import preset_shape, split_rectangle, turned_rounded, turned_shape
 from .classify_state import DiagramRefusal, Refusal
 from .classify_text import EQ_NUMBER_RE, card_text, family_of, math_text, span_runs
+from .classify_turned import SpanFrame, holds, moved, reframe, same_turn, span_frame, turn, unturned_spans
 from .ir import (
     Arrow, BeforeWord, Dash, DiagramElement, DiagramLine, Element, ImageElement, Mark, Node, ShapeElement,
     TemplateKind, TextElement,
 )
-from .raw_types import DrawingType, PathItem, RawDrawing, RawImage
+from .raw_types import DrawingType, PathItem, RawDrawing, RawImage, RawSpan
 
 MAX_PLAIN_RECTANGLES = 32  # more rectangles in one cluster (a QR code, a pixel grid) are a picture
 
@@ -42,6 +43,7 @@ class DraftNode:
     radius: float | None
     dash: Dash | None
     adjust: float | None  # a preset's adjustment (classify_shapes.Preset)
+    rotation: float | None  # a turned node's or a sloped label's turn, `rect` the box before it (ir.Node)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -675,7 +677,7 @@ class FiguresMixin(ParagraphsMixin):
                 else:
                     nodes.append(DraftNode(rect=rect, shape="RECTANGLE", spans=[], fill=None,
                                            stroke=top["stroke"], width=top["width"], radius=None, dash=top.get("dash"),
-                                           adjust=None))
+                                           adjust=None, rotation=None))
 
     def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> DiagramElement | DiagramRefusal:
         """A figure cluster made only of simple nodes (rectangles, rounded rectangles, ellipses)
@@ -724,22 +726,25 @@ class FiguresMixin(ParagraphsMixin):
                 nodes.append(DraftNode(rect=r, shape=preset.shape, spans=[],
                                        fill=d["fill"] if "f" in d["type"] else None,
                                        stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
-                                       radius=preset.radius, dash=outline_dash, adjust=preset.adjust))
+                                       radius=preset.radius, dash=outline_dash, adjust=preset.adjust, rotation=None))
             elif parts is not None:
                 # a rectangle split into parts (a UML class): one rectangle per part, stacked
                 nodes.extend(DraftNode(rect=part, shape="RECTANGLE", spans=[],
                                        fill=d["fill"] if "f" in d["type"] else None,
                                        stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
-                                       radius=None, dash=outline_dash, adjust=None) for part in parts)
+                                       radius=None, dash=outline_dash, adjust=None, rotation=None) for part in parts)
             elif shape and r.w > 3 and r.h > 3:
                 corners = d.get("corners")
-                node = DraftNode(rect=r, shape=shape, spans=[],
+                # (a rounded rectangle turned: its box before the turn, its corners' radius)
+                rounded = turned_rounded(path, r) if shape == "ROUND_RECTANGLE" else None
+                node = DraftNode(rect=rounded[0].rect if rounded else r, shape=shape, spans=[],
                                  fill=d["fill"] if "f" in d["type"] else None,
                                  stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
                                  # rounded corners=3pt: without it the node got Slides' default rounding
-                                 radius=max(corners.values()) if shape == "ROUND_RECTANGLE" and corners else None,
+                                 radius=round(rounded[1], 2) if rounded else
+                                 max(corners.values()) if shape == "ROUND_RECTANGLE" and corners else None,
                                  dash=dash_style(d.get("dash", []), d["width"] or 0.4) if "s" in d["type"] else None,
-                                 adjust=None)
+                                 adjust=None, rotation=rounded[0].rotation if rounded else None)
                 if shape == "ELLIPSE" and max(r.w, r.h) <= TIP_SIZE:
                     rims.append((len(nodes), node, k))
                 else:
@@ -777,10 +782,15 @@ class FiguresMixin(ParagraphsMixin):
                                 points=points, outline=d["width"] if "s" in d["type"] and d["width"] else 0.0,
                                 closed=closed_path(path), on=None))
             else:
-                turned = turned_angle(path, r)
+                turned = turned_shape(path, r) if r.w > 3 and r.h > 3 else None
                 if turned is not None:
-                    return refused("rotated_node", f"{d['id']} {d['type']} {ops} turned {turned:.0f} deg")
-                curve = d["type"] == "s" and "c" in ops and set(ops) <= {"c", "l"}
+                    # an ellipse or a rectangle turned (rotate=30): its box before the turn, turned
+                    nodes.append(DraftNode(rect=turned.rect, shape=turned.shape, spans=[],
+                                           fill=d["fill"] if "f" in d["type"] else None,
+                                           stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
+                                           radius=None, dash=outline_dash, adjust=None, rotation=turned.rotation))
+                    continue
+                curve =d["type"] == "s" and "c" in ops and set(ops) <= {"c", "l"}
                 # A stroked curve (bend left, out/in, a loop, a brace) as circular arcs and
                 # straight pieces; one no chain of `MAX_PIECES` follows (a coil) stays a picture.
                 pieces = curves.path_pieces(path, curves.ARC_TOLERANCE) if curve else None
@@ -860,6 +870,7 @@ class FiguresMixin(ParagraphsMixin):
         def area(n: DraftNode) -> float:
             return n.rect.w * n.rect.h
         seen: list[Span] = []
+        sloped: list[Span] = []
         for s in spans:
             # (an icon font's glyph has no Unicode: as a node's label it read U+FFFD, a
             # diamond with a question mark, where the picture shows the icon)
@@ -868,7 +879,8 @@ class FiguresMixin(ParagraphsMixin):
             if s.info.family == "icon" or "�" in s.text:
                 return refused("icon_label", repr(s.text))
             if not s.horizontal:
-                return refused("rotated_label", repr(s.text))
+                sloped.append(s)  # (set along its turn below: sloped_labels)
+                continue
             # A node drawn again on a later overlay step (\node<2->[fill=yellow] at (a) {A})
             # paints its label a second time on the same spot: one label, and it goes to the
             # copy on top - the last drawn of the smallest nodes around it. Given to the first,
@@ -877,10 +889,15 @@ class FiguresMixin(ParagraphsMixin):
                    and abs(o.size - s.size) <= 0.1 for o in seen):
                 continue
             seen.append(s)
-            owners = [n for n in nodes if n.rect.contains(s.rect.cx, s.rect.cy)]
+            owners = [n for n in nodes if holds(n.rect, n.rotation, s.rect.cx, s.rect.cy)]
             if owners:
                 smallest = min(map(area, owners))
-                [n for n in owners if area(n) <= 1.02 * smallest + 0.01][-1].spans.append(s)
+                owner = [n for n in owners if area(n) <= 1.02 * smallest + 0.01][-1]
+                if owner.rotation is not None:
+                    # (`shape border rotate`: the outline turned, its words not - a label in a
+                    # shape turns with it in Slides)
+                    return refused("rotated_node", f"a level label {s.text!r} in a turned {owner.shape}")
+                owner.spans.append(s)
             else:
                 free.append(s)  # edge labels and captions: a text box in the group
         empty = sum(n.shape is not None and not n.spans for n in nodes)
@@ -897,11 +914,21 @@ class FiguresMixin(ParagraphsMixin):
                     nodes[-1] = replace(last, rect=last.rect.union(s.rect))
                 else:
                     nodes.append(DraftNode(rect=s.rect, shape=None, spans=[s], fill=None, stroke=None, width=None,
-                                           radius=None, dash=None, adjust=None))
+                                           radius=None, dash=None, adjust=None, rotation=None))
+        if sloped:
+            raws = {r["id"]: r for r in self.raw["spans"]}
+            unread = next((s for s in sloped if s.id not in raws), None)
+            if unread is not None:
+                return refused("rotated_label", f"{unread.text!r}: no span of the page")
+            problem = sloped_labels(nodes, [(s, raws[s.id]) for s in sloped])
+            if problem is not None:
+                return refused(problem[0], problem[1])
 
         out_nodes: list[Node] = []
         for n in nodes:
             rows = text_rows(n.spans)
+            if n.rotation is not None and n.shape and card_text(n.rect, rows) is not None:
+                return refused("rotated_node", f"a card's text in a turned {n.shape}")
             out_nodes.append({
                 "bbox": n.rect.as_list(), "shape": n.shape, "fill": n.fill, "stroke": n.stroke,
                 "width": n.width, "paragraphs": [span_runs(row) for row in rows],
@@ -911,6 +938,7 @@ class FiguresMixin(ParagraphsMixin):
                 **({"radius": n.radius} if n.radius is not None else {}),
                 **({"dash": n.dash} if n.dash is not None else {}),
                 **({"adjust": n.adjust} if n.adjust is not None else {}),
+                **({"rotation": round(n.rotation, 2)} if n.rotation is not None else {}),
             })
         return {"id": f"p{self.raw['index']}dg{index}", "kind": "diagram", "role": "figure",
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,
@@ -948,6 +976,69 @@ def continues(a: Span, b: Span) -> bool:
     or its letter."""
     gap = b.rect.x0 - a.rect.x1
     return (abs(a.baseline - b.baseline) <= 0.3 * b.size and -0.3 * b.size <= gap <= 0.5 * b.size) or scripted(a, b)
+
+
+def sloped_labels(nodes: list[DraftNode], sloped: Sequence[tuple[Span, RawSpan]]) -> tuple[Refusal, str] | None:
+    """Sloped spans set along their turn (classify_turned): a turned node's words go into it, read
+    upright in its frame, the node described along their direction (`reframe`); the others are
+    free labels, each a text box turned about its centre (`rotation`), joined as level ones are
+    (`text_rows`, `continues`) once upright. What a turned Slides text box cannot say is refused
+    (None: all placed): a span set vertically or upside down, words sloped in an upright node or
+    across a turned one, words of two directions in one node."""
+    framed: list[tuple[Span, SpanFrame]] = []
+    for s, raw in sloped:
+        f = span_frame(raw)
+        if f is None:
+            return "rotated_label", f"{s.text!r} set vertically or upside down"
+        framed.append((s, f))
+    owned: dict[int, list[tuple[Span, SpanFrame]]] = {}
+    free: list[tuple[Span, SpanFrame]] = []
+    for s, f in framed:
+        cx, cy = f.centre()
+        owners = [k for k, n in enumerate(nodes) if n.shape is not None and holds(n.rect, n.rotation, cx, cy)]
+        if not owners:
+            free.append((s, f))
+            continue
+        smallest = min(nodes[k].rect.w * nodes[k].rect.h for k in owners)
+        owner = [k for k in owners if nodes[k].rect.w * nodes[k].rect.h <= 1.02 * smallest + 0.01][-1]
+        owned.setdefault(owner, []).append((s, f))
+    for k, words in owned.items():
+        n = nodes[k]
+        text = "".join(s.text for s, _ in words)
+        if n.rotation is None:
+            return "rotated_label", f"{text!r} sloped in an upright {n.shape}"
+        if any(not same_turn(f.rotation, words[0][1].rotation) for _, f in words):
+            return "rotated_label", f"{text!r}: words of two directions in one {n.shape}"
+        framing = reframe(n.rect, n.rotation, words[0][1].rotation)
+        if framing is None:
+            return "rotated_label", f"{text!r} across its turned {n.shape}"
+        rect, rotation = framing
+        nodes[k] = replace(n, rect=rect, rotation=rotation,
+                           spans=n.spans + unturned_spans(words, (rect.cx, rect.cy), rotation))
+    groups: list[list[tuple[Span, SpanFrame]]] = []
+    for s, f in sorted(free, key=lambda sf: sf[1].rotation):
+        if groups and same_turn(groups[-1][0][1].rotation, f.rotation):
+            groups[-1].append((s, f))
+        else:
+            groups.append([(s, f)])
+    for group in groups:
+        pivot, rotation = group[0][1].origin, round(group[0][1].rotation, 2)
+        labels: list[list[Span]] = []
+        for row in text_rows(unturned_spans(group, pivot, rotation)):
+            for s in row:
+                if labels and continues(labels[-1][-1], s):
+                    labels[-1].append(s)
+                else:
+                    labels.append([s])
+        for spans in labels:
+            r = union_all([s.rect for s in spans])
+            # the label upright about its own centre, where the turn about the pivot put it
+            px, py = turn((r.cx, r.cy), pivot, rotation)
+            dx, dy = px - r.cx, py - r.cy
+            nodes.append(DraftNode(rect=Rect(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy), shape=None,
+                                   spans=[moved(s, dx, dy) for s in spans], fill=None, stroke=None, width=None,
+                                   radius=None, dash=None, adjust=None, rotation=rotation))
+    return None
 
 
 def curve_lines(pieces: Sequence[curves.Piece], stroke: str, width: float) -> list[DiagramLine]:
