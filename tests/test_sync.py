@@ -1962,6 +1962,22 @@ def test_notes_follow_text_rules():
     assert {"slide": "intro", "element": None, "fields": ["notes"]} in jarr(mplan, "report", "overrides")
 
 
+@pytest.mark.needs_decks("out/30_speaker_notes.pdf", "out/notes/30_speaker_notes-notes.pdf")
+def test_a_pdf_without_note_pages_keeps_the_notes_the_base_had(tmp_path: Path) -> None:
+    """Notes from note pages (or `convert --tex`'s source) are not in a PDF without note pages: a
+    later sync from such a PDF knows nothing about notes, so each slide keeps its base's, not ""."""
+    from beamer2slides.sync import build_ours_of
+    decks = Path(__file__).parent / "decks" / "out"
+    first = build_ours_of(decks / "notes" / "30_speaker_notes-notes.pdf", tmp_path / "notes", {"slides": []}, "last",
+                          SLIDE_W, snapshot.NO_PICTURES)
+    said = [s["notes"] for s in first.slides]
+    assert sum(1 for n in said if n) >= 10
+    first_slides: list[Json] = [*first.slides]
+    second = build_ours_of(decks / "30_speaker_notes.pdf", tmp_path / "plain", {"slides": first_slides}, "last",
+                           SLIDE_W, snapshot.NO_PICTURES)
+    assert [s["notes"] for s in second.slides] == said
+
+
 # ---------------------------------------------------------------- request helpers
 
 def test_rename_object_ids():

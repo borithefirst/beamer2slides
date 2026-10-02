@@ -2,8 +2,9 @@
 
   python -m beamer2slides classify deck.pdf [--out DIR]
       DIR/raw.json, DIR/deck.json and DIR/debug/slide-NNN.png
-  python -m beamer2slides convert deck.pdf [--out DIR] [--title TITLE]
-      classify + backgrounds + Google Slides deck (DIR/emit.json)
+  python -m beamer2slides convert deck.pdf [--out DIR] [--title TITLE] [--tex main.tex]
+      classify + backgrounds + Google Slides deck (DIR/emit.json); --tex: speaker notes from the
+      source when the PDF has no note pages (docs/speaker-notes.md)
   python -m beamer2slides pull --deck URL|ID|DIR --tex main.tex [--apply | --out SRC] [--max-iter N]
       edit the source until its conversion matches the (edited) deck: WORK/pull.patch, edits.md/json
   python -m beamer2slides converge --target deck.json --tex main.tex [...]
@@ -19,7 +20,7 @@
 import argparse
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
@@ -27,9 +28,11 @@ from .classify import classify
 from .debug import render_debug
 from .extract import extract, select_overlays
 from .ir import deck_json
+from .notes import Prepared, notes_from_source, source_beside
 from .notes import prepare as prepare_notes
 from .paths import out_root
 from .raw_types import RawDoc
+from .typing_compat import assert_never
 
 if TYPE_CHECKING:  # (the Google side is imported where it is used, as the CLI always has)
     from .google_types import DriveService, SlidesService
@@ -56,14 +59,51 @@ def check_labels(deck: "Mapping[str, Json]", mode: str) -> None:
         raise SystemExit("--check-labels error: the frames above need labels of their own")
 
 
-def cmd_classify(pdf: Path, out: Path, overlays: str, check: str) -> "tuple[Path, RawDoc, JsonObject]":
-    out.mkdir(parents=True, exist_ok=True)
+def notes_of(pdf: Path, out: Path, tex: Path | None) -> Prepared:
+    """The PDF's speaker notes (docs/speaker-notes.md): its note pages, or, when it has none and
+    the person named its source (`--tex`), the source compiled once more with its notes shown,
+    paired page by page. Without TeX the deck is converted without notes; a source that does not
+    compile or is not this PDF's refuses. A source is never compiled unless named."""
     prepared = prepare_notes(pdf, out)
-    pdf = prepared.pdf
     if prepared.mode:
         print(f"speaker notes ({prepared.mode}): found notes for {len(prepared.notes)} pages")
-    elif (out / "slides.pdf").exists():
+        if tex is not None:
+            print(f"  (--tex {tex.name} is not compiled: the PDF carries its notes)")
+        return prepared
+    if (out / "slides.pdf").exists():
         (out / "slides.pdf").unlink()  # stale from an earlier run of a PDF that had notes
+    if tex is None:
+        beside = source_beside(pdf)
+        if beside is not None:
+            print(f"speaker notes: {pdf.name} has none, but {beside.name} beside it writes \\note: "
+                  f"--tex {beside.name} brings them")
+        return prepared
+    found = notes_from_source(tex, pdf, out / "notes-source")
+    match found.outcome:
+        case "found":
+            print(found.message)
+            if found.notes:
+                print("  a later sync from a PDF without note pages keeps these notes; to bring changed "
+                      "notes, sync a PDF compiled with notes shown")
+            return replace(prepared, notes=found.notes)
+        case "no-engine" | "no-notes":
+            print(f"speaker notes: {found.message}")
+            return prepared
+        case "failed" | "mismatch":
+            raise SystemExit(f"speaker notes: {found.message}")
+        case _:
+            assert_never(found.outcome)
+
+
+def cmd_classify(pdf: Path, out: Path, overlays: str, check: str) -> "tuple[Path, RawDoc, JsonObject]":
+    return classify_pdf(pdf, out, overlays, check, None)
+
+
+def classify_pdf(pdf: Path, out: Path, overlays: str, check: str,
+                 tex: Path | None) -> "tuple[Path, RawDoc, JsonObject]":
+    out.mkdir(parents=True, exist_ok=True)
+    prepared = notes_of(pdf, out, tex)
+    pdf = prepared.pdf
     raw = extract(pdf, prepared.labels)
     for page in raw["pages"]:
         page["notes"] = prepared.notes.get(page["index"])
@@ -90,7 +130,7 @@ def cmd_classify(pdf: Path, out: Path, overlays: str, check: str) -> "tuple[Path
 
 
 def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str, measure: bool,
-                force_rebuild: bool, backup: str, check: str) -> None:
+                force_rebuild: bool, backup: str, check: str, tex: Path | None) -> None:
     from .emit import emit, preflight_in_background
     from .render import render_backgrounds
 
@@ -100,7 +140,7 @@ def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlay
     # before the first write to Drive. `emit` asks again immediately before that write.
     preflight = preflight_in_background(out, source, new_deck, force_rebuild)
     # (--check-labels error refuses here, before anything is written to Drive)
-    pdf, raw, deck = cmd_classify(pdf, out, overlays, check)  # pdf: without note pages, if there were any
+    pdf, raw, deck = classify_pdf(pdf, out, overlays, check, tex)  # pdf: without note pages, if there were any
     render_backgrounds(pdf, raw, deck, out, frozenset())
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     checked = preflight()  # RebuildRefused comes out here, with nothing yet written to Drive
@@ -345,6 +385,11 @@ def main() -> None:
         if name in ("classify", "convert"):
             c.add_argument("--overlays", choices=["last", "all"], default="last",
                            help="for PDFs with overlay steps: keep the last step of each frame (default) or all pages")
+            c.add_argument("--tex", type=Path,
+                           help="the PDF's beamer source: when the PDF has no note pages, it is compiled once "
+                                "more with its notes shown (a copy in <out>/notes-source) and each \\note goes "
+                                "to its slide's speaker notes. Refused when the source's pages are not the "
+                                "PDF's; without TeX the deck is converted without notes (docs/speaker-notes.md)")
         if name == "convert":
             c.add_argument("--title")
             c.add_argument("--new-deck", action="store_true",
@@ -558,12 +603,12 @@ def main() -> None:
         return
     out = args.out or out_root() / args.pdf.stem
     if args.command == "classify":
-        cmd_classify(args.pdf, out, args.overlays, args.check_labels)
+        classify_pdf(args.pdf, out, args.overlays, args.check_labels, args.tex)
     elif args.command == "convert":
         from .guard import RebuildRefused
         try:
             cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays, not args.predict_places,
-                        args.force_rebuild, args.backup, args.check_labels)
+                        args.force_rebuild, args.backup, args.check_labels, args.tex)
         except RebuildRefused as refused:
             raise SystemExit(str(refused)) from None
     elif args.command == "fidelity":

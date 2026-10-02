@@ -1,0 +1,128 @@
+% Speaker notes: one frame per way a note is written (docs/speaker-notes.md).
+% !variants = notes notes-right notes-plain notes-compressed notes-xelatex
+% The plain build has no note pages at all (what a person compiles every day); the variants show
+% them as beamer's options and templates do (tests/decks/build.py VARIANTS). What each note must
+% read as is tests/test_speaker_notes.py's EXPECTED.
+\documentclass{beamer}
+\title{Speaker Notes}
+\author{Tester}
+\date{}
+
+\begin{document}
+
+\begin{frame}{A plain sentence}
+  The note under this frame is one sentence.
+  \note{Remember to greet the audience before the first slide.}
+\end{frame}
+
+\begin{frame}{Several paragraphs}
+  Three paragraphs of notes.
+  \note{The first paragraph sets the scene for the talk and says why the topic matters to the
+    people in the room today.
+
+    The second paragraph gives the one number to remember.
+
+    The third paragraph is a short reminder to slow down.}
+\end{frame}
+
+\begin{frame}{Lists in a note}
+  A bullet list and a numbered list.
+  \note{Points to make:
+    \begin{itemize}
+      \item the parser reads the PDF
+      \item the classifier groups the lines
+    \end{itemize}
+    Then in order:
+    \begin{enumerate}
+      \item compile
+      \item convert
+      \item sync
+    \end{enumerate}}
+\end{frame}
+
+\begin{frame}{Note items}
+  Three notes given as items.
+  \note[item]{Ask who has used beamer before.}
+  \note[item]{Show the converted deck.}
+  \note[item]{Mention the speaker notes.}
+\end{frame}
+
+\begin{frame}{Bold, italic and emphasis}
+  Styles inside a note.
+  \note{This is \textbf{bold}, this is \textit{italic} and this is \emph{emphasised}; a word
+    \textbf{half}way styled stays one word.}
+\end{frame}
+
+\begin{frame}{Inline math}
+  Formulas inside a note.
+  \note{The circle is $x^2 + y^2 = r^2$, the angle is $\alpha$ and $a_i \le b_i$ for every $i$.}
+\end{frame}
+
+\begin{frame}{Accents and quotes}
+  Letters beyond ASCII.
+  \note{Café, naïve, Müller, Straße and señor --- “curly quotes” and ``TeX quotes'', 1--2 pages,
+    an efficient office workflow.}
+\end{frame}
+
+\begin{frame}{Links}
+  A link and a URL.
+  \note{See \href{https://example.com/talk}{the talk page} and \url{https://example.org/notes}.}
+\end{frame}
+
+\begin{frame}{A long note}
+  The note under this frame is longer than one note page.
+  \note{This note is long on purpose. It runs past the bottom of its note page, because beamer
+    sets every note into one page and never breaks it onto a second one. The words that run off
+    the page are still in the PDF, drawn below its edge, and a person who wrote them wants to see
+    them in the speaker notes all the same. So the reader takes every word the note holds, on the
+    page or below it. The rest of this note is filler that says the same thing again and again
+    until it is long enough to overflow. One two three four five six seven eight nine ten eleven
+    twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty. One two three
+    four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen
+    eighteen nineteen twenty. One two three four five six seven eight nine ten eleven twelve
+    thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty. One two three four five
+    six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen
+    nineteen twenty. One two three four five six seven eight nine ten eleven twelve thirteen
+    fourteen fifteen sixteen seventeen eighteen nineteen twenty. One two three four five six
+    seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen
+    nineteen twenty. One two three four five six seven eight nine ten eleven twelve thirteen
+    fourteen fifteen sixteen seventeen eighteen nineteen twenty. One two three four five six
+    seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen
+    nineteen twenty. One two three four five six seven eight nine ten eleven twelve thirteen
+    fourteen fifteen sixteen seventeen eighteen nineteen twenty. One two three four five six
+    seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen
+    nineteen twenty. The last sentence of the long note.}
+\end{frame}
+
+\begin{frame}{Overlays}
+  \begin{itemize}
+    \item First step
+    \pause
+    \item Second step
+    \pause
+    \item Third step
+  \end{itemize}
+  \note{A note on every step.}
+  \note<2>{Only on the second step.}
+\end{frame}
+
+\begin{frame}{No note}
+  This frame has no note.
+\end{frame}
+
+\begin{frame}{A note after the frame}
+  Its note is written after the frame ends.
+\end{frame}
+\note{Written outside the frame, after it.}
+
+\begin{frame}[noframenumbering]{Not numbered}
+  This frame does not count.
+  \note{A note on a frame that takes no number.}
+\end{frame}
+
+\begin{frame}{The last frame}
+  The end.
+  \note{Thank the audience.}
+\end{frame}
+
+\end{document}

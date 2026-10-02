@@ -591,7 +591,14 @@ def build_ours_of(pdf: Path, work: Path, base: JsonObject, overlays: str, page_w
     moves = [identity.reported_move(m, base_keys, infos) for m in found]
     weak: dict[int, str] = {}
     keys, pairs = identity.inherit_slide_keys(base_infos, base_keys, infos, found, weak)
-    near = [identity.reported_near_miss(m, base_keys, infos)
+    if prepared.mode is None:
+        # A PDF without note pages says nothing about speaker notes (they may have come from the
+        # source, `convert --tex`): each slide keeps the notes its base slide had, or "" would
+        # clear every note nobody edited.
+        for j, slide in enumerate(ours_slides):
+            if j in pairs:
+                slide["notes"] = base_slides[pairs[j]].get("notes")
+    near =[identity.reported_near_miss(m, base_keys, infos)
             for m in identity.near_misses_of(base_infos, infos, pairs)]
     ekeys: list[list[ElementKey]] = []
     fps: list[list[JsonObject]] = []

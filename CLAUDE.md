@@ -82,6 +82,12 @@ decorations) is a picture, or baked into a per-slide background picture.
   Measure A/B **interleaved** in one sitting: Google's latency drifts 2x with the day.
 - Overlays: non-handout PDFs keep the last step of each frame (steps matched by title);
   `--overlays all` keeps every page.
+- **Speaker notes** (`notes.py`, docs/speaker-notes.md): note pages of the default, compressed
+  and plain templates and a second screen are read as text (paragraphs, `• `/`1. ` items, math as
+  Unicode, links as `words (uri)`, a `\note<2>` carried to the kept step). A PDF without them gets
+  notes only when a person names the source (`classify`/`convert --tex`: compiled once with notes
+  shown, pages paired by words); sync from such a PDF keeps each slide's base notes
+  (`build_ours`). Scoreboard: `tools/notes_score.py`, `tests/decks/30_speaker_notes.tex`.
 
 ## What becomes native (deck.json element kinds)
 Details, measurements and edge cases: docs/project-notes.md "What becomes native".
