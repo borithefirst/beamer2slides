@@ -802,10 +802,11 @@ def card_text(node: Rect, rows: list[list[Span]]) -> list[CardBox] | None:
     if not rows:
         return None
     rows = [sorted(row, key=lambda s: s.rect.x0) for row in rows]
-    info = [{"x0": row[0].rect.x0, "x1": row[-1].rect.x1, "baseline": row[0].baseline,
+    # (a row's baseline is its normal-size text's, not a script's)
+    info = [{"x0": row[0].rect.x0, "x1": row[-1].rect.x1, "baseline": max(row, key=lambda s: s.size).baseline,
              "size": max(s.size for s in row)} for row in rows]
     sizes = [r["size"] for r in info]
-    top, bottom = rows[0][0].rect.y0, max(s.rect.y1 for s in rows[-1])
+    top, bottom = min(s.rect.y0 for s in rows[0]), max(s.rect.y1 for s in rows[-1])
     # (lines of a justified paragraph start together and end apart, even when nearly centred)
     def flush_left(ls: list[dict[str, float]]) -> bool:
         return len(ls) > 1 and all(abs(l["x0"] - ls[0]["x0"]) <= 0.5 for l in ls) and \

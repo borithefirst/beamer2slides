@@ -8,8 +8,13 @@ from collections.abc import Sequence
 from beamer2slides import classify as C
 from beamer2slides import ir
 from beamer2slides.classify import Line, PageClassifier, Rect, Span, body_size, classify, new_line, new_span
+from beamer2slides.emit import FontMapper, diagram_requests
 from beamer2slides.fonts import font_info
+from beamer2slides.google_types import slides_json
+from beamer2slides.ir import element_json
 from beamer2slides.raw_types import DrawingType, PathItem, RawDoc, RawDrawing, RawImage, RawPage, RawSpan
+
+from .json_reads import jnum, jobj, jstr
 
 W, H = 453.54, 255.12
 SANS, MONO = "LMSans10-Regular", "LMMono10-Regular"
@@ -390,15 +395,53 @@ def test_open_curves_are_no_ellipse_nodes():
     assert not any(any(n["shape"] == "ELLIPSE" for n in e["nodes"]) for e in diagrams(elements(p)))
 
 
-def test_script_labels_keep_a_circuit_a_picture():
+def test_a_script_label_is_one_label_with_its_script():
+    """R_s beside a resistor: one free label, R and a subscript s (set as one run of plain text
+    it read "Rs"; as two labels the s stood alone below the R)."""
     p = Page()
     p.draw(rect(123.5, 172.2, 150.4, 182.3), type="s", stroke="#000000", width=0.8)
     p.draw(lines((40, 177), (123.5, 177)), type="s", stroke="#000000", width=0.4)
     p.draw(lines((150.4, 177), (200, 177)), type="s", stroke="#000000", width=0.4)
-    p.text("R", 54, 165, 9.27)
-    p.text("s", 60, 166.4, 6.78, font="LMRoman8-Regular")
+    p.text("R", 54, 165, 9.27)  # (to 58.6)
+    p.text("s", 58.7, 166.4, 6.78, font="LMRoman8-Regular")
     body_text(p)
-    assert not any(e["kind"] == "diagram" for e in elements(p))
+    [d] = diagrams(elements(p))
+    [label] = [n for n in d["nodes"] if n["shape"] is None]
+    [runs] = label["paragraphs"]
+    assert [(r["text"], r["script"]) for r in runs] == [("R", None), ("s", "sub")]
+    assert label["baselines"] == [165]
+    # Slides lowers the s (SUBSCRIPT), at no more than the R's size (emit.run_sizes)
+    reqs = [slides_json(r) for r in diagram_requests(element_json(d), "s", "d", 1.0, FontMapper(), None)]
+    styles = [jobj(r, "updateTextStyle", "style") for r in reqs if "updateTextStyle" in r]
+    assert [jstr(s, "baselineOffset") for s in styles] == ["NONE", "SUBSCRIPT"]
+    assert jnum(styles[1], "fontSize", "magnitude") <= jnum(styles[0], "fontSize", "magnitude")
+
+
+def test_a_superscript_label_is_on_its_letter_s_line():
+    """x^2 over an edge: the raised 2 is on the x's line (read on its own baseline, it was a line
+    of its own above the x)."""
+    p = Page()
+    p.draw(lines((40, 177), (200, 177)), type="s", stroke="#000000", width=0.4)
+    p.draw(rect(200, 170, 230, 184), type="s", stroke="#000000", width=0.8)
+    p.text("x", 100, 172, 10.9, font="CMMI10")
+    p.text("2", 105.8, 168, 7.97, font="CMR8")
+    p.text("+", 112, 172, 10.9, font="CMR10")
+    body_text(p)
+    [d] = diagrams(elements(p))
+    [label] = [n for n in d["nodes"] if n["shape"] is None]
+    [runs] = label["paragraphs"]
+    assert [(r["text"].strip(), r["script"]) for r in runs] == [("x", None), ("2", "super"), ("+", None)]
+
+
+def test_a_big_operator_keeps_a_diagram_a_picture():
+    p = Page()
+    p.draw(rect(60, 150, 140, 190), type="s", stroke="#000000", width=0.8)
+    p.draw(lines((140, 170), (200, 170)), type="s", stroke="#000000", width=0.4)
+    p.draw(rect(200, 160, 240, 180), type="s", stroke="#000000", width=0.8)
+    p.text("∑", 80, 178, 10.9, font="CMEX10")
+    p.text("x", 92, 172, 10.9, font="CMMI10")
+    body_text(p)
+    assert not diagrams(elements(p))
 
 
 def test_text_inside_a_node_that_is_none_of_its_labels_keeps_it_a_picture():

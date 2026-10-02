@@ -17,7 +17,7 @@ from .emit_metrics import ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, SLIDE_W, FontMa
 from .emit_model import (
     CellGrid, JsonMap, ObjectMap, PptxTable, SetRun, SetTable, columns_of, set_table, table_of,
 )
-from .emit_text import extra_above, in_sentence_of, run_sizes_of
+from .emit_text import baseline_offset, extra_above, in_sentence_of, run_sizes_of
 from .emit_widths import (
     WRAP_MARGIN, set_runs_of, slides_width_of, wrap_joins_of, wrap_window_of, wrapped_width_of,
 )
@@ -25,7 +25,7 @@ from .google_types import (
     SlidesParagraphStyle, SlidesRequest, SlidesTableCellLocation, slides_text_style,
 )
 from .gslides import EMU_PER_PT, emu, pt, rgb_color, text_color
-from .ir import Align, Script
+from .ir import Align
 from .ir_types import Column, Merge, TableElement
 from .json_types import Json
 from .typing_compat import assert_never
@@ -643,18 +643,6 @@ def merged_pads(m: Merge, x: tuple[float, float], bounds: Sequence[float], dx: f
     return left, right
 
 
-def _baseline_offset(script: Script | None) -> Literal["NONE", "SUPERSCRIPT", "SUBSCRIPT"]:
-    if script is None:
-        return "NONE"
-    match script:
-        case "super":
-            return "SUPERSCRIPT"
-        case "sub":
-            return "SUBSCRIPT"
-        case _:
-            assert_never(script)
-
-
 def _alignment(align: Align, rtl: bool) -> Literal["START", "CENTER", "END"]:
     """A cell's paragraph alignment: a cell that reads right to left starts at its right edge."""
     match align:
@@ -813,7 +801,7 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
                     style["fontSize"] = pt(z)  # (a subscript no larger than its text: run_sizes)
                 style["smallCaps"] = run.smallcaps
                 style["foregroundColor"] = text_color(run.color)
-                style["baselineOffset"] = _baseline_offset(run.script)
+                style["baselineOffset"] = baseline_offset(run.script)
                 reqs.append({"updateTextStyle": {
                     "objectId": object_id, "cellLocation": loc,  # (UTF-16 units: u16)
                     "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": min(u16(text), start + u16(piece))},

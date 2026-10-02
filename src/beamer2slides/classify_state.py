@@ -30,8 +30,7 @@ Refusal = Literal[
     "no_nodes",             # lines and labels only
     "nodes_cross",          # nodes overlapping without nesting (a Venn diagram)
     "loose_arrow_tip",      # an arrow head at no line's end
-    "scripted_label",       # a label with a sub- or superscript
-    "math_label",           # a label in a math font
+    "math_label",           # a label with a big operator, a fraction or a radical
     "icon_label",           # a label in an icon font, or with no Unicode
     "rotated_label",        # a label not set horizontally (sloped)
     "too_many_rectangles",  # a QR code, a pixel grid
@@ -40,7 +39,7 @@ Refusal = Literal[
 """Why a figure cluster did not become a native diagram (`DiagramRefusal`)."""
 REFUSALS: tuple[Refusal, ...] = (
     "too_large", "over_text", "image_inside", "other_text", "unreadable_path", "see_through", "curve",
-    "unknown_shape", "rotated_node", "no_nodes", "nodes_cross", "loose_arrow_tip", "scripted_label", "math_label", "icon_label",
+    "unknown_shape", "rotated_node", "no_nodes", "nodes_cross", "loose_arrow_tip", "math_label", "icon_label",
     "rotated_label", "too_many_rectangles", "splits_cells")
 """Every `Refusal`, to read one back from JSON (`tests/test_diagram_score.py` holds them equal)."""
 

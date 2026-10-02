@@ -12,6 +12,7 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from copy import copy
 from dataclasses import replace
+from typing import Literal
 
 from .emit_metrics import (
     ASCENT_EM, BASELINE_A, DESCENT_EM, LINE_EM, MIDDLE_BASELINE_EM, PAD_X, PX_PT, SOFT_BREAK, FontMapper,
@@ -30,9 +31,10 @@ from .google_types import (
     slides_text_style,
 )
 from .gslides import EMU_PER_PT, emu, pt, text_color
-from .ir import Align
+from .ir import Align, Script
 from .ir_types import Number, TextElement
 from .json_types import Json, JsonObject
+from .typing_compat import assert_never
 
 
 def small_caps_line(text: str, smallcaps: bool, z: float) -> float:
@@ -83,6 +85,19 @@ def run_sizes_of(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> lis
     if body is None:
         return sizes
     return [min(z, body) if r.script == "sub" else z for r, z in zip(runs, sizes)]
+
+
+def baseline_offset(script: Script | None) -> Literal["NONE", "SUPERSCRIPT", "SUBSCRIPT"]:
+    """A run's script as Slides' `baselineOffset` (NONE said, so a restyled run comes down)."""
+    if script is None:
+        return "NONE"
+    match script:
+        case "super":
+            return "SUPERSCRIPT"
+        case "sub":
+            return "SUBSCRIPT"
+        case _:
+            assert_never(script)
 
 
 def run_width(run: SetRun, z: float, scale: float, fonts: FontMapper) -> float:
@@ -809,8 +824,7 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
             style["foregroundColor"] = text_color(run.color)
             style["underline"] = run.underline
             style["strikethrough"] = run.strike
-            style["baselineOffset"] = "NONE" if run.script is None else \
-                "SUPERSCRIPT" if run.script == "super" else "SUBSCRIPT"
+            style["baselineOffset"] = baseline_offset(run.script)
             fields = fields + ["smallCaps", "foregroundColor", "underline", "strikethrough", "baselineOffset"]
             if run.highlight:
                 style["backgroundColor"] = text_color(run.highlight)

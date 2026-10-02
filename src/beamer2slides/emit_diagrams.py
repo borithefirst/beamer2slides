@@ -18,7 +18,7 @@ from .emit_model import (
     set_runs, template_of,
 )
 from .emit_pptx import arc_kind, template_key
-from .emit_text import in_sentence_of, text_box_requests_of
+from .emit_text import baseline_offset, in_sentence_of, run_sizes_of, text_box_requests_of
 from .google_types import LineConnection, LineProperties, Outline, ShapeProperties, SlidesRequest, slides_text_style
 from .gslides import EMU_PER_PT, emu, pt, rgb_color, text_color
 from .ir import Arrow, Bend, TemplateKind
@@ -424,7 +424,7 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
             for runs in (in_sentence_of(set_runs(line)) for line in node.paragraphs):
                 line_text = "".join(r.text for r in runs).strip()
                 offset = 0
-                for run in runs:
+                for run, z in zip(runs, run_sizes_of(runs, scale, fonts)):
                     piece = run.text.strip() if len(runs) == 1 else run.text
                     if offset == 0:
                         piece = piece.lstrip()
@@ -432,9 +432,14 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                         continue
                     font, sfields = fonts.style_of(run, scale)
                     style = slides_text_style(font, "a diagram label's font (FontMapper.style_of)")
+                    if "fontSize" in style:
+                        style["fontSize"] = pt(z)  # (a subscript no larger than its text: run_sizes)
+                    style["smallCaps"] = run.smallcaps
                     style["foregroundColor"] = text_color(run.color)
+                    style["baselineOffset"] = baseline_offset(run.script)
                     reqs.append({"updateTextStyle": {  # (UTF-16 units: u16)
-                        "objectId": target, "style": style, "fields": ",".join(sfields + ["foregroundColor"]),
+                        "objectId": target, "style": style,
+                        "fields": ",".join(sfields + ["smallCaps", "foregroundColor", "baselineOffset"]),
                         "textRange": {"type": "FIXED_RANGE", "startIndex": start + offset,
                                       "endIndex": min(start + u16(line_text), start + offset + u16(piece))}}})
                     offset += u16(piece)

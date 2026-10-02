@@ -10,8 +10,8 @@ from typing import Literal
 
 from . import curves
 from .classify_model import (
-    HOLE_PAD, Line, Paragraph, Rect, Span, cluster_rects, miter_reach, new_line, new_paragraph, overlap,
-    polygon_shape, union_all, upright_ellipse,
+    HOLE_PAD, Line, Paragraph, Rect, Span, cluster_rects, extension_font, miter_reach, new_line, new_paragraph,
+    overlap, polygon_shape, union_all, upright_ellipse,
 )
 from .classify_paragraphs import ParagraphsMixin
 from .classify_shapes import preset_shape, split_rectangle, turned_angle
@@ -851,13 +851,10 @@ class FiguresMixin(ParagraphsMixin):
                     ln[end] = [round(ln[end][0] + reach * ux, 2), round(ln[end][1] + reach * uy, 2)]
 
         spans = [s for s in label_spans if box.contains_rect(s.rect, tol=0.5)]
-        # A label with a script (R_s, C_dl in a circuit) is a formula: set as one run of plain
-        # text it read "Rs", and a free label ran into the next ("ct Z").
-        scripted = [(a, b) for a in spans for b in spans
-                    if b is not a and -0.05 * a.size <= b.rect.x0 - a.rect.x1 <= 0.15 * a.size and b.size < 0.85 * a.size
-                    and 0.1 * a.size < abs(b.baseline - a.baseline) < 0.6 * a.size]
-        if scripted:
-            return refused("scripted_label", f"{scripted[0][0].text!r} with {scripted[0][1].text!r}")
+        # Simple math in a label is runs as in a table cell (`span_runs`: Greek, operators, x_t
+        # set SUBSCRIPT); a big operator, a fraction or a radical's bar is no run of text.
+        if any(box.contains_rect(b, tol=0.5) for b in self.bars):
+            return refused("math_label", "a fraction or radical bar")
         free: list[Span] = []
 
         def area(n: DraftNode) -> float:
@@ -866,7 +863,7 @@ class FiguresMixin(ParagraphsMixin):
         for s in spans:
             # (an icon font's glyph has no Unicode: as a node's label it read U+FFFD, a
             # diamond with a question mark, where the picture shows the icon)
-            if s.info.family == "math":
+            if s.info.family == "math" and extension_font(s.font):
                 return refused("math_label", repr(s.text))
             if s.info.family == "icon" or "�" in s.text:
                 return refused("icon_label", repr(s.text))
@@ -889,31 +886,26 @@ class FiguresMixin(ParagraphsMixin):
         empty = sum(n.shape is not None and not n.spans for n in nodes)
         if empty > MAX_PLAIN_RECTANGLES:
             return refused("too_many_rectangles", f"{empty} empty nodes")  # a QR code, a pixel grid
-        # Free labels on one baseline and close together are one label. (Close on both sides:
-        # two edge labels whose baselines round apart sort right to left, and the one-sided gap
-        # joined them across the node between - "connect SYN+ACK" over two arrows.)
-        for s in sorted(free, key=lambda s: (round(s.baseline), s.rect.x0)):
-            last = nodes[-1] if nodes and nodes[-1].shape is None else None
-            if last and abs(last.spans[-1].baseline - s.baseline) <= 0.3 * s.size and \
-                    -0.3 * s.size <= s.rect.x0 - last.spans[-1].rect.x1 <= 0.5 * s.size:
-                last.spans.append(s)
-                nodes[-1] = replace(last, rect=last.rect.union(s.rect))
-            else:
-                nodes.append(DraftNode(rect=s.rect, shape=None, spans=[s], fill=None, stroke=None, width=None,
-                                       radius=None, dash=None, adjust=None))
+        # Free labels close together on one line are one label, a script with its letter. (Close
+        # on both sides: two edge labels joined across the node between them read "connect
+        # SYN+ACK" over two arrows.)
+        for row in text_rows(free):
+            for s in row:
+                last = nodes[-1] if nodes and nodes[-1].shape is None else None
+                if last and continues(last.spans[-1], s):
+                    last.spans.append(s)
+                    nodes[-1] = replace(last, rect=last.rect.union(s.rect))
+                else:
+                    nodes.append(DraftNode(rect=s.rect, shape=None, spans=[s], fill=None, stroke=None, width=None,
+                                           radius=None, dash=None, adjust=None))
 
         out_nodes: list[Node] = []
         for n in nodes:
-            rows: list[list[Span]] = []
-            for s in sorted(n.spans, key=lambda s: (s.baseline, s.rect.x0)):
-                if rows and abs(s.baseline - rows[-1][0].baseline) <= 0.5 * s.size:
-                    rows[-1].append(s)
-                else:
-                    rows.append([s])
+            rows = text_rows(n.spans)
             out_nodes.append({
                 "bbox": n.rect.as_list(), "shape": n.shape, "fill": n.fill, "stroke": n.stroke,
-                "width": n.width, "paragraphs": [span_runs(sorted(row, key=lambda s: s.rect.x0)) for row in rows],
-                "baselines": [round(row[0].baseline, 2) for row in rows],
+                "width": n.width, "paragraphs": [span_runs(row) for row in rows],
+                "baselines": [round(max(row, key=lambda s: s.size).baseline, 2) for row in rows],
                 "label_w": round(max((max(s.rect.x1 for s in row) - min(s.rect.x0 for s in row) for row in rows), default=0.0), 2),
                 "text": card_text(n.rect, rows) if n.shape else None,
                 **({"radius": n.radius} if n.radius is not None else {}),
@@ -923,6 +915,39 @@ class FiguresMixin(ParagraphsMixin):
         return {"id": f"p{self.raw['index']}dg{index}", "kind": "diagram", "role": "figure",
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,
                 "spans": [s.id for s in spans]}
+
+
+def scripted(a: Span, b: Span) -> bool:
+    """One of the two is a script of the other (h_{t-1}, x^2): smaller by TeX's script or
+    scriptscript size (0.7 and 0.5 of the text), off its letter's baseline by less than the
+    letter's height, and beside it. (A caption under a card's big number is smaller still.)"""
+    big, small = (a, b) if a.size >= b.size else (b, a)
+    gap = max(small.rect.x0 - big.rect.x1, big.rect.x0 - small.rect.x1)
+    return 0.45 * big.size <= small.size < 0.85 * big.size and abs(a.baseline - b.baseline) < 0.6 * big.size \
+        and -0.3 * big.size <= gap <= 0.3 * big.size
+
+
+def text_rows(spans: Sequence[Span]) -> list[list[Span]]:
+    """Spans by line, top to bottom, each left to right: a span is on the line whose largest
+    span it is level with, or on the line of the letter it is a script of - which read on its
+    own baseline it had left as a line of its own."""
+    rows: list[list[Span]] = []
+    for s in sorted(spans, key=lambda s: (s.baseline, s.rect.x0)):
+        if rows:
+            row = rows[-1]
+            anchor = max(row, key=lambda x: x.size)
+            if abs(s.baseline - anchor.baseline) <= 0.5 * min(s.size, anchor.size) or any(scripted(a, s) for a in row):
+                row.append(s)
+                continue
+        rows.append([s])
+    return [sorted(row, key=lambda s: s.rect.x0) for row in rows]
+
+
+def continues(a: Span, b: Span) -> bool:
+    """b, after a on a line, is more of a's label: on its baseline and close, or a script of it
+    or its letter."""
+    gap = b.rect.x0 - a.rect.x1
+    return (abs(a.baseline - b.baseline) <= 0.3 * b.size and -0.3 * b.size <= gap <= 0.5 * b.size) or scripted(a, b)
 
 
 def curve_lines(pieces: Sequence[curves.Piece], stroke: str, width: float) -> list[DiagramLine]:
