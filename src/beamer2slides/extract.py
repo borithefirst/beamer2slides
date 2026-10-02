@@ -114,8 +114,11 @@ SMALL_CAPS_WIDTH = 0.03  # relative advance difference that marks an alternate g
 def _small_caps(page: Page, chars: list[Char]) -> bool:
     """OpenType small caps (fontspec \\textsc): lowercase letters drawn with an alternate glyph.
     The text layer only says 'metropolis', the page shows METROPOLIS in small capitals. An
-    alternate glyph has another advance than the font's default glyph for the letter."""
-    lower = [ch for ch in chars if not ch.synthetic and len(ch.c) == 1 and ch.c.islower() and ch.exact_advance]
+    alternate glyph has another advance than the font's default glyph for the letter. Only
+    letters set level are judged: a turned glyph's advance is read off the upright box around it
+    (`pdf.Char.advance`), longer than the glyph - TikZ's rotate=20 'Tilted' read as small caps."""
+    lower = [ch for ch in chars if not ch.synthetic and len(ch.c) == 1 and ch.c.islower() and ch.exact_advance
+             and ch.dir[0] > 0.999]
     if len(lower) < 2:
         return False
     alternate = 0

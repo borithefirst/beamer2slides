@@ -213,6 +213,19 @@ def test_the_tikz_deck_reads_f_of_h() -> None:
     assert "f(h" in text and "f (" not in text
 
 
+@pytest.mark.needs_decks("out/29_tikz_diagrams.pdf")
+def test_a_turned_word_is_no_small_caps() -> None:
+    """rotate=20 'Tilted': a turned glyph's advance is read off the upright box around it, so
+    every letter looked like an alternate glyph and Slides wrote TILTED."""
+    doc = Document(DECKS / "29_tikz_diagrams.pdf")
+    try:
+        page = extract.extract_page(doc[12], "13")
+    finally:
+        doc.close()
+    [tilted] = [s for s in page["spans"] if s["text"].strip() == "Tilted"]
+    assert not tilted["smallcaps"]
+
+
 def test_misnamed_characters_read_as_their_words() -> None:
     # design v3: Calibri's U+2010 HYPHEN, which the Google substitutes lack
     assert readable("state‐of‐the‐art", "Calibri") == "state-of-the-art"
