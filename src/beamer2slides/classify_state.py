@@ -144,6 +144,10 @@ class PageState:
         self.bare_frames: list[BareFrame] = []
         self.analysed: bool = False
         """Whether `analyse_graphics` has run: `artwork_of` knows nothing before."""
+        self.furniture: frozenset[str] = frozenset()
+        """Ids of the page's spans that are the deck's furniture (`classify.furniture`): small text
+        in the header or footer band drawn at the same place on most frames. Empty for a page
+        classified alone."""
         self._artwork: list[tuple[Rect, bool]] | None = None
         self.title_bridges: list[Rect] = []
         """What joins a plot's title to its plot (`axis_titles`)."""

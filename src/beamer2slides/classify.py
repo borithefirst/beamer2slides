@@ -19,6 +19,7 @@ element emit cannot take fails the checker. `ir.deck_json` is the same deck as J
 """
 
 import re
+import statistics
 from dataclasses import replace
 
 from . import ir
@@ -395,10 +396,74 @@ def mark_big_headings(slides: list[ir.Slide], body: float) -> None:
             texts[i]["role"] = "title"
 
 
+FURNITURE_BAND = 0.13  # of the page's height: the header or footer band furniture is drawn in
+FurnitureKey = tuple[str, int, float]
+"""A run of band words (`furniture`): its words, its top (rounded) and its size."""
+
+
+def furniture(raw: RawDoc, body: float) -> dict[int, frozenset[str]]:
+    """Page index -> its spans that are the deck's furniture: text no larger than the body drawn
+    in the header or footer band at the same place, in the same words and size, on at least half
+    the frames (and three of them) - a custom footline's institute and date, a headline's section
+    navigation. Size alone did not say so in a deck whose body is \\tiny (a 5 pt footline under
+    6 pt items, real_africa-remote-sens-30): the footline was read as words of the page, joined
+    to the list above it, and where the author's overfull block ran over it, its words were set
+    between the block's. (`body_size` counts the same text as furniture.) What repeats is a
+    run of words - spans of one size on one baseline, no more than 1.5 em apart - whole: one
+    word that recurs in frame titles ("CMYK and greyscale", "Alpha and palette") is no
+    furniture. "The same place" is within half an em across: centred furniture shifts with
+    what shares its box (the author's name moved 2 pt once the frame number had two digits)."""
+    def in_band(s: RawSpan, height: float) -> bool:
+        return s["bbox"][3] <= FURNITURE_BAND * height or s["bbox"][1] >= (1 - FURNITURE_BAND) * height
+
+    def word_runs(page: RawPage) -> list[tuple[FurnitureKey, float, list[RawSpan]]]:
+        """The page's runs of band words: (words, top, size), where the run starts, its spans."""
+        spans = sorted((s for s in page["spans"] if s["text"].strip() and s["size"] <= body + 0.05
+                        and in_band(s, page["size"][1])), key=lambda s: (round(s["size"], 1), s["origin"][1]))
+        # (rows by baseline: a caption overprinting the footline a few tenths higher is a row
+        # of its own, not words between the footline's)
+        rows: list[list[RawSpan]] = []
+        for s in spans:
+            if rows and round(rows[-1][-1]["size"], 1) == round(s["size"], 1) and s["origin"][1] - rows[-1][-1]["origin"][1] <= 0.1:
+                rows[-1].append(s)
+            else:
+                rows.append([s])
+        runs: list[list[RawSpan]] = []
+        for row in rows:
+            runs.append([])
+            for s in sorted(row, key=lambda s: s["bbox"][0]):
+                if runs[-1] and s["bbox"][0] - runs[-1][-1]["bbox"][2] > 1.5 * s["size"]:
+                    runs.append([])
+                runs[-1].append(s)
+        return [((" ".join(s["text"].strip() for s in run), round(run[0]["bbox"][1]), round(run[0]["size"], 1)),
+                 run[0]["bbox"][0], run) for run in runs]
+    seen: dict[FurnitureKey, list[tuple[str | None, float]]] = {}
+    for page in raw["pages"]:
+        for key, x0, _ in word_runs(page):
+            seen.setdefault(key, []).append((page.get("label"), x0))
+    frames = len({page.get("label") for page in raw["pages"]})
+    if frames < 3:
+        return {}
+    at: dict[FurnitureKey, float] = {}  # a repeated run -> where it usually starts
+    for key, places in seen.items():
+        x = statistics.median(x0 for _, x0 in places)
+        if len({label for label, x0 in places if abs(x0 - x) <= 0.5 * key[2]}) >= max(3, 0.5 * frames):
+            at[key] = x
+    return {page["index"]: frozenset(s["id"] for key, x0, run in word_runs(page)
+                                     if key in at and abs(x0 - at[key]) <= 0.5 * key[2] for s in run)
+            for page in raw["pages"]}
+
+
 def classify_page(page: RawPage, body: float) -> ir.Slide:
-    """One page's slide; a page the classifier trips over stays a picture as a whole. A page whose
-    objects say what they are (adopt's slides.sty marks) is read from its marks (`marked.py`),
-    taken as a slide once it holds what `ir.Slide` says (`ir.slide_of`)."""
+    """One page's slide, classified alone (it knows no deck furniture: `classify_deck_page`)."""
+    return classify_deck_page(page, body, frozenset())
+
+
+def classify_deck_page(page: RawPage, body: float, furniture: frozenset[str]) -> ir.Slide:
+    """One page's slide, `furniture` its spans that are the deck's (`furniture`); a page the
+    classifier trips over stays a picture as a whole. A page whose objects say what they are
+    (adopt's slides.sty marks) is read from its marks (`marked.py`), taken as a slide once it
+    holds what `ir.Slide` says (`ir.slide_of`)."""
     from . import marked
     if marked.has_marks(page):
         try:
@@ -407,7 +472,9 @@ def classify_page(page: RawPage, body: float) -> ir.Slide:
             print(f"warning: page {page['index'] + 1}: marked read-back failed ({type(e).__name__}: {e}); "
                   f"classified without marks")
     try:
-        return PageClassifier(page, body).classify()
+        classifier = PageClassifier(page, body)
+        classifier.furniture = furniture
+        return classifier.classify()
     except Exception as e:  # never lose a whole deck to one odd page
         print(f"warning: page {page['index'] + 1}: classification failed ({type(e).__name__}: {e}); "
               f"kept as a picture")
@@ -425,7 +492,8 @@ def classify_page(page: RawPage, body: float) -> ir.Slide:
 def classify(raw: RawDoc) -> ir.Deck:
     """deck.json for a raw.json, as `ir.Deck` (`ir.deck_json` writes it)."""
     body = body_size(raw)
-    slides = [classify_page(page, body) for page in raw["pages"]]
+    furniture_of = furniture(raw, body)
+    slides = [classify_deck_page(page, body, furniture_of.get(page["index"], frozenset())) for page in raw["pages"]]
     literal_list_numbers(slides)
     mark_title_page(slides, raw["source"].get("title", ""))
     mark_big_headings(slides, body)

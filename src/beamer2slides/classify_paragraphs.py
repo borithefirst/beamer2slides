@@ -519,8 +519,10 @@ class ParagraphsMixin(LinesMixin):
             "panel": self.panel_of(rect),
             "paragraphs": [paragraph(p, r, s) for p, r, s in zip(box, runs, starts)],
             "code": code,
-            "spans": [s.id for p in box for s in p.spans if s.info.family != "icon" and not s.drawn
-                      and not any(s in h for l in p.lines for h in l.holes)],
+            # (a symbol font's glyph is the box's only as a glyph bullet: ICON_BULLET_GLYPHS)
+            "spans": [s.id for p in box for l in p.lines for s in l.spans
+                      if (s.info.family != "icon" or (l.bullet is not None and l.bullet["kind"] == "glyph" and s in l.bullet_spans))
+                      and not s.drawn and not any(s in h for k in p.lines for h in k.holes)],
             # Fraction bars now written as text, underlines and highlight boxes now text
             # styles: they leave the background with the glyphs.
             "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions] +

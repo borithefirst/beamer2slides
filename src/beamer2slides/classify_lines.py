@@ -84,6 +84,9 @@ class LinesMixin(GraphicsMixin):
         # Likewise words on different boxes of the theme's artwork: a \logo in a sidebar theme's
         # corner square is not the first word of the frame title in the headline beside it.
         artwork = [self.artwork_of(s.rect) for s in spans]
+        # And the deck's furniture (a footline's words) is no line of the page's words: an overfull
+        # block running down over the footline set its words between the footline's.
+        furniture = [s.id in self.furniture for s in spans]
 
         def one_grid(a: Span, b: Span) -> bool:
             """Spans on one listing's column grid (extract.column_grid): one pitch, whole columns apart."""
@@ -96,6 +99,8 @@ class LinesMixin(GraphicsMixin):
             pi = panel[i]
             for j in range(i + 1, n):
                 b = spans[j]
+                if furniture[i] != furniture[j]:
+                    continue
                 big = max(a.size, b.size)
                 if big > 2.5 * min(a.size, b.size):
                     # very different sizes (a big statistic beside body copy): only words that

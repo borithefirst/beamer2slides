@@ -17,6 +17,14 @@ from .classify_figures import FiguresMixin
 
 
 PRESET_GLYPHS = set("▶►▸‣•●★⋆")  # glyphs with a close Slides bullet preset (see emit.bullet_preset)
+# Symbol-font (pifont/Zapf Dingbats) item labels that a Slides bullet draws closely enough, by the
+# bullet glyph emit knows them as (`emit_metrics.GLYPH_SHAPES`): \item[\ding{86}] is a native
+# star bullet that moves with its item. (As a picture of the glyph beside the item, it stayed
+# where the PDF drew it while Slides set the item's lines at other heights, beside the wrong line:
+# real_africa-remote-sens-30 slides 39 and 41.) Filled stars of any point count are Slides' star;
+# arrowheads its triangle; outlined or other dingbats (✓, ☞, ❄) stay pictures.
+ICON_BULLET_GLYPHS: dict[str, str] = {ch: glyph for chars, glyph in (
+    ("★✦✴✵✶✷✸✹", "★"), ("▶►➢➣➤", "▶"), ("●", "●"), ("■", "■"), ("❏❐❑❒", "□"), ("◆❖", "◆")) for ch in chars}
 LABEL_GLYPHS = BULLET_GLYPHS | set("+✗✘→⇒—♦◆⋄")
 # A caption's label: "Figure:", "Figure 3:", "Fig. 2.", "Table IV:" (beamer's caption templates).
 CAPTION_RE = re.compile(r"^\S+\.?(\s+[\dIVXivx]+(\.\d+)*)?\s*[:.](\s|$)")
@@ -55,6 +63,12 @@ class ReasonsMixin(FiguresMixin):
             gap = nxt.rect.x0 - first.rect.x1
             token = first.text.strip()
             on_ball = any(ir.contains(first.rect.cx, first.rect.cy) for _, ir in self.small_images)
+            if first.info.family == "icon" and gap >= 0.25 * line.size and max(first.rect.w, first.rect.h) <= 1.6 * line.size \
+                    and token in ICON_BULLET_GLYPHS:
+                line.bullet = {"kind": "glyph", "text": ICON_BULLET_GLYPHS[token], "color": first.color,
+                               "bbox": first.rect.as_list(), "label": label_of([first])}
+                line.bullet_spans = [first]
+                return
             if first.info.family == "icon" and gap >= 0.25 * line.size and max(first.rect.w, first.rect.h) <= 1.6 * line.size:
                 # \item[\ding{43}]: no Slides glyph, and the font's glyph stays in the background.
                 # classify turns it into a picture grouped with the item text.
@@ -566,6 +580,8 @@ class ReasonsMixin(FiguresMixin):
                 line.reason = "figure"
             elif line.size <= 0.7 * self.body and (line.rect.y1 <= 0.13 * self.H or line.rect.y0 >= 0.87 * self.H):
                 line.reason = "theme"
+            elif line.text.strip() and all(s.id in self.furniture for s in line.spans if s.text.strip()):
+                line.reason = "theme"  # the deck's furniture (classify.furniture), whatever its size
             elif line.size < 0.78 * self.body and self.on_edge_artwork(line.rect):
                 line.reason = "theme"  # sidebar navigation, header/footer info
 

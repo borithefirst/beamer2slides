@@ -3,15 +3,29 @@
 import re
 import statistics
 from dataclasses import dataclass, replace
+from typing import Literal
 
 from .classify_model import Line, Rect, Span, union_all
 from .classify_state import Fill, PageState, Rule
 from .classify_text import cell_runs, is_mono, justified_cells, span_runs
 from .ir import Align, Border, Column, DiagramElement, Merge, TableElement, element_json
 from .raw_types import RawSpan
+from .typing_compat import assert_never
 
 Chunk = tuple[int, int, list[Span]]
 """A table's chunk: (row index in the grid's rows, rows it spans, its words)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class Ruling:
+    """What makes a figure cluster a table (`TablesMixin.table_ruling`): the region its words
+    are taken from (the cluster, grown along side rules that run on past its rules:
+    `sides_run_on`), its frame, its horizontal and vertical rules and its cell shading."""
+    reach: Rect
+    frame: Rect
+    horizontal: list[Rule]
+    vertical: list[Rule]
+    fills: list[Fill]
 
 
 class TablesMixin(PageState):
@@ -20,8 +34,9 @@ class TablesMixin(PageState):
     def table_hairlines(self) -> set[str]:
         """Rules of a table wider than half the page, which `is_decoration` would take for theme
         hairlines: two or more rules of one extent, touching no page edge, with rows of text
-        between them - at least two rows, one of them cells set more than an em apart - and no
-        text running out past their ends. (A \\centering booktabs table in a 4:3 frame is often
+        between them (or between side rules running on past them: `sides_run_on`) - at least two
+        rows, one of them cells set more than an em apart - and no text running out past their
+        ends. (A \\centering booktabs table in a 4:3 frame is often
         0.55-0.7 of the page wide; left as decoration its rules stayed in the background and its
         cells became text boxes that overlapped and reflowed across columns.)"""
         rules: dict[tuple[int, int], list[tuple[str, Rect]]] = {}
@@ -50,6 +65,9 @@ class TablesMixin(PageState):
                 continue
             x0, x1 = min(r.x0 for _, r in group), max(r.x1 for _, r in group)
             y0, y1 = min(r.cy for _, r in group), max(r.cy for _, r in group)
+            # (a longtable's ruled head over rows between side rules running on: its rows count)
+            run_on = self.sides_run_on(Rect(x0, y0, x1, y1))
+            y0, y1 = run_on.y0, run_on.y1
             inside = [s for s in self.raw["spans"] if s["text"].strip() and y0 < (s["bbox"][1] + s["bbox"][3]) / 2 < y1
                       and s["bbox"][0] < x1 and x0 < s["bbox"][2]]
             if not inside or any(s["bbox"][0] < x0 - 1 or s["bbox"][2] > x1 + 1 for s in inside):
@@ -121,7 +139,7 @@ class TablesMixin(PageState):
         ruling = self.table_ruling(c)
         if ruling is None:
             return None
-        frame, horizontal, vertical, fills = ruling
+        c, frame, horizontal, vertical, fills = ruling.reach, ruling.frame, ruling.horizontal, ruling.vertical, ruling.fills
         box = c.expand(0.5)
         spans = sorted((s for s in label_spans if box.contains_rect(s.rect, tol=0.5)), key=lambda s: s.baseline)
         if not spans or any(not s.horizontal or s.font.upper().startswith("CMEX") or "�" in s.text for s in spans) or \
@@ -207,10 +225,41 @@ class TablesMixin(PageState):
         from .emit import table_fits  # (emit imports this module)
         return table if table_fits(element_json(table), self.W) else None
 
-    def table_ruling(self, c: Rect) -> tuple[Rect, list[Rule], list[Rule], list[Fill]] | None:
-        """The rules and shading that make the cluster c a table: (its frame, horizontal rules,
-        vertical rules, fills). None when there are no such rules, or c holds an image or any
-        other drawing."""
+    def sides_run_on(self, frame: Rect) -> Rect:
+        """frame, the extent of a group of equal rules, grown along vertical rules that run on
+        from both its ends past its first or last rule: a longtable broken across frames, whose
+        head is ruled above and below and whose rows hang between the side rules with no rule
+        under them (real_africa-remote-sens-30 slide 8: the head alone was taken for a table,
+        the side rules for two pictures, and the rows set as column text boxes off their rows).
+        frame itself when no rule runs on from both ends."""
+        pieces = [r for d in self.raw["drawings"] for r in [Rect.of(d["bbox"])]
+                  if d["id"] not in self.decor_ids and r.h >= 3 and
+                  ((d["type"] == "s" and d["items"] == "l" and r.w <= 1.0) or (d["type"] == "f" and d["items"] == "re" and r.w <= 1.5))]
+
+        def reach(x: float, y: float, step: Literal["down", "up"]) -> float:
+            side = [r for r in pieces if abs(r.cx - x) <= 1.0]
+            moved = True
+            while moved:
+                moved = False
+                for r in side:
+                    match step:
+                        case "down":
+                            if r.y0 <= y + 1.0 and r.y1 > y + 0.01:
+                                y, moved = r.y1, True
+                        case "up":
+                            if r.y1 >= y - 1.0 and r.y0 < y - 0.01:
+                                y, moved = r.y0, True
+                        case _:
+                            assert_never(step)
+            return y
+        y1 = min(reach(frame.x0, frame.y1, "down"), reach(frame.x1, frame.y1, "down"))
+        y0 = max(reach(frame.x0, frame.y0, "up"), reach(frame.x1, frame.y0, "up"))
+        # (a ruled table's side rules end half a rule past its first and last: no run on)
+        return Rect(frame.x0, y0 if y0 < frame.y0 - 1 else frame.y0, frame.x1, y1 if y1 > frame.y1 + 1 else frame.y1)
+
+    def table_ruling(self, c: Rect) -> Ruling | None:
+        """The rules and shading that make the cluster c a table (`Ruling`). None when there are
+        no such rules, or c holds an image or any other drawing."""
         groups = [g for g in self.table_rules if c.expand(1).contains_rect(union_all(r.rect for r in g), tol=0.5)]
         # Fewer than two full rules, but cell shading edge to edge (a heatmap, \rowcolors): the
         # shading and the rules there are frame the table.
@@ -228,6 +277,9 @@ class TablesMixin(PageState):
             if any(g not in groups and union_all(r.rect for r in g).expand(1).contains_rect(frame.expand(1), tol=0.5)
                    for g in self.table_rules):
                 return None  # the \cline pieces of a larger table: that table's, whole
+            run_on = self.sides_run_on(frame)
+            if run_on != frame:
+                c = union_all([c, run_on.expand(1)])
         else:
             return None
         box = c.expand(0.5)
@@ -260,7 +312,7 @@ class TablesMixin(PageState):
                 return None
         if vertical or grid:
             frame = union_all([frame] + [v.rect for v in vertical + (horizontal if grid else [])])
-        return frame, horizontal, vertical, fills
+        return Ruling(reach=c, frame=frame, horizontal=horizontal, vertical=vertical, fills=fills)
 
     def plain_tables(self, lines: list[Line]) -> list[TableElement]:
         """Tabulars without rules, used to align short texts in columns: three or more rows at a
@@ -397,6 +449,18 @@ class TableRows:
                                                        for a in rows[i] for b in rows[i - 1] + rows[i + 1])}
         self.wrapped: dict[int, list[list[float]]] = {}  # row index -> its wrapped cells' [x0, x1]
         self.continued: set[int] = set()  # rows holding nothing but the next lines of cells above
+        # Where three or more rows start a cell after a gap wider than a word space: a column's
+        # left edge. Phrases (a wrapped cell's lines) part there even when the columns are set
+        # closer than an em (real_africa-remote-sens-30 slide 8: a citation column 0.6 em from
+        # the DOI column; the DOI joined the citation's phrase, and the cell lines under it were
+        # read as one wrapped cell across both columns).
+        starts: dict[float, set[int]] = {}
+        for i, row in enumerate(rows):
+            line = sorted(row, key=lambda s: s.rect.x0)
+            for a, b in zip(line, line[1:]):
+                if b.rect.x0 - a.rect.x1 > 0.5 * self.size:
+                    starts.setdefault(round(b.rect.x0 * 2) / 2, set()).add(i)
+        self.column_starts: list[float] = [x for x, at in starts.items() if len(at) >= 3]
 
     def halfway(self, i: int) -> bool:
         """Row i sits in the middle of its neighbours, which are one row pitch of this
@@ -420,10 +484,17 @@ class TableRows:
         y = b.baseline - 0.3 * b.size
         return any(a.rect.x1 < v.rect.cx < b.rect.x0 and v.rect.y0 <= y <= v.rect.y1 for v in self.vertical)
 
+    def runs_on(self, a: Span, b: Span) -> bool:
+        """b is the next word of a's phrase: less than an em after it, with no vertical rule and
+        no column's left edge (`column_starts`) in between."""
+        gap = b.rect.x0 - a.rect.x1
+        return gap <= b.size and not self.ruled(a, b) and \
+            not (gap > 0.5 * self.size and any(abs(b.rect.x0 - x) <= 0.5 for x in self.column_starts))
+
     def phrase(self, spans: list[Span], x0: float) -> list[Span]:
         out: list[Span] = []
         for s in sorted(spans, key=lambda s: s.rect.x0):
-            if not out and abs(s.rect.x0 - x0) <= 0.5 or out and s.rect.x0 - out[-1].rect.x1 <= s.size and not self.ruled(out[-1], s):
+            if not out and abs(s.rect.x0 - x0) <= 0.5 or out and self.runs_on(out[-1], s):
                 out.append(s)
             elif out:
                 break
@@ -432,7 +503,7 @@ class TableRows:
     def phrases(self, spans: list[Span]) -> list[list[Span]]:
         out: list[list[Span]] = []
         for s in sorted(spans, key=lambda s: s.rect.x0):
-            if out and s.rect.x0 - out[-1][-1].rect.x1 <= s.size and not self.ruled(out[-1][-1], s):
+            if out and self.runs_on(out[-1][-1], s):
                 out[-1].append(s)
             else:
                 out.append([s])

@@ -761,6 +761,15 @@ class GraphicsMixin(TablesMixin):
                 continue  # graphics mostly on the panel (edge decorations like shadows are fine)
             if p.id in order and any(k > order[p.id] and overlap(r, band) > 0.01 for k, band in strokes):
                 continue
+            # A translucent fill with a fill drawn after it on it (the 60% white veil of an
+            # \includegraphics[draft] box under a block set over it) stays in the background: as a
+            # highlight it is grouped with its words, over the picture holding what the PDF draws
+            # over it, and washed that out (real_africa-remote-sens-30 slides 2 and 43: the red
+            # block pink down to the veil's edge).
+            if p.opacity < 0.99 and p.id in order and any(
+                    k > order[p.id] and d["type"] == "f" and d["id"] not in self.decor_ids and overlap(inner, Rect.of(d["bbox"])) > 0.01
+                    for k, d in enumerate(self.raw["drawings"])):
+                continue
             if any(inner.contains_rect(ir, tol=0) and im["id"] not in bullet_images for im, ir in self.small_images):
                 continue
             corners = set(p.corners)
@@ -797,7 +806,21 @@ class GraphicsMixin(TablesMixin):
                 last["role"] = "highlight"
                 last["opacity"] = round(p.opacity, 3)
                 last["anchor"] = covered.most_common(1)[0][0]
-        return self.framed_panels(out)
+        out = self.framed_panels(out)
+        # Element order is z-order. Panels go biggest first (a container under what it holds), but
+        # two painted on the same box are stacked as the PDF draws them: a #fafafa frame background
+        # painted over a white one 0.02 pt smaller came out under it, and the white one covered
+        # the page ground (real_slide-20250221, slides 8, 12, 14, 21, 25). (A sort of all panels
+        # by draw order reordered 14 slides of the built decks: soft-masked block shadows and
+        # title bars carry draw indices that do not say what is seen.)
+        for i in range(len(out)):
+            for j in range(i + 1, len(out)):
+                a, b = out[i], out[j]
+                da, db = a.get("drawing"), b.get("drawing")
+                if a["role"] == b["role"] == "panel" and da in order and db in order and order[db] < order[da] \
+                        and all(abs(p - q) <= 0.5 for p, q in zip(a["bbox"], b["bbox"])):
+                    out[i], out[j] = b, a
+        return out
 
     @staticmethod
     def framed_panels(shapes: list[ShapeElement]) -> list[ShapeElement]:

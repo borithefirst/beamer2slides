@@ -223,7 +223,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - Theme: the most common background goes on the master, shared decoration onto layout pictures,
   layouts' placeholders get the deck's title/body style, frame counters become per-slide text.
   Words on different theme artwork or logo boxes are different lines (`artwork_of`); footline
-  boxes beside band artwork are theme. A stroked border framing the page (an outline or four
+  boxes beside band artwork are theme; runs of words repeated whole at one place in the header
+  or footer band on half the frames are the deck's furniture, theme whatever their size
+  (`classify.furniture`, a \tiny body). A stroked border framing the page (an outline or four
   edge lines within `PAGE_FRAME_INSET` of every edge, `classify_graphics.page_frame`) is taken
   out of the page classify reads, as its ground is (as a graphic every line became a figure
   label). A layout gets no decoration cut out over more than `render.DECORATION_HOLES` of the

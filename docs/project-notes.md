@@ -4809,3 +4809,36 @@ stays a picture. Live on talks: columns kept (`::` aligned, `->` in place), text
 against 0.527; the grid lines come out 6-8% narrow, because Roboto Mono is sized as for CMTT's
 0.525 em columns while a grid's pitch is its own (Bera Sans's about 0.56): to do, the pitch to
 emit's mono factor. Open from the family: esi 22, words under a grouped panel (emit's z-order).
+
+## A deck set in \tiny (real-deck review, real_africa-remote-sens-30, 2026-10-03)
+A Russian talk whose body is 6 pt (cm-super SFSS) under a 5 pt custom footline. Size alone made
+the footline words of the page (theme text is "no larger than 0.7 of the body"): fused into the
+list above in 92 boxes on 48 slides, and the paragraphs it joined grew 50-130 pt wider than their
+column. `classify.furniture(raw, body)` reads the deck's furniture before any page: runs of words
+(one size, one baseline, at most 1.5 em apart) in the top or bottom 13% of the page that repeat,
+whole, at one start (half an em: a centred author moved 2 pt once the frame number had two digits)
+on half the frames and at least three. Whole runs, because one word ("and") recurs in frame
+titles. A furniture line is theme (`assign_reasons`) and furniture joins no other span
+(`build_lines`). `classify_page` alone knows no furniture; `classify` passes it through
+`classify_deck_page`. Left: `promote_theme_text` keys on exact x, so the shifting author stays in
+the background rather than on the layout.
+Also from the deck: a longtable broken across frames (a ruled head, rows hanging between side
+rules with no rule under them) is a table (`TablesMixin.sides_run_on` grows a rule group along
+side rules running on from both ends by more than 1 pt; `table_ruling` returns a `Ruling`, its
+`reach` where words are taken from), and cells part at a column's left edge where three rows
+start a cell after a gap over half an em (`TableRows.column_starts`, `runs_on`: a citation column
+0.65 em from the DOI column had been read as one wrapped cell across both). pifont item labels
+Slides has a bullet for are glyph bullets (`ICON_BULLET_GLYPHS`: filled stars -> ★, arrowheads
+-> ▶; an 8-point ✴ drawn as the 5-point preset), their glyph in the box's spans so render takes it
+out; other dingbats stay pictures. A translucent fill with a fill drawn after it on its interior
+(the 60% veil of an `\includegraphics[draft]` box under a block) stays in the background: as a
+highlight it was grouped over the block's picture and washed it pink. Not classify's: the SFSS
+7-8 pt text sets 9-12% taller on Slides and wraps a word early; the SFSX small cuts lose their
+bold extended width.
+
+## Panels on one box keep the PDF's order (real_slide-20250221, 2026-10-03)
+Panels are listed biggest first (a container under what it holds), but a #fafafa frame
+background painted 0.02 pt larger over a white one came out under it, and the white covered the
+page ground (slides 8, 12, 14, 21, 25). `shapes` now swaps two panels whose boxes agree within
+0.5 pt into draw order. A sort of every panel by draw order reordered 14 slides of the built decks
+(soft-masked block shadows and title bars carry draw indices that do not say what is seen).
