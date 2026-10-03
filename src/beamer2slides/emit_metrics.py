@@ -66,6 +66,18 @@ BULLET_SHAPES: dict[str, tuple[str, int, float, float]] = {  # shape: (preset, l
     "diamond": ("BULLET_DIAMOND_CIRCLE_SQUARE", 0, 0.81, 0.08),
     "open_diamond": ("BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE", 1, 0.87, 0.06),
 }
+# A bullet no preset draws, written as its own character instead (`a:buChar` in a text shell the
+# .pptx carries, emit_pptx._add_text_shell; docs/project-notes.md "Triangle bullets through the
+# .pptx"): (character, ink height em, gap em) as BULLET_SHAPES has them. Beamer's filled ▶ at
+# every level, sized by the PDF's own ink as the vector bullets are (beamer draws its item and
+# subitem with one \blacktriangleright at two sizes; ▸ is another shape). It is written ►, the
+# same shape: Slides draws ▶ in a fallback face only 0.45 em tall, so beamer's (0.58 em) would
+# need a bullet larger than its text, which pushes the line down (+0.9 pt at 133%); ► is 0.68 em
+# in every face tried (Lato, Arial; Noto Sans Symbols 2's ▶ is 0.56), its bottom 0.02 em under
+# the baseline (beamer's 0.04), its right edge 0.28 em before indentFirstLine (0.21 on a probe
+# box, 0.075 em more on all 97 bullets of a converted deck, whose words started where the PDF's
+# do; docs/project-notes.md "Triangle bullets").
+CHAR_BULLETS: dict[BulletFace, tuple[str, float, float]] = {"triangle": ("►", 0.68, 0.28)}
 _GLYPH_FACES: tuple[tuple[str, BulletFace], ...] = (
     ("▶►▸‣", "triangle"), ("•●", "disc"), ("◦○", "circle"), ("■▪", "square"), ("□", "open_square"), ("★⋆", "star"),
     ("◆♦", "diamond"), ("◇⋄", "open_diamond"))
@@ -472,14 +484,32 @@ def _label_size(bullet: SetBullet, size: float, scale: float) -> float:
     return min(size, (size / scale if bullet.label_size is None else bullet.label_size) * scale)
 
 
-def ink_sized(bullet: SetBullet, size: float, scale: float) -> float | None:
-    """The size that gives a glyph bullet its PDF ink height, when it is to be used."""
+def bullet_char_of(bullet: SetBullet) -> str | None:
+    """The character a bullet is written as when no preset draws it (CHAR_BULLETS); None else."""
+    shape = bullet_shape_of(bullet)
+    return None if shape is None or shape not in CHAR_BULLETS else CHAR_BULLETS[shape][0]
+
+
+def face_ems(shape: BulletFace, char: bool) -> tuple[float, float]:
+    """(ink height em, gap em) of a bullet face as Slides draws it: its own character's
+    (CHAR_BULLETS) when `char` and it has one, else its preset glyph's."""
+    if char and shape in CHAR_BULLETS:
+        return CHAR_BULLETS[shape][1], CHAR_BULLETS[shape][2]
+    return BULLET_SHAPES[shape][2], BULLET_SHAPES[shape][3]
+
+
+def ink_sized(bullet: SetBullet, size: float, scale: float, char: bool) -> float | None:
+    """The size that gives a glyph bullet its PDF ink height, when it is to be used. A bullet
+    written as its own character (`char`) is always sized by its ink: Slides draws it in another
+    face than the PDF's, so the label's size says nothing of its height."""
     shape = bullet_shape_of(bullet)
     if bullet.kind != "glyph" or bullet.ink is None or shape is None:  # (a glyph always has a shape)
         return None
     full = _label_size(bullet, size, scale)
     height = (bullet.ink.box[3] - bullet.ink.box[1]) * scale
-    inked = max(0.3 * size, min(size, height / BULLET_SHAPES[shape][2]))
+    inked = max(0.3 * size, min(size, height / face_ems(shape, char)[0]))
+    if char and shape in CHAR_BULLETS:
+        return inked
     return inked if inked < INK_SIZED * full or shape != GLYPH_SHAPES.get(bullet.text, "disc") else None
 
 
@@ -510,43 +540,44 @@ def bullet_level_of(bullet: SetBullet, level: int) -> int:
 
 
 def bullet_size(bullet: JsonMap, size: float, scale: float) -> float:
-    return bullet_size_of(bullet_of(bullet), size, scale)
+    return bullet_size_of(bullet_of(bullet), size, scale, False)
 
 
-def bullet_size_of(bullet: SetBullet, size: float, scale: float) -> float:
+def bullet_size_of(bullet: SetBullet, size: float, scale: float, char: bool) -> float:
     """Font size giving the bullet its PDF height (at most the text's: a larger bullet would
     push the line down). Glyph and number boxes are font boxes: their size is the font's, or
-    their ink's where that is much smaller (`ink_sized`)."""
+    their ink's where that is much smaller (`ink_sized`). `char`: the bullet is written as its
+    own character where it has one (CHAR_BULLETS), not as a preset's glyph."""
     shape = bullet_shape_of(bullet)
-    inked = ink_sized(bullet, size, scale)
+    inked = ink_sized(bullet, size, scale, char)
     if inked is not None:
         return round(inked, 1)
     if bullet.kind in ("glyph", "number") or shape is None:
         return round(_label_size(bullet, size, scale), 1)
     height = (bullet.bbox[3] - bullet.bbox[1]) * scale
-    return round(max(0.3 * size, min(size, height / BULLET_SHAPES[shape][2])), 1)
+    return round(max(0.3 * size, min(size, height / face_ems(shape, char)[0])), 1)
 
 
-def bullet_gap(bullet: SetBullet, size: float) -> float:
+def bullet_gap(bullet: SetBullet, size: float, char: bool) -> float:
     """Distance from the bullet box's right edge to indentFirstLine."""
     shape = bullet_shape_of(bullet)
     if bullet.kind in ("glyph", "number") or shape is None:
         return BULLET_GAP
-    return BULLET_SHAPES[shape][3] * size
+    return face_ems(shape, char)[1] * size
 
 
 def bullet_extent(bullet: JsonMap, size: float, scale: float) -> tuple[float, float, float]:
-    return bullet_extent_of(bullet_of(bullet), size, scale)
+    return bullet_extent_of(bullet_of(bullet), size, scale, False)
 
 
-def bullet_extent_of(bullet: SetBullet, size: float, scale: float) -> tuple[float, float, float]:
+def bullet_extent_of(bullet: SetBullet, size: float, scale: float, char: bool) -> tuple[float, float, float]:
     """(PDF x0, PDF x1, gap after it in Slides pt) of what the Slides bullet stands for: the
     ink of a glyph sized by its ink (then placed as a vector bullet is), else the bullet's box."""
-    z = bullet_size_of(bullet, size, scale)
+    z = bullet_size_of(bullet, size, scale, char)
     shape = bullet_shape_of(bullet)
-    if bullet.ink is not None and shape is not None and ink_sized(bullet, size, scale) is not None:
-        return bullet.ink.box[0], bullet.ink.box[2], BULLET_SHAPES[shape][3] * z
-    return bullet.bbox[0], bullet.bbox[2], bullet_gap(bullet, z)
+    if bullet.ink is not None and shape is not None and ink_sized(bullet, size, scale, char) is not None:
+        return bullet.ink.box[0], bullet.ink.box[2], face_ems(shape, char)[1] * z
+    return bullet.bbox[0], bullet.bbox[2], bullet_gap(bullet, z, char)
 
 
 def rgb(hex_color: str) -> JsonObject:

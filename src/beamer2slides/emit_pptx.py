@@ -1,5 +1,5 @@
-"""The .pptx that carries a deck's pictures, backgrounds, layouts, template shapes and tables into
-Slides; shape requests; a batch of requests.
+"""The .pptx that carries a deck's pictures, backgrounds, layouts, template shapes, tables and text
+shells into Slides; shape requests; a batch of requests.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from .emit_metrics import SLIDE_W, xml_text
 from .emit_model import (
-    JsonMap, PptxTable, SetShape, Template, TemplateKey, set_shape, shape_measures_of, shape_of, template_of,
+    JsonMap, PptxTable, PptxText, SetShape, Template, TemplateKey, set_shape, shape_measures_of, shape_of, template_of,
 )
 from .ir import Arrow
 from .ir_types import Box, MarkedShape, ShapeElement
@@ -34,6 +34,11 @@ SHADOW_BLUR = 1.0
 SHADOW_ALPHA = 0.5
 TEMPLATE_PRESETS = {"ROUND_RECTANGLE": "roundRect", "ROUND_2_SAME_RECTANGLE": "round2SameRect", "RECTANGLE": "rect"}
 TEMPLATE_LAYOUTS = {"TITLE": 0, "TITLE_ONLY": 5, "BLANK": 6}  # python-pptx default template layout indexes
+# A text shell's (`_add_text_shell`): the insets a box createShape makes has on every side (a
+# .pptx's own, PowerPoint's 3.6 pt top and bottom, survive the import: deck_thumbs.PPTX_INSET_Y),
+# and the character each paragraph holds until the API pass writes its words in.
+INSET_PT = 7.2
+SHELL_CHAR = "x"
 # what `_add_template_shapes` can put on a source slide
 TEMPLATE_KINDS = ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE", "RECTANGLE", "ELLIPSE", "DIAMOND", "TRIANGLE",
                   "CAN", "CLOUD", "HEXAGON", "OCTAGON", "PENTAGON", "HEPTAGON", "DECAGON", "DODECAGON",
@@ -238,6 +243,48 @@ def _add_table(slide: Slide, table: PptxTable) -> None:
                 e(left), e(0.0 if (r, c) in middle else top), e(right), e(bottom)
 
 
+def _add_text_shell(slide: Slide, text: PptxText) -> None:
+    """A text shell (`emit_text.text_shell_of`) on a source slide: a text box at its box, Slides'
+    own insets (7.2 pt each side, as a box createShape makes: text_layout.INSET_Y), wrapping, top
+    anchored and never autofit, holding one paragraph per paragraph of the text: a placeholder
+    character in its bullet's family, size and colour, after an `a:buChar` bullet drawn at 100%
+    of it (or `a:buNone`) at its `lvl`. An empty bulleted paragraph loses its bullet at the import,
+    hence the character; the API pass writes the words in (`emit_text.text_shell_requests`)."""
+    from lxml import etree
+    from pptx.util import Emu
+
+    def e(v: float) -> Emu:
+        return Emu(round(v * EMU_PER_PT))
+
+    x0, y0, x1, y1 = text.box
+    box = slide.shapes.add_textbox(e(x0), e(y0), e(max(x1 - x0, 1.0)), e(max(y1 - y0, 1.0)))
+    body = box.text_frame._txBody
+    a = NS_A
+    body_pr = body.find(f"{{{a}}}bodyPr")
+    if body_pr is None:
+        raise ValueError("python-pptx made a text box without <a:bodyPr>")
+    for child in list(body_pr):  # (python-pptx's text box grows to its text: spAutoFit)
+        body_pr.remove(child)
+    inset = str(round(INSET_PT * EMU_PER_PT))
+    for side in ("lIns", "tIns", "rIns", "bIns"):
+        body_pr.set(side, inset)
+    body_pr.set("wrap", "square")
+    body_pr.set("anchor", "t")
+    for old in body.findall(f"{{{a}}}p"):
+        body.remove(old)
+    for p in text.paragraphs:
+        fill = f'<a:solidFill><a:srgbClr val="{p.color.lstrip("#").upper()}"/></a:solidFill>' if p.color else ""
+        latin = f'<a:latin typeface="{xml_text(p.font)}"/>'
+        bullet = '<a:buNone/>' if p.char is None else \
+            (f'<a:buClr><a:srgbClr val="{p.color.lstrip("#").upper()}"/></a:buClr>' if p.color else "") + \
+            f'<a:buSzPct val="100000"/><a:buChar char="{xml_text(p.char)}"/>'
+        body.append(etree.fromstring(
+            f'<a:p xmlns:a="{a}"><a:pPr lvl="{p.level}">{bullet}</a:pPr>'
+            f'<a:r><a:rPr lang="en-US" sz="{round(p.size * 100)}" b="0" i="0" dirty="0">{fill}{latin}</a:rPr>'
+            f'<a:t>{SHELL_CHAR}</a:t></a:r>'
+            f'<a:endParaRPr lang="en-US" sz="{round(p.text_size * 100)}" dirty="0">{latin}</a:endParaRPr></a:p>'))
+
+
 VARIANT = "_V"      # layout name suffix: a copy of the layout with another theme decoration (plan_theme)
 THEME_VARIANTS = 3
 
@@ -300,6 +347,8 @@ class PptxPage:
     fill: PageFill | None
     pictures: tuple[PptxPicture, ...]
     tables: tuple[PptxTable, ...]
+    shells: tuple[PptxText, ...]
+    """The text shells, in the order of their elements (`DeckPlan.shells`)."""
     templates: bool
 
 
@@ -317,7 +366,8 @@ def _str(v: object, where: str) -> str:
 
 def pptx_page(page: Mapping[str, object]) -> PptxPage:
     """A page dict of `build_pptx` ({"layout", "fill" (None: inherit), "pictures": [{"file",
-    "bbox", "alt", "title"}], "tables": [PptxTable] (optional), "templates"}) as its record."""
+    "bbox", "alt", "title"}], "tables": [PptxTable] (optional), "shells": [PptxText] (optional),
+    "templates"}) as its record."""
     layout, fill, pictures = page["layout"], page["fill"], page["pictures"]
     if not isinstance(layout, str):
         raise TypeError(f"a page's layout is a name, not {layout!r}")
@@ -340,8 +390,12 @@ def pptx_page(page: Mapping[str, object]) -> PptxPage:
     tables = page.get("tables", [])
     if not isinstance(tables, (list, tuple)) or not all(isinstance(t, PptxTable) for t in tables):
         raise TypeError(f"a page's tables are PptxTables, not {tables!r}")
+    shells = page.get("shells", [])
+    if not isinstance(shells, (list, tuple)) or not all(isinstance(t, PptxText) for t in shells):
+        raise TypeError(f"a page's text shells are PptxTexts, not {shells!r}")
     return PptxPage(layout=layout, fill=fill, pictures=tuple(pics),
-                    tables=tuple(t for t in tables if isinstance(t, PptxTable)), templates=bool(page["templates"]))
+                    tables=tuple(t for t in tables if isinstance(t, PptxTable)),
+                    shells=tuple(t for t in shells if isinstance(t, PptxText)), templates=bool(page["templates"]))
 
 
 def build_pptx(page_w: float, page_h: float, keys: Sequence[TemplateKey], pages: Sequence[Mapping[str, object]],
@@ -355,8 +409,9 @@ def build_pptx(page_w: float, page_h: float, keys: Sequence[TemplateKey], pages:
       layout named with the VARIANT suffix is a copy of its layout with that variant's decoration;
     - one source slide per deck slide (`pages`: {"layout", "fill" (None: inherit),
       "pictures": [{"file", "bbox" (slide pt), "alt", "title"}], "tables": [PptxTable],
-      "templates" (bool)}), holding its pictures, its tables (empty, with the cell margins the API
-      cannot set) and, if it needs any, the template shapes (shadows, exact corner radii).
+      "shells": [PptxText], "templates" (bool)}), holding its pictures, its tables (empty, with the
+      cell margins the API cannot set), its text shells (bullets no API preset draws) and, if it
+      needs any, the template shapes (shadows, exact corner radii).
 
     emit copies each source slide under our own object IDs and then deletes it."""
     from pptx import Presentation
@@ -416,6 +471,8 @@ def build_pptx(page_w: float, page_h: float, keys: Sequence[TemplateKey], pages:
                 c_nv.set("title", xml_text(pic.title))
         for table in page.tables:
             _add_table(slide, table)
+        for shell in page.shells:  # (before the template shapes: DeckPlan.copy_ids tells them apart by order)
+            _add_text_shell(slide, shell)
         if page.templates:
             _add_template_shapes(slide, keys)
     buf = io.BytesIO()

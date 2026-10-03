@@ -43,19 +43,19 @@ from .emit_places import (  # noqa: F401 (callers take these from here)
     find_marks, ink_end, mark_alpha, overlay_move, pick_gap, slides_texts,
 )
 from .emit_model import (
-    ElementDict, JsonMap, ObjectMap, Place, Placeholder, PptxTable, Template, TemplateKey, box_of, dict_of, json_number,
-    objects_of, table_of,
+    ElementDict, JsonMap, ObjectMap, Place, Placeholder, PptxTable, PptxText, Shell, Template, TemplateKey, box_of,
+    dict_of, json_number, objects_of, set_text, table_of,
 )
 from .emit_pptx import TEMPLATE_LAYOUTS, api_error, batch, build_pptx, shape_element_requests
 from .emit_pptx import shape_requests, template_key  # noqa: F401 (callers take these from here)
-from .emit_pptx import _add_table, _add_template_shapes  # (DeckPlan.contain tries what the .pptx carries)
+from .emit_pptx import _add_table, _add_template_shapes, _add_text_shell  # (DeckPlan.contain tries what the .pptx carries)
 from .emit_pptx import NO_TABLE_STYLE, NS_A, VARIANT  # noqa: F401 (callers take these from here)
 from .emit_tables import pptx_table_of, table_element_requests
 from .emit_tables import (  # noqa: F401 (callers take these from here)
     TABLE_CELL_PAD, TABLE_MARGIN, TABLE_MIN_SHRINK, TABLE_TEXT_TOP, fit_columns, pptx_table, squeezed_columns,
     table_columns, table_fits, table_layout, table_requests,
 )
-from .emit_text import merge_blocks, number_requests, text_element_requests
+from .emit_text import merge_blocks, number_requests, text_element_requests, text_shell_of, text_shell_requests
 from .emit_text import (  # noqa: F401 (callers take these from here)
     number_box_requests, text_box_requests,
 )
@@ -414,6 +414,7 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
         "pictures": [{"file": out / as_str(e["file"], "file"), "bbox": bbox, "alt": e.get("alt"),
                       "title": picture_title(e)} for e, bbox in plan.pictures(s)],
         "tables": plan.tables(s),
+        "shells": plan.shells(s),
         "templates": plan.uses_templates[_page(s)],
     } for s in written_slides]
     pptx = build_pptx(page_w, page_h, plan.keys, pages, master_fill, dict(theme.decorations) if theme else None)
@@ -721,7 +722,8 @@ class DeckPlan:
         # a deck a person built at any size (`adopt_sync`), and every box, font size and hole width
         # below is this converter's PDF pt times `scale`.
         # `pptx_tables`: tables come with the imported .pptx, empty and with their cell margins
-        # (`tables`, build_pptx), and are filled in; else (sync) they are made by createTable.
+        # (`tables`, build_pptx), and are filled in; else (sync) they are made by createTable. So do
+        # the text boxes whose bullets no preset draws (`shells`: beamer's ▶ as itself, not ➢).
         # `contain`: the deck as classify wrote it, whose blocks the plan merges, and an element
         # it cannot plan is the picture of its region (`contain`, listed in `contained`), whose
         # file the caller crops (`crop_fallbacks`). Without it the deck's blocks are merged
@@ -812,6 +814,9 @@ class DeckPlan:
                     _add_template_shapes(self._scratch_slide(), keys)
                 if self.pptx_tables and el["kind"] == "table":
                     _add_table(self._scratch_slide(), self.pptx_table(el))
+                shell = self.text_shell(slide, el) if self.pptx_tables and el["kind"] == "text" else None
+                if shell is not None:
+                    _add_text_shell(self._scratch_slide(), shell)
             except Exception as e:  # noqa: BLE001 - one element's planning, contained by `contain`
                 failed.append((i, e))
         if failed:
@@ -860,6 +865,38 @@ class DeckPlan:
             return []
         return [self.pptx_table(e) for e in _elements(slide) if e["kind"] == "table"]
 
+    def shells(self, slide: JsonMap) -> list[PptxText]:
+        """The slide's text shells as the .pptx carries them (text_shell_of), in element order, when
+        it carries tables (`pptx_tables`: what convert uploads; sync creates every box itself)."""
+        return [shell for _, shell in self._shells(slide)]
+
+    def shell_indices(self, slide: JsonMap) -> list[int]:
+        """The indices of the elements `shells` holds a text shell for."""
+        return [i for i, _ in self._shells(slide)]
+
+    def _shells(self, slide: JsonMap) -> list[tuple[int, PptxText]]:
+        if not self.pptx_tables:
+            return []
+        title = title_element(slide)
+        named = {title, subtitle_element(slide, title) if title is not None else None}  # (layout placeholders)
+        out: list[tuple[int, PptxText]] = []
+        for i, el in enumerate(_elements(slide)):
+            if el["kind"] != "text" or i in named:
+                continue
+            shell = self.text_shell(slide, el)
+            if shell is not None:
+                out.append((i, shell))
+        return out
+
+    def text_shell(self, slide: JsonMap, el: JsonObject) -> PptxText | None:
+        """The text shell of one text element of `slide` (`text_shell_of`); None: it is created."""
+        typed = parse_slide_element(el, "background" in slide, f"slide page {_page(slide)}")
+        if not isinstance(typed, TextElement):
+            return None
+        box = box_of(el["bbox"], "bbox")
+        return text_shell_of(set_text(typed), (box[0] * self.scale, box[1] * self.scale, box[2] * self.scale,
+                                               box[3] * self.scale), self.scale, self.fonts)
+
     def pptx_table(self, el: ObjectMap) -> PptxTable:
         """The empty table the .pptx carries for a table element. (Its page is SLIDE_W / scale wide,
         as `table_element_requests` takes it: a deck of another width than SLIDE_W is not asked.)"""
@@ -875,18 +912,22 @@ class DeckPlan:
         placeholders = {_placeholder_type(e): _object_id(e) for e in els if _is_placeholder(e)}
         pictures = [_object_id(e) for e in els if "image" in e]
         tables = [_object_id(e) for e in els if "table" in e]
+        # (the text shells, then the template shapes, in the order build_pptx put them on the slide)
         shapes = [e for e in els if "image" not in e and "table" not in e and not _is_placeholder(e)]
         elements = _elements(slide)
         picture_idx = [i for i, e in enumerate(elements) if e["kind"] == "image"]
         table_idx: list[int] = [i for i, e in enumerate(elements) if e["kind"] == "table"] if self.pptx_tables else []
-        if len(pictures) != len(picture_idx) or len(tables) != len(table_idx) or \
-                len(shapes) != (len(keys) if uses_templates[n] else 0):
+        shell_idx = self.shell_indices(slide)
+        templates = len(keys) if uses_templates[n] else 0
+        if len(pictures) != len(picture_idx) or len(tables) != len(table_idx) or len(shapes) != len(shell_idx) + templates:
             raise RuntimeError(f"slide {n + 1}: the import brought {len(pictures)} pictures, {len(tables)} tables and "
-                               f"{len(shapes)} template shapes, expected {len(picture_idx)}, {len(table_idx)} and "
-                               f"{len(keys) if uses_templates[n] else 0}")
+                               f"{len(shapes)} text shells and template shapes, expected {len(picture_idx)}, "
+                               f"{len(table_idx)} and {len(shell_idx)} + {templates}")
+        shells, shapes = shapes[:len(shell_idx)], shapes[len(shell_idx):]
         ids = {_object_id(source): slide_id}
         ids.update({oid: f"{slide_id}_f{i}" for oid, i in zip(pictures, picture_idx)})
         ids.update({oid: f"{slide_id}_tab{i}" for oid, i in zip(tables, table_idx)})
+        ids.update({_object_id(e): f"{slide_id}_t{i}" for e, i in zip(shells, shell_idx)})
         ids.update({_object_id(e): f"{slide_id}_k{j}" for j, e in enumerate(shapes)})
         title_idx, (_, title_kind) = title_element(slide), slide_layout(slide)
         if title_idx is not None and title_kind is not None:  # (a title is never on the BLANK layout)
@@ -929,10 +970,11 @@ class DeckPlan:
         subtitle_oid = f"{slide_id}_t{sub_idx}" if sub_idx is not None else None
         title_oid, subtitle_oid = (oid if oid in live else None for oid in (title_oid, subtitle_oid))
         ours = (f"{slide_id}_k", f"{slide_id}_f", f"{slide_id}_tab")  # template shapes, pictures, tables from the .pptx
+        shells = {f"{slide_id}_t{i}" for i in self.shell_indices(slide)} & live  # text shells from the .pptx
         parts: list[Part] = [(None, [
             {"deleteObject": {"objectId": oid}}
             for oid in (_object_id(e) for e in page_elements.get(slide_id, []))
-            if oid not in (title_oid, subtitle_oid) and not oid.startswith(ours)])]
+            if oid not in (title_oid, subtitle_oid) and oid not in shells and not oid.startswith(ours)])]
 
         def template_record(key: TemplateKey) -> Template:
             """The slide's copy of a template shape and its unscaled size (pt)."""
@@ -968,6 +1010,12 @@ class DeckPlan:
                     return reqs
                 case TextElement():
                     placeholder = None
+                    if oid in shells:  # (bullets no preset draws: the .pptx's, text_shell_of)
+                        size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
+                        shell = Shell(base_w=_magnitude(size, "width") / EMU_PER_PT,
+                                      base_h=_magnitude(size, "height") / EMU_PER_PT)
+                        return text_shell_requests(typed, slide_id, oid, scale, fonts, shell, page_slide,
+                                                   title_bar_under(el, slide), text_right_limit(el, slide), None)
                     if oid in (title_oid, subtitle_oid):
                         size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
                         placeholder = Placeholder(base_w=_magnitude(size, "width") / EMU_PER_PT,
@@ -1094,6 +1142,8 @@ def _offline_copy(plan: DeckPlan, slide: JsonObject, placeholder_size: tuple[flo
     els.extend({"objectId": f"{source}_p{i}", "size": size(1, 1), "image": {}} for i, _ in enumerate(plan.pictures(slide)))
     els.extend({"objectId": f"{source}_tb{i}", "size": size(sum(t.widths), sum(t.heights)), "table": {}}
                for i, t in enumerate(plan.tables(slide)))
+    els.extend({"objectId": f"{source}_sh{i}", "size": size(t.box[2] - t.box[0], t.box[3] - t.box[1]), "shape": {}}
+               for i, t in enumerate(plan.shells(slide)))
     els.extend({"objectId": f"{source}_k{j}", "size": size(*template_size), "shape": {}}
                for j in range(len(plan.keys) if plan.uses_templates[n] else 0))
     ids, sizes = plan.copy_ids(slide, {"objectId": source, "pageElements": _json_list(els)})

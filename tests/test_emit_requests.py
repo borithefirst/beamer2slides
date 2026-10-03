@@ -20,7 +20,8 @@ from beamer2slides.classify import HOLE_PAD, classify
 from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, FontMapper, find_marks, fit_holes,
                                 formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
                                 measure_jobs, overlay_boxes, pick_gap, slide_holes, space_shift)
-from beamer2slides.emit_model import Place, table_of, text_of
+from beamer2slides.emit_model import Place, PptxText, table_of, text_of
+from beamer2slides.emit_pptx import SHELL_CHAR
 from beamer2slides.emit_tables import pptx_table_of, table_requests_of
 from beamer2slides.emit_text import text_box_requests_of
 from beamer2slides.extract import extract, select_overlays
@@ -142,6 +143,10 @@ class Emitted:
         self.font_max: dict[str, float] = {}
         self.sizes: dict[str, tuple[float, float]] = {}
         self.boxes: dict[str, Box4] = {}  # object id -> page box (pt) where its creation gives one
+        # text shells the .pptx carries (bullets no preset draws): object id -> the shell
+        self.shells: dict[str, PptxText] = {
+            f"b2s_s{jint(s, 'page'):03}_t{i}": shell for s in self.plan.slides()
+            for i, shell in zip(self.plan.shell_indices(s), self.plan.shells(s))}
         self.replay()
 
     def flag(self, invariant: str, where: str, message: str) -> None:
@@ -169,7 +174,8 @@ class Emitted:
                 oid = jstr(e, "objectId")
                 self.create(oid, slide_id, "import")
                 self.sizes[oid] = (pt_of(jat(e, "size", "width")), pt_of(jat(e, "size", "height")))
-                self.texts[oid] = ""
+                shell = self.shells.get(oid)  # (a shell holds one placeholder character per paragraph)
+                self.texts[oid] = "" if shell is None else "\n".join(SHELL_CHAR for _ in shell.paragraphs)
             self.create(self.result["speaker_notes"][slide_id], slide_id, "import")
         for r in self.result["measure"]:
             self.apply(r, "measure_places")
@@ -562,7 +568,7 @@ def test_bullets_are_styled_before_they_are_created(decks: tuple[Emitted, ...]) 
                 if el["kind"] != "text":
                     continue
                 paragraphs = jobjs(el, "paragraphs")
-                if not any(p["bullet"] for p in paragraphs):
+                if not any(p["bullet"] for p in paragraphs) or oid in d.shells:  # (shells: the next test)
                     continue
                 where = f"{d.name} {slide_id} {el['id']}"
                 inserted = next(jstr(r, "insertText", "text") for r in reqs if "insertText" in r)
@@ -620,6 +626,68 @@ def test_bullets_are_styled_before_they_are_created(decks: tuple[Emitted, ...]) 
                         t = jobj(q, "updateTextStyle", "textRange")
                         if (t["startIndex"], t["endIndex"]) in items:
                             found.append(f"{where}: one style request over the whole item {t}")
+    assert not found, report(found)
+
+
+def test_triangle_bullets_come_with_the_pptx(decks: tuple[Emitted, ...]) -> None:
+    """A box whose bullets are all beamer's ▶ (no preset draws it: createParagraphBullets wrote ➢)
+    comes in the .pptx as a text shell whose bullets are `a:buChar` ► (▶'s shape, larger in Slides; emit_text.text_shell_of): it
+    is never created here nor given preset bullets; each paragraph's words go in front of its
+    placeholder character, deleted right after, so no paragraph is ever empty; and no style request
+    covers a whole item (it would restyle the item's bullet)."""
+    found: list[str] = []
+    shells = 0
+    for d in decks:
+        for slide_id, page, parts, element_ids in d.result["slides"]:
+            synced: list[tuple[JsonObject, list[JsonObject], str]] | None = None
+            for el, reqs, oid in element_parts(parts, element_ids):
+                shell = d.shells.get(oid)
+                if shell is None:
+                    continue
+                shells += 1
+                if synced is None:  # what sync writes of the slide (slide_emission): every box created
+                    emission = emit.slide_emission(d.slides[page], d.plan.scale, d.plan.fonts)
+                    synced = element_parts(emission["parts"], emission["element_ids"])
+                sync_kinds = [next(iter(r)) for e, rs, o in synced if o == oid for r in rs]
+                if "createShape" not in sync_kinds or "createParagraphBullets" not in sync_kinds:
+                    found.append(f"{d.name} {slide_id} {el['id']}: sync's emission of a shell box is {sync_kinds}")
+                where = f"{d.name} {slide_id} {el['id']}"
+                paragraphs = jobjs(el, "paragraphs")
+                kinds = [next(iter(r)) for r in reqs]
+                if "createShape" in kinds or "createParagraphBullets" in kinds:
+                    found.append(f"{where}: a shell created or given preset bullets ({kinds})")
+                if not kinds or kinds[0] != "updatePageElementTransform" or \
+                        jstr(reqs[0], "updatePageElementTransform", "applyMode") != "ABSOLUTE":
+                    found.append(f"{where}: a shell not placed first ({kinds[:2]})")
+                if len(shell.paragraphs) != len(paragraphs):
+                    found.append(f"{where}: {len(shell.paragraphs)} shell paragraphs for {len(paragraphs)}")
+                    continue
+                for p, sp in zip(paragraphs, shell.paragraphs):
+                    if (sp.char is None) != (not p["bullet"]) or (sp.char is not None and sp.char != "►"):
+                        found.append(f"{where}: a paragraph's bullet {p['bullet']} carried as {sp.char!r}")
+                # the fill: last paragraph first, words in front of the character, then the character out
+                fills = [(jint(r, "insertText", "insertionIndex"), jstr(r, "insertText", "text"),
+                          jint(reqs[k + 1], "deleteText", "textRange", "startIndex") if k + 1 < len(reqs)
+                          and "deleteText" in reqs[k + 1] else -1)
+                         for k, r in enumerate(reqs) if "insertText" in r]
+                want = [(2 * i, t, 2 * i + len(t.encode("utf-16-le", "surrogatepass")) // 2)
+                        for i, t in reversed(list(enumerate(d.texts[oid].split("\n"))))]
+                if [(a, c) for a, _, c in fills] != [(a, c) for a, _, c in want] or not all(t for _, t, _ in fills):
+                    found.append(f"{where}: filled as {fills}, expected {want}")
+                last = max(i for i, kind in enumerate(kinds) if kind == "deleteText")
+                pos = 0
+                items: list[tuple[int, int]] = []
+                for p in paragraphs:
+                    n = len(run_text(emit.hole_runs(jobjs(p, "runs"), d.plan.scale, d.plan.fonts)))
+                    if p["bullet"] and n > 1:
+                        items.append((pos, pos + n))
+                    pos += n + 1
+                for q in reqs[last + 1:]:
+                    if "updateTextStyle" in q:
+                        t = jobj(q, "updateTextStyle", "textRange")
+                        if (t["startIndex"], t["endIndex"]) in items:
+                            found.append(f"{where}: one style request over the whole item {t}")
+    assert shells, "no deck has a box of ▶ bullets: the text shells went untested"
     assert not found, report(found)
 
 

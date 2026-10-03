@@ -31,7 +31,7 @@ from pptx.shapes.base import BaseShape
 
 from beamer2slides.adopt_sync import Folds
 from beamer2slides.emit import OfflinePlan, Part
-from beamer2slides.emit_model import PptxTable
+from beamer2slides.emit_model import PptxTable, PptxText
 from beamer2slides.emit_theme import BgKey
 from beamer2slides.google_types import Dimension, Page, PageElement, Presentation, SlidesRequest, slides_json
 from beamer2slides.inverse import Candidate, Workspace
@@ -429,13 +429,14 @@ class PageDict(TypedDict):
     fill: Fill | None
     pictures: list[PictureDict]
     tables: list[PptxTable]
+    shells: list[PptxText]
     templates: bool
 
 
 def source_slides(pptx: io.BytesIO) -> list[JsonObject]:
     """The slides of the .pptx as the Drive import brings them (`presentations.get`'s
     pageElements, as far as `DeckPlan.copy_request` reads them), in the order python-pptx wrote
-    them: layout placeholders, pictures, tables, template shapes."""
+    them: layout placeholders, pictures, tables, text shells, template shapes."""
     from pptx import Presentation
     from pptx.enum.shapes import MSO_SHAPE_TYPE
 
@@ -510,6 +511,7 @@ def convert(made: Made, home: Path) -> None:
         "pictures": [{"file": out / jstr(e, "file"), "bbox": bbox, "alt": as_optional_str(e.get("alt"), "alt"),
                       "title": picture_title(e)} for e, bbox in plan.pictures(s)],
         "tables": plan.tables(s),
+        "shells": plan.shells(s),
         "templates": plan.uses_templates[page_of(s)],
     } for s in slides_of(deck)]
     pictures = {page_of(s): {jstr(e, "id") for e, _ in plan.pictures(s)} for s in slides_of(deck)}
@@ -763,10 +765,10 @@ def resync(made: Made, home: Path) -> None:
     if pictures:
         page_w, page_h = jnums(ours.deck, "slides", 0, "size")
         still = [f for f, what in pictures.items() if what != "background"]
-        pages: list[PageDict] = [{"layout": "BLANK", "fill": None, "templates": False, "tables": [], "pictures": [
+        pages: list[PageDict] = [{"layout": "BLANK", "fill": None, "templates": False, "tables": [], "shells": [], "pictures": [
             {"file": f, "bbox": [0, 0, *s._fit(f)], "alt": f"b2s-stage:{k + n}", "title": "stage"}
             for n, f in enumerate(still[k:k + 40])]} for k in range(0, len(still), 40)]
-        pages += [{"layout": "BLANK", "fill": {"picture": Path(f)}, "templates": False, "tables": [], "pictures": []}
+        pages += [{"layout": "BLANK", "fill": {"picture": Path(f)}, "templates": False, "tables": [], "shells": [], "pictures": []}
                   for f, what in pictures.items() if what == "background"]
         white: ColorFill = {"color": "#ffffff"}
         assert len(source_slides(build_pptx(page_w, page_h, [], pages, white, None))) == len(pages)

@@ -16,11 +16,11 @@ from typing import Literal
 
 from .emit_metrics import (
     ASCENT_EM, BASELINE_A, DESCENT_EM, LINE_EM, MIDDLE_BASELINE_EM, PAD_X, PX_PT, SOFT_BREAK, FontMapper,
-    bullet_extent_of, bullet_level_of, bullet_preset_of, bullet_size_of, u16,
+    bullet_char_of, bullet_extent_of, bullet_level_of, bullet_preset_of, bullet_size_of, u16,
 )
 from .emit_model import (
-    ElementDict, JsonMap, Placeholder, SetParagraph, SetRun, SetText, block_of, box_of, json_number, number_box,
-    number_box_of, run_of, set_text, text_of,
+    ElementDict, JsonMap, Placeholder, PptxText, SetParagraph, SetRun, SetText, Shell, ShellParagraph, block_of, box_of,
+    json_number, number_box, number_box_of, run_of, set_text, text_of,
 )
 from .emit_widths import (
     SCRIPT_SIZE, SMALL_CAPS_SIZE, paragraph_dict, runs_between, set_runs_of, slides_lines_of, slides_width_of,
@@ -32,7 +32,7 @@ from .google_types import (
 )
 from .gslides import EMU_PER_PT, emu, pt, text_color
 from .ir import Align, Script
-from .ir_types import Number, TextElement
+from .ir_types import Box, Number, TextElement
 from .json_types import Json, JsonObject
 from .typing_compat import assert_never
 
@@ -618,6 +618,77 @@ def text_element_requests(el: TextElement, slide_id: str, object_id: str, scale:
                                 right_limit, marks)
 
 
+def _prepared(text: SetText, scale: float, fonts: FontMapper
+              ) -> tuple[list[SetParagraph], list[list[float]], list[float], list[float]]:
+    """A text's paragraphs as a box writes them (runs in sentences, holes), with their runs' sizes,
+    each paragraph's largest and the size its bullet may take."""
+    paras = [replace(p, runs=tuple(hole_runs_of(in_sentence_of(p.runs), scale, fonts))) for p in text.paragraphs]
+    # A line is as tall as its largest run, as Slides lays it out (line_size: small caps), and a
+    # subscript is no larger than its text (run_sizes).
+    sized = [run_sizes_of(p.runs, scale, fonts) for p in paras]
+    base_sizes = [max(zs) if p.runs else p.size * scale for p, zs in zip(paras, sized)]
+    # A bullet is no larger than its item's text (`body_size`), not its largest run: one {\Large}
+    # word or a superscript's optical cut grew that item's bullet over its neighbours'.
+    bullet_caps = [body_size(p.runs, zs) or base for p, zs, base in zip(paras, sized, base_sizes)]
+    return paras, sized, base_sizes, bullet_caps
+
+
+def shell_route(text: SetText) -> bool:
+    """Whether a text comes in the .pptx as a text shell (`text_shell_of`) instead of being created
+    through the API: when it has bullets and every one is a bullet no preset draws (CHAR_BULLETS:
+    beamer's ▶, which createParagraphBullets could only write as ➢), its bullets are the .pptx's
+    `a:buChar`. A box mixing such bullets with others keeps today's path: a preset's glyphs are
+    what the bullet metrics measured, a number needs Slides' autonumbering (never probed through a
+    .pptx), and one box holds one kind of bullet in beamer anyway. Upright, left-to-right prose
+    only, and no empty paragraph (an empty bulleted paragraph loses its bullet at the import)."""
+    bullets = [p.bullet for p in text.paragraphs if p.bullet is not None]
+    return bool(bullets) and not text.rotation and not text.code and \
+        all(bullet_char_of(b) is not None for b in bullets) and \
+        all(p.direction is None and "".join(r.text for r in p.runs) for p in text.paragraphs)
+
+
+def text_shell_of(text: SetText, box: Box, scale: float, fonts: FontMapper) -> PptxText | None:
+    """The text shell the .pptx carries for a text whose bullets no preset draws (`shell_route`;
+    None for any other), at `box` (Slides pt; the API pass places and sizes it as a box it creates):
+    one paragraph per paragraph, each a placeholder character in its bullet's size, colour and
+    family, its bullet the character at 100% of it, its level relative to the shallowest bullet's.
+    The API pass (`text_shell_requests`) puts each paragraph's words in front of its character and
+    deletes the character, so no paragraph is ever empty, and styles the words as a box it made."""
+    if not shell_route(text):
+        return None
+    paras, _, base_sizes, caps = _prepared(text, scale, fonts)
+    least = min(p.level for p in paras if p.bullet is not None)
+    out: list[ShellParagraph] = []
+    for p, base, cap in zip(paras, base_sizes, caps):
+        font = fonts.size_of(p.runs[0], scale)[0] if p.runs else "Lato"
+        if p.bullet is None:
+            out.append(ShellParagraph(level=0, char=None, color=None, size=round(base, 1), font=font,
+                                      text_size=round(base, 1)))
+            continue
+        out.append(ShellParagraph(level=min(8, max(0, p.level - least)), char=bullet_char_of(p.bullet),
+                                  color=p.bullet.color or (p.runs[0].color if p.runs else None),
+                                  size=bullet_size_of(p.bullet, cap, scale, True), font=font,
+                                  text_size=round(base, 1)))
+    return PptxText(box=box, paragraphs=tuple(out))
+
+
+def text_shell_requests(el: TextElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
+                        shell: Shell, page_slide: Mapping[int, str] | None, bar: Sequence[float] | None,
+                        right_limit: float | None, marks: Sequence[str] | None) -> list[SlidesRequest]:
+    """`text_shell_requests_of` a parsed text element (either stage)."""
+    return text_shell_requests_of(set_text(el), slide_id, object_id, scale, fonts, shell, page_slide, bar, right_limit,
+                                  marks)
+
+
+def text_shell_requests_of(text: SetText, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
+                           shell: Shell, page_slide: Mapping[int, str] | None, bar: Sequence[float] | None,
+                           right_limit: float | None, marks: Sequence[str] | None) -> list[SlidesRequest]:
+    """`text_box_requests_of` for a text the .pptx brought as a shell (`text_shell_of`): the same
+    box, words, styles and indents, written into the shell instead of a box created here, and no
+    createParagraphBullets (the shell's bullets are the PDF's own)."""
+    return _text_requests(text, slide_id, object_id, scale, fonts, None, shell, page_slide, bar, right_limit, marks)
+
+
 def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                          placeholder: Placeholder | None, page_slide: Mapping[int, str] | None,
                          bar: Sequence[float] | None, right_limit: float | None,
@@ -627,15 +698,77 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
     title stays in the middle of the bar when the block is resized. `right_limit` (PDF x) is
     how far a box of unwrapped left-aligned text may extend. `marks` highlights the hole runs,
     one colour each (measure_places)."""
+    return _text_requests(text, slide_id, object_id, scale, fonts, placeholder, None, page_slide, bar, right_limit,
+                          marks)
+
+
+def _bullet_requests(paras: Sequence[SetParagraph], texts: Sequence[str], object_id: str, scale: float,
+                     fonts: FontMapper, base_sizes: Sequence[float], bullet_caps: Sequence[float]) -> list[SlidesRequest]:
+    """A created box's words and bullets: the text with its levels as tabs, each paragraph's base
+    style, then createParagraphBullets per range of one preset."""
+    reqs: list[SlidesRequest] = []
+    # Bullets: contiguous ranges with the same preset. createParagraphBullets consumes the
+    # leading tabs and sets nesting levels relative to the range's shallowest paragraph, so a
+    # range whose levels start above 0 begins with a dummy paragraph, deleted right after.
+    levels = [bullet_level_of(p.bullet, p.level) if p.bullet is not None else 0 for p in paras]
+    ranges: list[tuple[int, int, BulletPreset]] = []  # (first paragraph, last paragraph, preset)
+    for i, p in enumerate(paras):
+        preset = bullet_preset(bullet_preset_of(p.bullet), "a bullet") if p.bullet is not None else None
+        if preset and ranges and ranges[-1][2] == preset and ranges[-1][1] == i - 1:
+            ranges[-1] = (ranges[-1][0], i, preset)
+        elif preset:
+            ranges.append((i, i, preset))
+    dummies = {first for first, last, _ in ranges if min(levels[first:last + 1]) > 0}
+    starts_tabbed: list[int] = []
+    parts: list[str] = []
+    pos = 0
+    for i, t in enumerate(texts):
+        if i in dummies:
+            parts.append("-")
+            pos += 2
+        starts_tabbed.append(pos)
+        parts.append("\t" * levels[i] + t)
+        pos += levels[i] + u16(t) + 1  # (every index below counts UTF-16 units, as Slides does: u16)
+    reqs.append({"insertText": {"objectId": object_id, "text": "\n".join(parts), "insertionIndex": 0}})
+    # A bullet keeps the text style it was created with, unless a later style request covers
+    # its whole paragraph. So every paragraph first gets its base family and size, bulleted
+    # ones the bullet's size and colour, and the runs are styled below in parts.
+    for i, (p, start, level, size, cap) in enumerate(zip(paras, starts_tabbed, levels, base_sizes, bullet_caps)):
+        family = fonts.size_of(p.runs[0], scale)[0] if p.runs else "Lato"
+        length = level + u16("".join(r.text for r in p.runs))
+        style: SlidesTextStyle = {"fontFamily": family, "fontSize": pt(size)}
+        if p.bullet is not None:
+            style["fontSize"] = pt(bullet_size_of(p.bullet, cap, scale, False))
+            color = p.bullet.color or (p.runs[0].color if p.runs else None)
+            if color:
+                style["foregroundColor"] = text_color(color)
+        if length:
+            reqs.append({"updateTextStyle": {
+                "objectId": object_id, "fields": ",".join(style), "style": style,
+                "textRange": {"type": "FIXED_RANGE", "startIndex": start - (2 if i in dummies else 0),
+                              "endIndex": start + length},
+            }})
+    for first, last, preset in reversed(ranges):
+        start = starts_tabbed[first] - (2 if first in dummies else 0)
+        end = starts_tabbed[last] + levels[last] + u16(texts[last])
+        reqs.append({"createParagraphBullets": {
+            "objectId": object_id, "bulletPreset": preset,
+            "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": end},
+        }})
+        if first in dummies:
+            reqs.append({"deleteText": {"objectId": object_id,
+                                        "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": start + 2}}})
+    return reqs
+
+
+def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
+                   placeholder: Placeholder | None, shell: Shell | None, page_slide: Mapping[int, str] | None,
+                   bar: Sequence[float] | None, right_limit: float | None,
+                   marks: Sequence[str] | None) -> list[SlidesRequest]:
+    """`text_box_requests_of`, or with `shell` its words written into a text shell the .pptx
+    carried (`text_shell_requests`)."""
     marks_left = list(marks or [])
-    paras = [replace(p, runs=tuple(hole_runs_of(in_sentence_of(p.runs), scale, fonts))) for p in text.paragraphs]
-    # A line is as tall as its largest run, as Slides lays it out (line_size: small caps), and a
-    # subscript is no larger than its text (run_sizes).
-    sized = [run_sizes_of(p.runs, scale, fonts) for p in paras]
-    base_sizes = [max(zs) if p.runs else p.size * scale for p, zs in zip(paras, sized)]
-    # A bullet is no larger than its item's text (`body_size`), not its largest run: one {\Large}
-    # word or a superscript's optical cut grew that item's bullet over its neighbours'.
-    bullet_caps = [body_size(p.runs, zs) or base for p, zs, base in zip(paras, sized, base_sizes)]
+    paras, sized, base_sizes, bullet_caps = _prepared(text, scale, fonts)
     per_line = [line_sizes_of(p, zs, scale, fonts) for p, zs in zip(paras, sized)]
     sizes = [max(ls) for ls in per_line]
 
@@ -729,6 +862,18 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
                                        "shapeProperties": {"contentAlignment": "TOP",
                                                            "autofit": {"autofitType": "NONE"}}}},
         ]
+    elif shell is not None:
+        # A text box the .pptx carried (text_shell_of): placed and sized as a placeholder is, and
+        # brought to the front where a box created now would land.
+        reqs = [
+            {"updatePageElementTransform": {"objectId": object_id, "applyMode": "ABSOLUTE", "transform": {
+                "scaleX": w / shell.base_w, "scaleY": h / shell.base_h, "unit": "EMU",
+                "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}}},
+            {"updatePageElementsZOrder": {"pageElementObjectIds": [object_id], "operation": "BRING_TO_FRONT"}},
+        ]
+        if middle:
+            reqs.append({"updateShapeProperties": {"objectId": object_id, "fields": "contentAlignment",
+                                                   "shapeProperties": {"contentAlignment": "MIDDLE"}}})
     else:
         transform: AffineTransform = {"scaleX": 1, "scaleY": 1, "unit": "EMU",
                                       "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}
@@ -750,57 +895,17 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
                                                    "shapeProperties": {"contentAlignment": "MIDDLE"}}})
 
     texts = ["".join(r.text for r in p.runs) for p in paras]
-    # Bullets: contiguous ranges with the same preset. createParagraphBullets consumes the
-    # leading tabs and sets nesting levels relative to the range's shallowest paragraph, so a
-    # range whose levels start above 0 begins with a dummy paragraph, deleted right after.
-    levels = [bullet_level_of(p.bullet, p.level) if p.bullet is not None else 0 for p in paras]
-    ranges: list[tuple[int, int, BulletPreset]] = []  # (first paragraph, last paragraph, preset)
-    for i, p in enumerate(paras):
-        preset = bullet_preset(bullet_preset_of(p.bullet), "a bullet") if p.bullet is not None else None
-        if preset and ranges and ranges[-1][2] == preset and ranges[-1][1] == i - 1:
-            ranges[-1] = (ranges[-1][0], i, preset)
-        elif preset:
-            ranges.append((i, i, preset))
-    dummies = {first for first, last, _ in ranges if min(levels[first:last + 1]) > 0}
-    starts_tabbed: list[int] = []
-    parts: list[str] = []
-    pos = 0
-    for i, t in enumerate(texts):
-        if i in dummies:
-            parts.append("-")
-            pos += 2
-        starts_tabbed.append(pos)
-        parts.append("\t" * levels[i] + t)
-        pos += levels[i] + u16(t) + 1  # (every index below counts UTF-16 units, as Slides does: u16)
-    reqs.append({"insertText": {"objectId": object_id, "text": "\n".join(parts), "insertionIndex": 0}})
-    # A bullet keeps the text style it was created with, unless a later style request covers
-    # its whole paragraph. So every paragraph first gets its base family and size, bulleted
-    # ones the bullet's size and colour, and the runs are styled below in parts.
-    for i, (p, start, level, size, cap) in enumerate(zip(paras, starts_tabbed, levels, base_sizes, bullet_caps)):
-        family = fonts.size_of(p.runs[0], scale)[0] if p.runs else "Lato"
-        length = level + u16("".join(r.text for r in p.runs))
-        style: SlidesTextStyle = {"fontFamily": family, "fontSize": pt(size)}
-        if p.bullet is not None:
-            style["fontSize"] = pt(bullet_size_of(p.bullet, cap, scale))
-            color = p.bullet.color or (p.runs[0].color if p.runs else None)
-            if color:
-                style["foregroundColor"] = text_color(color)
-        if length:
-            reqs.append({"updateTextStyle": {
-                "objectId": object_id, "fields": ",".join(style), "style": style,
-                "textRange": {"type": "FIXED_RANGE", "startIndex": start - (2 if i in dummies else 0),
-                              "endIndex": start + length},
-            }})
-    for first, last, preset in reversed(ranges):
-        start = starts_tabbed[first] - (2 if first in dummies else 0)
-        end = starts_tabbed[last] + levels[last] + u16(texts[last])
-        reqs.append({"createParagraphBullets": {
-            "objectId": object_id, "bulletPreset": preset,
-            "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": end},
-        }})
-        if first in dummies:
-            reqs.append({"deleteText": {"objectId": object_id,
-                                        "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": start + 2}}})
+    if shell is not None:
+        # Each paragraph's words go in front of its placeholder character, which goes after
+        # (never an empty paragraph: it would lose its bullet), the last paragraph first so the
+        # earlier ones' indices hold. The bullets are the shell's: nothing styles a whole paragraph.
+        for i in reversed(range(len(texts))):
+            at, n = 2 * i, u16(texts[i])
+            reqs.append({"insertText": {"objectId": object_id, "text": texts[i], "insertionIndex": at}})
+            reqs.append({"deleteText": {"objectId": object_id, "textRange": {
+                "type": "FIXED_RANGE", "startIndex": at + n, "endIndex": at + n + 1}}})
+    else:
+        reqs += _bullet_requests(paras, texts, object_id, scale, fonts, base_sizes, bullet_caps)
 
     # From here on indices refer to the final text, without tabs.
     pos = 0
@@ -813,7 +918,7 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
             if not run.text:
                 continue
             font, fields = fonts.style_of(run, scale)
-            style = slides_text_style(font, "a run's font (FontMapper.style_of)")
+            style: SlidesTextStyle = slides_text_style(font, "a run's font (FontMapper.style_of)")
             if "fontSize" in style:
                 style["fontSize"] = pt(z)  # (a subscript no larger than its text: run_sizes)
             if run.hole_size:
@@ -866,7 +971,7 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
         text_indent = 0.0 if text.code or edge != start_edge else room * scale
         if p.bullet is not None:
             # Slides ends the bullet glyph a little before indentFirstLine.
-            b_x0, b_x1, gap = bullet_extent_of(p.bullet, cap, scale)
+            b_x0, b_x1, gap = bullet_extent_of(p.bullet, cap, scale, shell is not None)
             side = (right_pdf - b_x0) if rtl else (b_x1 - left_pdf)
             first_indent = side * scale + gap
         elif p.tab_x0 and not text.code and not rtl:

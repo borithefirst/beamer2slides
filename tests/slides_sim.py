@@ -1,12 +1,14 @@
 """A tiny Google Slides model: replays the requests emit plans (emit.plan_offline) into the JSON
 `presentations.get` returns, as far as deck_ir reads it (text boxes and placeholders with their
-runs, paragraph styles and bullets, pictures, groups, speaker notes). No Google involved."""
+runs, paragraph styles and bullets, pictures, text shells, groups, speaker notes). No Google
+involved."""
 
 import copy
 from dataclasses import dataclass
 
 from beamer2slides.emit import SLIDE_W, plan_offline
 from beamer2slides.emit_model import ObjectMap
+from beamer2slides.emit_pptx import SHELL_CHAR
 from beamer2slides.google_types import SlidesRange, SlidesRequest, part_json, slides_request_kind
 from beamer2slides.json_types import Json, JsonObject
 
@@ -130,6 +132,25 @@ def presentation_of(deck: ObjectMap) -> JsonObject:
                 texts[oid] = Text()
                 elements.append(obj)
         slide_deck = next(s for s in deck_plan.slides() if s["page"] == page)
+        for i, shell in zip(deck_plan.shell_indices(slide_deck), deck_plan.shells(slide_deck)):
+            # a text shell as the .pptx brings it (emit_pptx._add_text_shell): at its box, one
+            # placeholder character per paragraph, its bullets the shell's characters
+            oid = f"{slide_id}_t{i}"
+            x0, y0, x1, y1 = shell.box
+            shelled: JsonObject = {
+                "objectId": oid, "size": {"width": {"magnitude": (x1 - x0) * 12700, "unit": "EMU"},
+                                          "height": {"magnitude": (y1 - y0) * 12700, "unit": "EMU"}},
+                "transform": {"scaleX": 1, "scaleY": 1, "translateX": x0 * 12700, "translateY": y0 * 12700, "unit": "EMU"},
+                "shape": {"shapeType": "TEXT_BOX", "shapeProperties": {}}}
+            objects[oid] = shelled
+            text = Text()
+            text.insert(0, "\n".join(SHELL_CHAR for _ in shell.paragraphs))
+            markers = [m for _a, _b, m in text.paragraphs()]
+            for marker, p in zip(markers, shell.paragraphs):
+                if p.char is not None:
+                    marker.bullet = {"listId": "l", "nestingLevel": p.level, "glyph": p.char}
+            texts[oid] = text
+            elements.append(shelled)
         pictures = plan["pictures"][page]
         images = [i for i, e in enumerate(jobjs(slide_deck, "elements")) if e["kind"] == "image"]
         for i, (_el, box) in zip(images, pictures):

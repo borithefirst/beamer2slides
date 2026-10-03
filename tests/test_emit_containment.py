@@ -127,7 +127,7 @@ def test_an_element_emit_cannot_plan_is_the_picture_of_its_region(lenient: None,
         {"layout": slide_layout(s)[0], "fill": None, "templates": plan.uses_templates[jint(s, "page")],
          "pictures": [{"file": tmp_path / jstr(e, "file"), "bbox": bbox, "alt": None, "title": "Picture"}
                       for e, bbox in plan.pictures(s) if e.get("role") == "fallback"],  # (render made none)
-         "tables": plan.tables(s)} for s in plan.slides()]
+         "tables": plan.tables(s), "shells": plan.shells(s)} for s in plan.slides()]
     prs = Presentation(emit.build_pptx(page_w, page_h, plan.keys, pages, {"color": "#ffffff"}, None))
     k = [jint(s, "page") for s in plan.slides()].index(page)
     assert sum(sh.shape_type == MSO_SHAPE_TYPE.PICTURE for sh in prs.slides[k].shapes) == 1

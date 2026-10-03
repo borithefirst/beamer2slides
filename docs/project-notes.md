@@ -4761,3 +4761,27 @@ the whole range (which recolours the bullet too, as for API bullets) and duplica
 and of the slide. An empty bulleted paragraph loses its bullet at import, so a box shell must
 carry a character per paragraph. The way to a native ▶: bulleted text boxes come in through the
 .pptx as shells with their paragraphs' levels and glyphs, filled through the API (as tables are).
+
+Built (`emit_text.shell_route`, `text_shell_of`, `emit_pptx._add_text_shell`; convert only, sync
+keeps ➢). Live on linear-attention (61 slides): text_overlap 0.618 either way, no page off by 0.02,
+the bullets filled and in place, but ▶ came out 70% of beamer's: Slides draws ▶ in a fallback face
+whatever the run's or `buFont` (Lato, Arial, Segoe UI Symbol alike), 0.45 em tall, and beamer's is
+0.58 em (6.35 pt at 10.91), so it was held at the cap (a bullet larger than its text). A second
+probe (.pptx shells, then the API's indentFirstLine 30 / indentStart 60 as emit writes them):
+
+| written | ink height em | right edge before indentFirstLine em | bottom vs baseline em | pitch |
+|---|---|---|---|---|
+| ▶ | 0.45 | 0.06-0.10 | +0.11..0.15 | = |
+| ► (U+25BA), any face | 0.68 (0.64-0.71) | 0.21 (0.17-0.25) | -0.02 | = |
+| ▶ in Noto Sans Symbols 2 | 0.53-0.56 | 0.24-0.29 | 0 | = |
+| ▶ at 133% / 150% | 0.45 | | | +0.9 / +1.8 pt |
+
+(⯈ ⏵ 🞂 are tofu boxes in Slides.) The cap stays: a bullet above 100% of its text pushes the line
+down even through a .pptx. ► is ▶'s shape (square ink, 1.0 against beamer's 1.03) at 0.68 em, so
+beamer's height is 85% of the text size. Live on linear-attention with ►: all 97 bullets' ink
+exactly beamer's height (ratio 1.00, 6.57 x 6.35 pt on slide 4 in both), the words beside them
+starting where the PDF's do (median 0.0 pt), the bullets' right edges 0.68 PDF pt (0.075 em of the
+bullet) right of beamer's on every one, hence a gap of 0.28 em, not the probe box's 0.21:
+`CHAR_BULLETS = {"triangle": ("►", 0.68, 0.28)}`. They also sit 0.9 PDF pt lower than beamer's:
+where Slides puts a bullet on its line is its own (no request moves it). text_overlap 0.619
+against 0.618 before.

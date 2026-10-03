@@ -122,6 +122,41 @@ class Placeholder:
 
 
 @dataclass(frozen=True, kw_only=True)
+class Shell:
+    """A text box the .pptx carried (`PptxText`) that a text is written into: its size as the
+    import made it, pt (it is resized through the transform's scale, as a placeholder is)."""
+    base_w: float
+    base_h: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class ShellParagraph:
+    """A paragraph of a text shell: one placeholder character the API pass replaces by its words,
+    and the bullet the .pptx gives it (`a:buChar`; the API has no preset drawing it)."""
+    level: int
+    """The nesting level (`lvl`), relative to the box's shallowest bulleted paragraph."""
+    char: str | None
+    """The bullet's character; None: no bullet."""
+    color: Color | None
+    """The bullet's colour (its placeholder character's); None: the text's default."""
+    size: float
+    """The placeholder character's size, pt: the bullet's where there is one (it is drawn at
+    100% of it), else the paragraph's."""
+    font: str
+    """The placeholder character's family."""
+    text_size: float
+    """The size of the paragraph's end (`a:endParaRPr`), pt: its text's."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class PptxText:
+    """The text shell the .pptx carries for a text element whose bullets no preset draws
+    (`emit_text.text_shell_of`, emit_pptx._add_text_shell), Slides pt."""
+    box: Box
+    paragraphs: tuple[ShellParagraph, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
 class SetShape:
     """What a shape's planner reads of a panel, rule or marked shape."""
     bbox: Box
