@@ -114,7 +114,10 @@ DOUBLE_STRUCK = {"C": "ℂ", "H": "ℍ", "N": "ℕ", "P": "ℙ", "Q": "ℚ", "R"
 # does the double-struck ones: a calligraphic letter, not a plain capital.
 SCRIPT = {"B": "ℬ", "E": "ℰ", "F": "ℱ", "H": "ℋ", "I": "ℐ", "L": "ℒ", "M": "ℳ", "R": "ℛ"}
 FRAKTUR = {"C": "ℭ", "H": "ℌ", "I": "ℑ", "R": "ℜ", "Z": "ℨ"}
-SCRIPT_FONTS = ("CMSY", "CMBSY", "LMMATHSYMBOLS", "RSFS", "EUSM", "EUSB", "TXSY", "PXSY", "NTXSY")
+# \mathbb's fonts: AMS's msbm, txfonts' and pxfonts' copy of it (txsyb, pxsyb), and newtx's
+# txsym, which holds txsya and txsyb (its C, Q, Z were read as script capitals, derived-cat s17).
+DOUBLE_STRUCK_FONTS = ("MSBM", "TXSYB", "PXSYB", "TXSYM")
+SCRIPT_FONTS = ("CMSY","CMBSY", "LMMATHSYMBOLS", "RSFS", "EUSM", "EUSB", "TXSY", "PXSY", "NTXSY")
 FRAKTUR_FONTS = ("EUFM", "EUFB")
 # Unicode math letters (unicode-math, OpenType math fonts) that are plain letters set italic.
 MATH_ITALIC_NAMES = ("MATHEMATICAL ITALIC ", "PLANCK CONSTANT")  # ℎ is the italic h
@@ -130,7 +133,11 @@ BELOW_ACCENTS = set("¸˛")  # \c{S} is set letter first, then its cedilla (\ooa
 COMPOSED = {("−", "−"): "−", ("=", "="): "=", ("−", "→"): "⟶", ("−", "⟶"): "⟶", ("←", "−"): "⟵",
             ("⟵", "−"): "⟵", ("⟵", "→"): "⟷", ("←", "→"): "⟷", ("←", "⟶"): "⟷",
             ("=", "⇒"): "⟹", ("=", "⟹"): "⟹", ("⇐", "="): "⟸", ("⟸", "="): "⟸", ("⟸", "⇒"): "⟺",
-            ("⇐", "⇒"): "⟺", ("⇐", "⟹"): "⟺", ("∼", "="): "≅", ("=", "∼"): "≅"}
+            ("⇐", "⇒"): "⟺", ("⇐", "⟹"): "⟺", ("∼", "="): "≅", ("=", "∼"): "≅",
+            # \mapsto and \longmapsto: the \mapstochar bar, which PDFium names ↦, before an arrow;
+            # \hookrightarrow / \hookleftarrow: a hook (the math italic's, so two fonts) and an arrow
+            ("↦", "→"): "↦", ("↦", "−"): "⟼", ("⟼", "−"): "⟼", ("⟼", "→"): "⟼", ("↦", "⟶"): "⟼",
+            ("↩", "→"): "↪", ("←", "↪"): "↩"}
 
 
 def with_accent(letter: str, mark: str) -> str:
@@ -258,7 +265,7 @@ def math_pieces(font: str, text: str) -> list[tuple[str, bool]]:
     letters set italic) with upright operators and digits, piece by piece."""
     key = re.sub(r"[^A-Z0-9]", "", font.split("+", 1)[-1].upper())
     text = compose_symbols(negate(text))
-    if key.startswith("MSBM"):  # \mathbb
+    if key.startswith(DOUBLE_STRUCK_FONTS):  # \mathbb
         return [("".join(DOUBLE_STRUCK.get(c, chr(0x1D538 + ord(c) - 65) if "A" <= c <= "Z" else c)
                          for c in text), False)]
     if key.startswith(SCRIPT_FONTS):  # \mathcal, \mathscr

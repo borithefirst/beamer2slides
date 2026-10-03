@@ -98,6 +98,22 @@ def test_opentype_math_slants_its_letters_only():
     assert math_pieces("LibertinusT1Math", " 𝛼") == [(" α", True)]
 
 
+@pytest.mark.parametrize("font", ["MSBM10", "txsym", "TXSYB"])
+def test_newtx_and_txfonts_blackboard_bold_is_double_struck(font: str) -> None:
+    # newtx's txsym holds txsya and txsyb: its capitals are \mathbb's, not \mathcal's (derived-cat)
+    assert math_text(font, "C Q Z P")[0] == "ℂ ℚ ℤ ℙ"
+
+
+def test_newtx_symbols_letters_stay_script() -> None:
+    assert math_text("txsys", "L")[0] == "ℒ"
+
+
+def test_mapsto_and_hook_pieces_are_one_arrow() -> None:
+    assert math_text("txsys", "↦→")[0] == "↦"  # \mapstochar then \rightarrow
+    assert math_text("txsys", "↦−→")[0] == "⟼"  # \longmapsto
+    assert math_text("txsys", "↩→")[0] == "↪"  # \hookrightarrow (two fonts: joined by overlap)
+
+
 @pytest.mark.parametrize("font", ["CMMI10", "LMMathItalic10-Regular", "NewTXMI", "PazoMath-Italic"])
 def test_tex_math_italic_fonts_are_italic(font: str) -> None:
     assert math_text(font, "τ") == ("τ", True)
