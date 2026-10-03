@@ -354,8 +354,14 @@ a per-slide background picture.
   every number on the slide becomes literal text with a tab (Slides can't set a start number).
   Labels on balls, circles and squares (numbers or letters) always become the ball picture with
   a centred text box on it (`number`, `emit.number_box_requests`), grouped with the item text.
-- Grouping in emit: blocks (`block_groups`: shapes with the same `block` plus content), formula
-  pictures with their text, progress bars with their track (`rule_groups`). Title page:
+- Grouping in emit: blocks (`block_groups`: shapes with the same `block` plus content, and the
+  shapes drawn on them after their first panel - a listing's white framed panel left out covered
+  the code in the group, real_esi-dev1-slides slide 22), formula pictures with their text,
+  progress bars with their track (`rule_groups`). A block's group is sent back to where its first
+  panel stood, the shapes created before it sent back under it in their order
+  (`emit_diagrams.block_stacking`; a plain SEND_TO_BACK put it under a panel it stands on).
+  `test_emit_requests.stacking` replays Slides' stacking: nothing overlapping lies under an
+  opaque shape listed before it (`test_nothing_lies_under_a_panel_the_pdf_draws_it_on`). Title page:
   `subtitle_element` → SUBTITLE placeholder.
 - Blocks built to survive resizing (`classify.blocks`, `emit.merge_blocks`): the body reaches up
   under the title bar with the whole block's outline (a group resize never opens a gap), title

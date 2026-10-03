@@ -720,6 +720,74 @@ def test_elements_lie_within_the_page(decks: tuple[Emitted, ...]) -> None:
     assert not found, report(found)
 
 
+def stacking(page_elements: Sequence[JsonObject], parts: Sequence[emit.Part]) -> list[str]:
+    """A slide's objects bottom to top once emit's `parts` have run, groups opened (a group's
+    children keep their order among themselves), as Slides stacks them: the imported objects in
+    their order, a created or duplicated object on top, a group where its topmost child was, and
+    z-order requests moving top-level objects only (several keep their order)."""
+    top: list[str] = [jstr(e, "objectId") for e in page_elements]
+    kids: dict[str, list[str]] = {}
+    for _, reqs in parts:
+        for r in reqs:
+            kind = slides_request_kind(r)
+            body = jobj(slides_json(r), kind)
+            if kind in ("createShape", "createLine", "createTable", "createImage"):
+                top.append(jstr(body, "objectId"))
+            elif kind == "duplicateObject":
+                top += [as_str(v, "objectIds") for v in jobj(body, "objectIds").values()]
+            elif kind == "deleteObject":
+                oid = jstr(body, "objectId")
+                top = [o for o in top if o != oid]
+                kids = {g: [o for o in k if o != oid] for g, k in kids.items()}
+            elif kind == "groupObjects":
+                group = jstr(body, "groupObjectId")
+                children = sorted(jstrs(body, "childrenObjectIds"), key=top.index)  # (a child not on top raises)
+                top[top.index(children[-1])] = group
+                top = [o for o in top if o not in children]
+                kids[group] = children
+            elif kind == "updatePageElementsZOrder":
+                moved = sorted(jstrs(body, "pageElementObjectIds"), key=top.index)
+                rest = [o for o in top if o not in moved]
+                op = jstr(body, "operation")
+                assert op in ("BRING_TO_FRONT", "SEND_TO_BACK"), f"no model of {op}"
+                top = rest + moved if op == "BRING_TO_FRONT" else moved + rest
+
+    def opened(oids: Sequence[str]) -> list[str]:
+        return [x for o in oids for x in ([o] if o not in kids else [o, *opened(kids[o])])]
+    return opened(top)
+
+
+def stacking_problems(name: str, result: emit.OfflinePlan) -> list[str]:
+    """Where emit stacks two overlapping elements of a slide otherwise than deck.json orders them
+    (its element order is z-order), the lower one an opaque shape: a panel over words, a picture or
+    another panel the PDF draws on it hides them in Slides."""
+    found: list[str] = []
+    slides = {jint(s, "page"): s for s in result["plan"].slides()}
+    for slide_id, page, parts, element_ids in result["slides"]:
+        flat = stacking(result["page_elements"][slide_id], parts)
+        at = {o: k for k, o in enumerate(flat)}
+        elements = jobjs(slides[page], "elements")
+        for i, (low, low_id) in enumerate(zip(elements, element_ids)):
+            if low["kind"] != "shape" or "opacity" in low or low.get("fill") is None or low_id not in at:
+                continue
+            lx0, ly0, lx1, ly1 = jnums(low, "bbox")
+            for high, high_id in zip(elements[i + 1:], element_ids[i + 1:]):
+                hx0, hy0, hx1, hy1 = jnums(high, "bbox")
+                if high_id in at and at[high_id] < at[low_id] and \
+                        min(lx1, hx1) - max(lx0, hx0) > 0.5 and min(ly1, hy1) - max(ly0, hy0) > 0.5:
+                    found.append(f"{name} {slide_id}: {jstr(high, 'id')} ({jstr(high, 'kind')}) is under the "
+                                 f"panel {jstr(low, 'id')} the PDF draws it on")
+    return found
+
+
+def test_nothing_lies_under_a_panel_the_pdf_draws_it_on(decks: tuple[Emitted, ...]) -> None:
+    """Element order is z-order: the groups emit makes (a block's, a text's with its pictures) and
+    its z-order requests keep it wherever a panel and what lies on it overlap (a listing's framed
+    panel inside a block was left above the block's group with the code text in it)."""
+    found = [p for d in decks for p in stacking_problems(d.name, d.result)]
+    assert not found, report(found)
+
+
 # ---------------------------------------------------------------- the imported .pptx
 
 WHITE: dict[str, str] = {"color": "#ffffff"}

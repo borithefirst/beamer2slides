@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Callable, TypedDict, TypeVar
 
 from . import emit_state
 from .emit_state import Emitted
-from .emit_diagrams import block_groups, diagram_requests_of, element_template_keys, rule_groups
+from .emit_diagrams import block_groups, block_stacking, diagram_requests_of, element_template_keys, rule_groups
 from .emit_diagrams import (  # noqa: F401 (callers take these from here)
     bend_template_key, connection, diagram_requests, label_inside, node_template_key,
 )
@@ -1055,20 +1055,26 @@ class DeckPlan:
             if isinstance(anchor, str) and anchor in by_id and by_id[anchor] not in (title_oid, subtitle_oid):
                 anchored.setdefault(by_id[anchor], []).extend([oid, f"{oid}n"] if el.get("number") else [oid])
         grouped: set[str] = set()
+        tops: dict[str, str] = {}  # object id -> the group it went into
         for text_oid, pictures in anchored.items():
             extra.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid, *pictures]}})
             grouped |= {text_oid, *pictures}
+            tops.update((m, f"{text_oid}_g") for m in (text_oid, *pictures))
+        rules = rule_groups(elements, element_ids)
         # A beamer block (title bar and body shapes plus everything on them) moves as one.
-        for bi, members in enumerate(block_groups(elements, element_ids, title_oid)):
+        blocks: list[tuple[str, list[str]]] = []
+        for bi, members in enumerate(block_groups(elements, element_ids, title_oid, {m for g in rules for m in g})):
             children = [f"{m}_g" if m in anchored else m for m in members if m not in grouped or m in anchored]
             if len(children) >= 2:
                 extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_blk{bi}", "childrenObjectIds": children}})
-                # A group takes the place of its topmost member, above a table lying on the
-                # block (tables can't join the group): blocks are backdrops, send them back.
-                extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [f"{slide_id}_blk{bi}"],
-                                                           "operation": "SEND_TO_BACK"}})
-        for ri, members in enumerate(rule_groups(elements, element_ids)):
+                blocks.append((f"{slide_id}_blk{bi}", children))
+        for ri, members in enumerate(rules):
             extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_rules{ri}", "childrenObjectIds": [*members]}})
+            tops.update((m, f"{slide_id}_rules{ri}") for m in members)
+        # A group takes the place of its topmost member, above a table lying on the block (tables
+        # can't join the group): blocks are backdrops, sent back where their first panel stood.
+        for oid in block_stacking(elements, element_ids, blocks, tops):
+            extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "SEND_TO_BACK"}})
         notes_id = speaker_notes.get(slide_id)
         if slide.get("notes") and notes_id:
             extra.append({"insertText": {"objectId": notes_id, "text": as_str(slide["notes"], "notes")}})

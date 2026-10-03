@@ -7,7 +7,7 @@ and the tests hold: `diagram_requests`, `element_template_keys`, `label_inside`,
 """
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import replace
 from typing import Literal
 
@@ -530,30 +530,78 @@ def _block(el: JsonMap) -> int | None:
     return value
 
 
-def block_groups(elements: Sequence[JsonMap], object_ids: Sequence[str], title_oid: str | None) -> list[list[str]]:
-    """Object ids per block: its panel shapes (title bar and body, see classify.blocks), plus
-    the text and pictures lying on them."""
-    blocks: dict[int, tuple[Box, list[str]]] = {}  # block -> its extent, its oids
-    for el, oid in zip(elements, object_ids):
+def block_groups(elements: Sequence[JsonMap], object_ids: Sequence[str], title_oid: str | None,
+                 apart: AbstractSet[str]) -> list[list[str]]:
+    """Object ids per block, in element order: its panel shapes (title bar and body, see
+    classify.blocks), plus the text and pictures lying on them, and the shapes the PDF draws on
+    them (a listing's framed panel in the block's body; not those in `apart`, the rules
+    `rule_groups` holds). Element order is z-order, and children of a group cannot be restacked:
+    a shape on the block left out of its group lay either under the block, or over the words on it
+    (a white listing panel over its code)."""
+    blocks: dict[int, tuple[Box, list[str], int]] = {}  # block -> its extent, its oids, its first element
+    for i, (el, oid) in enumerate(zip(elements, object_ids)):
         block = _block(el)
         if block is not None:
             x0, y0, x1, y1 = box_of(el["bbox"], "bbox")
-            (bx0, by0, bx1, by1), members = blocks.get(block, ((x0, y0, x1, y1), []))
-            blocks[block] = (min(bx0, x0), min(by0, y0), max(bx1, x1), max(by1, y1)), members
+            (bx0, by0, bx1, by1), members, first = blocks.get(block, ((x0, y0, x1, y1), [], i))
+            blocks[block] = (min(bx0, x0), min(by0, y0), max(bx1, x1), max(by1, y1)), members, first
             members.append(oid)
     out: list[list[str]] = []
-    for (x0, y0, x1, y1), members in blocks.values():
-        if len(members) < 2:
+    for (x0, y0, x1, y1), panels, first in blocks.values():
+        if len(panels) < 2:
             continue  # a lone panel is not recognisably a block
-        for el, oid in zip(elements, object_ids):
-            # Tables can't be grouped in Slides: a table in a block stays on its own.
-            if el["kind"] in ("text", "image") and oid != title_oid and not el.get("anchor"):
+        members: list[str] = []
+        for i, (el, oid) in enumerate(zip(elements, object_ids)):
+            if oid in panels:
+                members.append(oid)
+                continue
+            # Tables can't be grouped in Slides: a table in a block stays on its own. (A shape
+            # drawn before the block's first panel lies under it: a shadow, a panel it stands on.)
+            on = el["kind"] in ("text", "image") or (el["kind"] == "shape" and i > first and _block(el) is None
+                                                     and oid not in apart)
+            if on and oid != title_oid and not el.get("anchor"):
                 ex0, ey0, ex1, ey1 = box_of(el["bbox"], "bbox")
                 cx, cy = (ex0 + ex1) / 2, (ey0 + ey1) / 2
                 if x0 <= cx <= x1 and y0 <= cy <= y1:
                     members.append(oid)
         out.append(members)
     return out
+
+
+def block_stacking(elements: Sequence[JsonMap], object_ids: Sequence[str],
+                   blocks: Sequence[tuple[str, Sequence[str]]], tops: Mapping[str, str]) -> list[str]:
+    """The top-level objects to send to the back, last first, so that each block's group stands
+    where its first panel was created: Slides puts a group where its topmost child stood, above
+    whatever was created between its panels and the words on them (a table on the block, which
+    cannot join the group, hidden under its body). `blocks`: (group id, member object ids); `tops`:
+    an object id -> the group it went into (a text's with its pictures, a rule group), the blocks'
+    groups not yet among them.
+
+    Each block's group goes to the back, and under it every shape created before the block's first
+    panel (they come first: `merge_blocks` puts shapes before the rest, which keeps their own
+    place), in element order, so a shape the PDF draws under a block (a panel it stands on) stays
+    under it. With one block and no shape before it this is the one SEND_TO_BACK of its group."""
+    if not blocks:
+        return []
+    top = dict(tops)
+    for group, members in blocks:
+        top.update((m, group) for m in members)
+    at: dict[str, list[int]] = {}  # top-level object -> the indices of the elements it holds
+    for i, oid in enumerate(object_ids):
+        at.setdefault(_top_of(oid, top), []).append(i)
+    groups = {group for group, _ in blocks}
+    # (a block's group stands at its first element, any other at its topmost, as Slides puts it)
+    keys = {t: min(held) if t in groups else max(held) for t, held in at.items()}
+    shapes = {_top_of(oid, top) for oid, el in zip(object_ids, elements) if el["kind"] == "shape"}
+    last = max(keys[group] for group in groups)
+    return sorted((t for t in shapes | groups if keys[t] <= last), key=lambda t: keys[t], reverse=True)
+
+
+def _top_of(oid: str, top: Mapping[str, str]) -> str:
+    """The top-level object holding `oid` (`top`: object -> the group it is in)."""
+    while oid in top:
+        oid = top[oid]
+    return oid
 
 
 def rule_groups(elements: Sequence[JsonMap], object_ids: Sequence[str]) -> list[list[str]]:

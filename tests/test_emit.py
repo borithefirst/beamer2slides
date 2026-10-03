@@ -2,8 +2,8 @@
 
 from collections.abc import Sequence
 
-from beamer2slides.emit import (MIDDLE_BASELINE_EM, block_groups, connection, label_inside, merge_blocks,
-                                rule_groups, template_key, text_right_limit)
+from beamer2slides.emit import (MIDDLE_BASELINE_EM, block_groups, block_stacking, connection, label_inside,
+                                merge_blocks, rule_groups, template_key, text_right_limit)
 from beamer2slides.json_types import Json, JsonObject
 
 from .json_reads import jarr
@@ -55,7 +55,26 @@ def test_template_keys() -> None:
 def test_block_group_holds_both_shapes_and_their_text() -> None:
     elements = merge_blocks([BODY, BAR]) + [text([10.9, 74, 80, 84]), text([10.9, 90, 150, 100]), text([10, 200, 50, 210])]
     ids = ["body", "bar", "title", "content", "outside"]
-    assert block_groups(elements, ids, None) == [["body", "bar", "title", "content"]]
+    assert block_groups(elements, ids, None, set()) == [["body", "bar", "title", "content"]]
+
+
+def test_a_panel_drawn_on_a_block_joins_its_group_and_one_under_it_stays_under() -> None:
+    """A listing's white framed panel inside a block's body is drawn on the block, under the code
+    on it: out of the block's group (whose children cannot be restacked) it covered the code
+    (real_esi-dev1-slides, slide 22). A panel drawn before the block (one it stands on) is no
+    member, and the block's group goes back only as far as above it."""
+    under = shape([2, 60, 360, 110], "RECTANGLE", False, id="under")
+    listing = shape([12, 92, 300, 101], "RECTANGLE", False, id="listing", fill="#ffffff",
+                    outline={"color": "#000000", "width": 0.4})
+    rule = shape([12, 102, 300, 102.4], "RECTANGLE", False, id="rule", role="rule")
+    elements = merge_blocks([under, BODY, listing, rule, BAR, text([10.9, 74, 80, 84]), text([14, 93, 150, 100])])
+    ids = ["under", "body", "listing", "rule", "bar", "title", "code"]
+    assert block_groups(elements, ids, None, {"rule"}) == [["body", "listing", "bar", "title", "code"]]
+    assert block_groups(elements, ids, None, set()) == [["body", "listing", "rule", "bar", "title", "code"]]
+    blocks = [("blk0", ["body", "listing", "bar", "title", "code"])]
+    # (sent back last first: the block's group, then under it the panel it stands on)
+    assert block_stacking(elements, ids, blocks, {}) == ["blk0", "under"]
+    assert block_stacking(elements[1:], ids[1:], blocks, {}) == ["blk0"], "one block alone: one SEND_TO_BACK"
 
 
 def test_progress_bar_and_track_group() -> None:
