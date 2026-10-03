@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from typing import Literal, Protocol, TypedDict
 
 from . import bidi
-from .classify_model import ACCENTS, OUTLINE_MIN, Line, Paragraph, Rect, Span
+from .classify_model import ACCENTS, OUTLINE_MIN, Line, Paragraph, Rect, Span, column_x0
 from .fonts import MATH_ITALIC_RE, font_info
 from .ir import BulletShape, CardBox, Family, Label, Script
 from .ir import Paragraph as ParagraphJson
@@ -893,15 +893,19 @@ def code_pitch(spans: list[Span], x0: float) -> float | None:
     columns right of the block's left edge `x0`, and a span of n letters is between n - 1 and
     n columns wide (listings' columns=fixed centres each glyph in a column wider than it:
     LMMono's 0.525 em glyphs on 0.6 em columns, so a span's width over its letters is no
-    measure of the grid and "fib(n  - 1)" got two spaces). None when nothing fits."""
+    measure of the grid and "fib(n  - 1)" got two spaces). None when nothing fits. Spans extract
+    found on a column grid in a proportional face (`Span.grid`) say their pitch."""
     mono = [s for s in spans if s.info.family == "mono" and s.text.strip()]
     if not mono:
         return None
+    pitches = [s.grid[0] for s in mono if s.grid is not None]
+    if len(pitches) == len(mono):
+        return statistics.median(pitches)
     size = statistics.median(s.size for s in mono)
     scores = []
     for k in range(80, 161):  # 0.40 to 0.80 em
         p = k * 0.005 * size
-        grid = sum(abs((s.rect.x0 - x0) / p - round((s.rect.x0 - x0) / p)) <= 0.15 for s in mono)
+        grid = sum(abs((column_x0(s) - x0) / p - round((column_x0(s) - x0) / p)) <= 0.15 for s in mono)
         wide = sum(len(s.text) >= 2 and s.rect.w / len(s.text) - 0.02 <= p <= s.rect.w / (len(s.text) - 1) + 0.02
                    or len(s.text) == 1 and s.rect.w - 0.02 <= p for s in mono)
         scores.append((grid + wide, p))
@@ -914,8 +918,10 @@ def code_pitch(spans: list[Span], x0: float) -> float | None:
 
 def code_indent(par: Paragraph, box_x0: float, pitch: float | None) -> str:
     """Leading spaces that reproduce a code line's indentation: the block's column `pitch`
-    (`code_pitch`) per space, else (None) the line's monospace advance per char."""
-    return " " * max(0, round((par.x0 - box_x0) / (pitch or mono_advance(par.first.content))))
+    (`code_pitch`) per space, else (None) the line's monospace advance per char. (A span on a
+    column grid starts where its first column does, `column_x0`.)"""
+    x0 = min(column_x0(s) for s in par.first.content)
+    return " " * max(0, round((x0 - box_x0) / (pitch or mono_advance(par.first.content))))
 
 
 def body_size(raw: RawDoc) -> float:

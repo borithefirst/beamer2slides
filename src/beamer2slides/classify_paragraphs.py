@@ -6,7 +6,8 @@ import re
 from dataclasses import replace
 
 from .classify_model import (
-    ACCENTS, HOLE_PAD, Line, Paragraph, Rect, Span, extension_font, ir_bullet, new_paragraph, reads_rtl, union_all,
+    ACCENTS, HOLE_PAD, Line, Paragraph, Rect, Span, column_x0, extension_font, ir_bullet, new_paragraph, reads_rtl,
+    union_all,
 )
 from .classify_text import (
     COMPOSED, FRACTION_SLASH, NBSP, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
@@ -280,6 +281,11 @@ class ParagraphsMixin(LinesMixin):
             # A right-to-left item starts at its right end, beside its bullet: its siblings'
             # edge is there, whatever its length makes of its middle.
             return "right"
+        if not line.bullet and is_code(line.content) and any(s.grid is not None for s in line.content):
+            # A line on a listing's column grid keeps its columns from the left, however long it
+            # is ('EQ -> a == b' happened to be centred). (A monospaced line alone may be a
+            # centred label: a Verbatim's in its frame.)
+            return "left"
         # (a neighbour as long, or centred itself, says nothing: stacked centred lines of a
         # title page, equation numbers; nor does a formula's limit under it)
         near = [l for p in neighbours if p.first is not line and abs(p.size - line.size) <= 1 for l in p.lines
@@ -373,7 +379,9 @@ class ParagraphsMixin(LinesMixin):
     def joins_box(self, box: list[Paragraph], par: Paragraph, blockers: list[Paragraph]) -> bool:
         last = box[-1]
         head = box[0]
-        if par.role != head.role or par.align != head.align:
+        code = is_code(par.spans) and not par.bullet
+        # (a listing's line alone may be centred by its length: its box's lines are left-aligned)
+        if par.role != head.role or par.align != head.align and not (code and all(is_code(p.spans) and not p.bullet for p in box)):
             return False
         gap = par.first.baseline - last.last.baseline
         if par.first.code_number or head.first.code_number:
@@ -385,7 +393,6 @@ class ParagraphsMixin(LinesMixin):
         if panel != self.panel_of(head.rect):
             return False
         box_rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
-        code = is_code(par.spans) and not par.bullet
         if code != all(is_code(p.spans) and not p.bullet for p in box):
             return False  # code and the prose around it are different boxes (a code box keeps its columns)
         if code and panel is not None and gap > 0 and par.rect.x0 < box_rect.x1 and box_rect.x0 < par.rect.x1:
@@ -396,9 +403,12 @@ class ParagraphsMixin(LinesMixin):
             return not any(b.rect.intersects(between) for b in blockers)
         if not 0 < gap <= 2.6 * max(par.size, last.size):
             return False
+        def grid_code(p: Paragraph) -> bool:
+            """(a listing on a column grid in a proportional face, as Bera Sans's 1.45 em lines)"""
+            return any(s.grid is not None for s in p.spans) and any(s.grid is not None for s in last.spans)
         if code:
             # Code block: indentation varies freely, lines follow at normal pitch.
-            return par.rect.x0 >= box_rect.x0 - 1.5 and gap <= 1.35 * par.size
+            return par.rect.x0 >= box_rect.x0 - 1.5 and gap <= (1.5 if grid_code(par) else 1.35) * par.size
         if par.align == "center":
             if abs(par.rect.cx - box_rect.cx) > 2:
                 return False
@@ -433,6 +443,10 @@ class ParagraphsMixin(LinesMixin):
                     break
             else:
                 boxes.append([par])
+        for box in boxes:
+            if len(box) > 1 and all(is_code(p.spans) and not p.bullet for p in box):
+                for p in box:
+                    p.align = "left"  # (a listing keeps its columns from its left edge)
         for box in boxes:
             # (a right-to-left list nests leftwards: its level is how far its bullet's right
             # edge stands in from the list's)
@@ -470,7 +484,7 @@ class ParagraphsMixin(LinesMixin):
             room = max(widest + 0.5 * p.size, self.free_width(p) - 0.5 * p.size)
             return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0], False) <= room
                        for a, b in zip(p.lines, p.lines[1:]))
-        runs = [self.runs(p, code_indent(p, rect.x0, pitch) if code else "", unbalanced(p), pitch, rect.x0) for p in box]
+        runs = [self.runs(p, code_indent(p, rect.x0, pitch) if code else "", unbalanced(p), pitch) for p in box]
         # (said only where it is known, on a left-aligned wrapped paragraph: line_starts)
         starts = [line_starts(p.lines, r) if p.align == "left" and not code and not p.direction else None
                   for p, r in zip(box, runs)]
@@ -515,10 +529,10 @@ class ParagraphsMixin(LinesMixin):
         }
 
     @staticmethod
-    def runs(par: Paragraph, indent: str, soft_breaks: bool, pitch: float | None, x_ref: float) -> list[Run]:
+    def runs(par: Paragraph, indent: str, soft_breaks: bool, pitch: float | None) -> list[Run]:
         """`indent`: spaces a code line starts with (`code_indent`, else ""); `soft_breaks`: its
-        lines keep their breaks (a title's); `pitch`, `x_ref`: a code block's column grid
-        (`code_pitch`), which its spaces keep, else None and 0."""
+        lines keep their breaks (a title's); `pitch`: a code block's column pitch (`code_pitch`),
+        which its spaces keep, else None."""
         runs: list[Run] = []
         prev: Span | None = None
         hole_x1 = 0.0
@@ -642,8 +656,12 @@ class ParagraphsMixin(LinesMixin):
                             # In a code block the spaces are the columns between where the span
                             # before ends and this one starts (listings' columns=fixed sets
                             # tokens a few tenths of a column apart with no space between).
-                            cols = round((span.rect.x0 - x_ref) / pitch) - round((prev.rect.x0 - x_ref) / pitch)
-                            runs[-1]["text"] += " " * max(0, cols - len(prev.text))
+                            # Counted from where the span before ends, not from the block's edge:
+                            # a face a little narrower than the grid (minted's LMMono10 italic
+                            # comments at 0.525 em among LMMono8's 0.531) drifts a column over a
+                            # line and lost a space ("devicesreadiness", "val =>console").
+                            end = column_x0(prev) + len(prev.text) * pitch if prev.grid is not None else prev.rect.x1
+                            runs[-1]["text"] += " " * max(0, round((column_x0(span) - end) / pitch))
                             sep = ""
                         elif sep and mono:
                             # (a one-letter span's own box is no measure of the advance)

@@ -459,7 +459,8 @@ class GraphicsMixin(TablesMixin):
             if sum(tiles[i][1].w * tiles[i][1].h for i in members) < 0.97 * box.w * box.h or box.w < 0.25 * self.W:
                 continue  # not one box (an L, a staircase of bars)
             inside = [s for r, s in spans if box.contains(r.cx, r.cy)]
-            code = bool(inside) and all(font_info(s["font"]).family == "mono" for s in inside)
+            # (code: monospaced, or on a column grid in a proportional face, extract.column_grid)
+            code = bool(inside) and all(font_info(s["font"]).family == "mono" or "columns" in s for s in inside)
             first = tiles[min(members)][0]
             frame = self.frame_of(box, first["fill"], drawings, partial=code)
             # (a stack is one panel when it is framed, or when what it holds is code: the rows of
@@ -528,7 +529,8 @@ class GraphicsMixin(TablesMixin):
             if len(group) < 4 or box.w < 0.25 * self.W or box.h < 6:
                 continue
             inside = [s for r, s in spans if box.contains(r.cx, r.cy)]
-            if not inside or letters(s for s in inside if font_info(s["font"]).family == "mono") < 0.9 * letters(inside):
+            code = [s for s in inside if font_info(s["font"]).family == "mono" or "columns" in s]
+            if not inside or letters(code) < 0.9 * letters(inside):
                 continue  # (an \fbox around prose is a table's cell, see table_from)
             frame = self.frame_of(box, None, group, partial=False)
             if frame is None:

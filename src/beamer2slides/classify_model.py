@@ -128,16 +128,26 @@ class Span:
     pad_right: bool
     visual: str | None     # the text as the page shows it, left to right (bidi: RTL lines)
     reading: "Reading | None"  # on a right-to-left line (read_lines)
+    # (pitch, x of its first column's left edge) of a line set on a column grid in a proportional
+    # face (raw `columns`, `extract.column_grid`): code, its family read as "mono" (`spans`)
+    grid: tuple[float, float] | None
 
 
 def new_span(*, id: str, text: str, font: str, size: float, color: str, rect: Rect, baseline: float,
              horizontal: bool, info: FontInfo, link: str | None, drawn: bool, visual: str | None) -> Span:
     """A span as the page gives it, before the graphics around it are read: no underline, strike or
     highlight yet (`text_decorations`: `underline`, `strike`, `highlight`, `decor_to`, `pad_left`,
-    `pad_right`), and not yet read in its line's order (`read_lines`: `reading`)."""
+    `pad_right`), not yet read in its line's order (`read_lines`: `reading`), on no column grid
+    (`PageClassifier.spans` sets `grid` from the raw span)."""
     return Span(id=id, text=text, font=font, size=size, color=color, rect=rect, baseline=baseline,
                 horizontal=horizontal, info=info, link=link, underline=False, strike=False, highlight=None,
-                drawn=drawn, decor_to=None, pad_left=False, pad_right=False, visual=visual, reading=None)
+                drawn=drawn, decor_to=None, pad_left=False, pad_right=False, visual=visual, reading=None, grid=None)
+
+
+def column_x0(span: Span) -> float:
+    """Where a code span's first column starts: its grid's when it has one, else its own left edge
+    (a monospaced face's glyphs fill their columns)."""
+    return span.grid[1] if span.grid is not None else span.rect.x0
 
 
 Reading = tuple[int, int, int, float]

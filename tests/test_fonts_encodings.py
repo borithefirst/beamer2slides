@@ -145,7 +145,7 @@ def runs_of(raw_spans: list[RawSpan]) -> list[Run]:
     page = PageClassifier({"index": 0, "label": "1", "size": [364, 273], "spans": raw_spans, "images": [],
                            "drawings": [], "links": []}, 10)
     line = new_line(page.spans())
-    return PageClassifier.runs(new_paragraph([line], align="left", reason=None), "", False, None, 0.0)
+    return PageClassifier.runs(new_paragraph([line], align="left", reason=None), "", False, None)
 
 
 def test_page_spans_compose_accents_and_ts1_symbols():

@@ -60,6 +60,9 @@ class _RawSpanKeys(TypedDict):
 class RawSpan(_RawSpanKeys, total=False):
     """A run of glyphs on one line in one font, size and colour, split at word gaps."""
     marks: list[RawMark]
+    columns: list[float]
+    """[pitch, x of its first column's left edge] of a line set on a column grid (listings'
+    columns=fixed in a proportional face: `extract.column_grid`)."""
 
 
 class _RawImageKeys(TypedDict):
@@ -276,6 +279,8 @@ def parse_span(v: Json, where: str) -> RawSpan:
     }
     if "marks" in o:
         span["marks"] = _list(o["marks"], f"{where}.marks", parse_mark)
+    if "columns" in o:
+        span["columns"] = _point(o["columns"], f"{where}.columns")
     return span
 
 

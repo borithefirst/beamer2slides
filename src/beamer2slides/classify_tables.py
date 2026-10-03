@@ -1,5 +1,6 @@
 """PageClassifier's tables: ruled, shaded and rule-less grids of text that become native tables."""
 
+import re
 import statistics
 from dataclasses import dataclass, replace
 
@@ -127,7 +128,7 @@ class TablesMixin(PageState):
                 any(box.contains_rect(b, tol=0.5) for b in self.bars):  # big operators, fractions: keep the picture
             return None
         rows = TableRows(spans, vertical)
-        if any(i - 1 in rows.between for i in rows.between):
+        if any(i - 1 in rows.between for i in rows.between) or numbered_listing(rows.rows):
             return None
         size = rows.size
         rows.find_wrapped()
@@ -359,6 +360,18 @@ class TablesMixin(PageState):
                 "merges": [], "rules": [], "borders": [], "spans": [s.id for s in spans],
             })
         return tables
+
+
+LISTING_NUMBER = re.compile(r"\d{1,3}:")
+
+
+def numbered_listing(rows: list[list[Span]]) -> bool:
+    """An algorithm between rules (algpseudocode's line numbers "1:", "2:", ... left of every
+    line, the lines indented by nesting) is no table: its cells came out centred, the numbers a
+    column of their own and the nesting lost (defense, slide 35). It stays a picture."""
+    numbers = [int(text[:-1]) for row in rows
+               for text in [min(row, key=lambda s: s.rect.x0).text.strip()] if LISTING_NUMBER.fullmatch(text)]
+    return len(numbers) >= 3 and numbers == list(range(numbers[0], numbers[0] + len(numbers)))
 
 
 class TableRows:

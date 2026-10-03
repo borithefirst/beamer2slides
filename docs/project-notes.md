@@ -4785,3 +4785,21 @@ bullet) right of beamer's on every one, hence a gap of 0.28 em, not the probe bo
 `CHAR_BULLETS = {"triangle": ("►", 0.68, 0.28)}`. They also sit 0.9 PDF pt lower than beamer's:
 where Slides puts a bullet on its line is its own (no request moves it). text_overlap 0.619
 against 0.618 before.
+
+## Code listings in proportional faces (real-deck review, 2026-10-03)
+The largest code family of the real-deck review (talks 18 findings, frisem, esi, zds, rxjs,
+talksx, defense): listings' columns=fixed in a proportional face (Bera Sans, CM sans) puts each
+token of n characters in a box n columns wide and spreads its glyphs evenly over it, a different
+glue per token, so neither word spaces nor tracking read it: words joined as prose came out
+15-30% short, their columns gone, sometimes centred or rewrapped. `extract.column_grid` finds a
+page's column pitch from its evenly spread tokens (and from lines whose stretches all sit on one
+phase), raw spans on it carry `columns` [pitch, first column edge], and classify reads them as
+mono code: spaces and indentation from the grid (`column_x0`, `code_pitch`), lines joined across
+a comment column (`CODE_GAP_EM`, `one_grid`), left-aligned. Also: spaces in code counted from
+where the previous span ends, not from the block's edge (LMMono10 italic at 0.525 em among
+LMMono8's 0.531 drifted a column: "devicesreadiness"); NimbusMonL / TeX Gyre Cursor are mono;
+an algpseudocode listing between rules ("1:", "2:" ...) is no table (`numbered_listing`), it
+stays a picture. Live on talks: columns kept (`::` aligned, `->` in place), text_overlap 0.530
+against 0.527; the grid lines come out 6-8% narrow, because Roboto Mono is sized as for CMTT's
+0.525 em columns while a grid's pitch is its own (Bera Sans's about 0.56): to do, the pitch to
+emit's mono factor. Open from the family: esi 22, words under a grouped panel (emit's z-order).

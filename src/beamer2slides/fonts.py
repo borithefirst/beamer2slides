@@ -132,7 +132,11 @@ SANS_FAMILIES = (
     "linbiolinum", "meiryo", "malgun", "pingfang", "simhei", "microsoftyahei", "hiraginokaku",
     "hiraginosans", "sourcehansans",
 )
-MONO_FAMILIES = ("menlo", "monaco", "lucidaconsole", "andale", "cousine", "inconsolata", "ptmono", "sfmono")
+# (nimbusmon: URW's Courier, NimbusMonL / NimbusMonoPS / NimbusMono; texgyrecursor: TeX Gyre's)
+MONO_FAMILIES = (
+    "menlo", "monaco", "lucidaconsole", "andale", "cousine", "inconsolata", "ptmono", "sfmono",
+    "nimbusmon", "texgyrecursor",
+)
 # TeX's own typewriter font names: t1xtt, txtt, newtxtt, pxtt (CMTT-like, 0.525 em)
 TEX_TT_RE = re.compile(r"(T1X|NEWTX|TX|PX)TT[A-Z]*\d*")
 # The libertine package's Type 1 names: LinLibertine / LinBiolinum, a variant (Display, Mono,

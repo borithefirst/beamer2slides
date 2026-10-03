@@ -18,6 +18,7 @@ from .fonts import font_info
 LINE_LABEL_RE = re.compile(r"^(\d{1,3}:|\[\d{1,3}\])$")
 NUMBERING_RE = re.compile(r"^\(?(\d{1,2}(\.\d{1,2}){0,3}|[a-z]|[ivx]{1,4})[.)]?$")  # an item's number: 2.1, (b), iv.
 GUTTER_PROSE_EM = 8.0  # a column's line beside a gutter is wider than this; ticks and table cells are not
+CODE_GAP_EM = 6.0  # monospaced words this far apart on a row are one code line, aligned by spaces
 DELIMITERS = set("|‖∣∥()[]{}⟨⟩⌊⌋⌈⌉")
 
 
@@ -51,6 +52,12 @@ class LinesMixin(GraphicsMixin):
                             visual=visual)
             if s.get("smallcaps"):  # OpenType small caps, found from glyph ids (extract.small_caps_spans)
                 span.info = replace(span.info, smallcaps=True)
+            columns = s.get("columns")
+            if columns is not None:
+                # listings' columns=fixed in a proportional face (extract.column_grid): code on a
+                # column grid, set in a monospaced face as a monospaced listing is
+                span.grid = (columns[0], columns[1])
+                span.info = replace(span.info, family="mono")
             out.append(span)
         return out
 
@@ -77,6 +84,13 @@ class LinesMixin(GraphicsMixin):
         # Likewise words on different boxes of the theme's artwork: a \logo in a sidebar theme's
         # corner square is not the first word of the frame title in the headline beside it.
         artwork = [self.artwork_of(s.rect) for s in spans]
+
+        def one_grid(a: Span, b: Span) -> bool:
+            """Spans on one listing's column grid (extract.column_grid): one pitch, whole columns apart."""
+            if a.grid is None or b.grid is None or abs(a.grid[0] - b.grid[0]) > 0.01 * a.grid[0]:
+                return False
+            cols = (b.grid[1] - a.grid[1]) / a.grid[0]
+            return abs(cols - round(cols)) <= 0.15
         for i in range(n):
             a = spans[i]
             pi = panel[i]
@@ -118,6 +132,13 @@ class LinesMixin(GraphicsMixin):
                 elif same_row and pi is not None and pi in listing and pi == panel[j] and gap <= 0.6 * self.panels[pi].bbox.w \
                         and not any(s.info.family != "mono" and re.fullmatch(r"\d{1,4}", s.text.strip()) for s in (a, b)):
                     parent[find(i)] = find(j)  # a listing's line: a comment far right of its code is spaces
+                elif same_row and a.info.family == "mono" and b.info.family == "mono" and abs(a.size - b.size) <= 0.05 * big \
+                        and (gap <= CODE_GAP_EM * big or one_grid(a, b) and gap <= 0.6 * self.W) \
+                        and artwork[i] == artwork[j] and panel[i] == panel[j] and not self.gutter(spans, a, b, big):
+                    # code aligned in columns (Haskell's guards "| n <= 1      = 1", a comment
+                    # column on one listing's grid): its spaces, unless the gap is a gutter
+                    # between two listings side by side
+                    parent[find(i)] = find(j)
         groups: dict[int, list[Span]] = {}
         for i, s in enumerate(spans):
             groups.setdefault(find(i), []).append(s)

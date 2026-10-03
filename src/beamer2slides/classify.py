@@ -184,7 +184,7 @@ class PageClassifier(ReasonsMixin):
                                     "text_x0": round(line.x0, 2),
                                     "lines": [{"baseline": round(line.baseline, 2), "x0": round(line.x0, 2),
                                                "x1": round(line.x1, 2)}],
-                                    "runs": self.runs(par, "", False, None, 0.0),
+                                    "runs": self.runs(par, "", False, None),
                                     **({"direction": direction} if direction else {})}],
                     "spans": [s.id for s in line.spans],
                 })

@@ -257,6 +257,312 @@ def narrow_spaces(chars: list[Char]) -> set[int]:
     return out
 
 
+# listings' columns=fixed (its default) in a proportional face - the sans or serif a deck's
+# \lstset leaves basicstyle in, Bera Sans, CM sans - puts each token of n characters in a box n
+# columns wide and spreads its glyphs evenly over it: the same glue before, between and after
+# them, a different glue per token ('data' 0.05 em, 'Stream' 0.08 em on one line), so neither
+# word spaces nor tracking read it (r: 'f o r a l l', 's t e p p e r', 'Scanner =new'), and the
+# words joined as prose came out 15-30% short with their columns gone. Such a line is a grid: a
+# token's box is w + 2g wide (w from its first glyph's origin to its last glyph's advance, g the
+# glue between its glyphs), which is n columns, and every stretch of touching tokens sits
+# centred over its own columns. `column_grid` finds the pitch from the page's evenly spread
+# tokens and the lines whose stretches all sit on it; `spans` joins a stretch's glyphs and splits
+# at an empty column, and the raw span says its grid (`columns`), from which classify counts the
+# spaces and treats the line as code.
+GRID_EM = (0.4, 0.85)    # a column pitch, in em of the glyphs
+GRID_GLUE = 0.012        # em: the spread of a token's glue (an inexact advance aside)
+GRID_TOUCH = 0.004       # em: glyphs of a token on a grid stand at least this far apart (bold 0.009)
+GRID_AGREE = 0.012       # the tokens' pitches agree within this share
+GRID_TOKENS = 3          # tokens of three glyphs or more agreeing on a page's pitch
+GRID_SPACE = 0.8         # in columns: a gap this wide holds an empty column
+GRID_FIT = 0.12          # in columns: how far a stretch may sit off its line's grid
+GRID_BOX = 0.04          # in columns: how far a token's box may be off whole columns
+GRID_SQUEEZE = 0.001     # em: a squeezed token's glyphs overlap by one glue at least this deep
+GRID_STRETCHES = 5       # stretches on the grid that make a line code by themselves
+GRID_NEAR = 3.0          # in line sizes: a short line beside a grid line, on its phase, is code
+GRID_OUTLIER = 4         # stretches a line beside a grid line needs to have one off its phase
+
+
+@dataclass(frozen=True, kw_only=True)
+class Columns:
+    """A line's column grid: the pitch (pt) and the x of one column edge."""
+    pitch: float
+    edge: float
+
+    def cell(self, x: float) -> float:
+        """The column edge nearest `x`."""
+        return self.edge + round((x - self.edge) / self.pitch) * self.pitch
+
+
+def _grid_lines(chars: list[Char]) -> list[list[int]]:
+    """Indices of level text drawn left to right on one baseline in one size, in content order
+    (a comment far right of its code included): the lines a grid is looked for on."""
+    lines: list[list[int]] = []
+    for k, ch in enumerate(chars):
+        if ch.synthetic or not ch.c.strip() or ch.dir != (1.0, 0.0) or combining_mark(ch.c):
+            continue
+        if lines:
+            prev = chars[lines[-1][-1]]
+            # (listings lowers an asterisk 0.2 em in Bera Sans: it is in its column all the same)
+            if abs(ch.origin[1] - prev.origin[1]) <= 0.25 * ch.size and abs(ch.size - prev.size) <= 0.02 * ch.size \
+                    and ch.origin[0] >= prev.origin[0] + prev.advance - 0.5 * ch.size:
+                lines[-1].append(k)
+                continue
+        lines.append([k])
+    return lines
+
+
+def _tokens(chars: list[Char], line: list[int]) -> list[tuple[float, float]]:
+    """(pitch, glue) in pt of each evenly spread token of GRID_TOKENS or more glyphs of one text
+    font on a line: its glyphs apart by one glue (GRID_GLUE; one gap may be off where a glyph's
+    advance is not the one TeX set), its pitch its box w + 2g over its glyphs."""
+    out: list[tuple[float, float]] = []
+
+    def gap(a: Char, b: Char) -> float:
+        return b.origin[0] - a.origin[0] - a.advance
+
+    run: list[Char] = []
+
+    def close() -> None:
+        if len(run) >= GRID_TOKENS:
+            gaps = sorted(gap(a, b) for a, b in zip(run, run[1:]))
+            g = gaps[len(gaps) // 2]
+            size = run[0].size
+            even = sum(abs(x - g) <= GRID_GLUE * size for x in gaps)
+            if g >= GRID_TOUCH * size and even >= max(2, len(gaps) - 1):
+                w = run[-1].origin[0] + run[-1].advance - run[0].origin[0]
+                out.append(((w + 2 * g) / len(run), g))
+        run.clear()
+
+    for k in line:
+        ch = chars[k]
+        if font_info(ch.font).family not in ("sans", "serif"):
+            close()
+            continue
+        if run and (ch.font != run[-1].font or not GRID_TOUCH * ch.size <= gap(run[-1], ch) <= 0.45 * ch.size
+                    or len(run) >= 2 and abs(gap(run[-1], ch) - gap(run[0], run[1])) > GRID_GLUE * ch.size):
+            close()  # (another token's glue: the next token, touching this one, starts here)
+        run.append(ch)
+    close()
+    return out
+
+
+def _empty_column(a: Char, b: Char, pitch: float) -> bool:
+    """Whether an empty column (a space) lies between two glyphs on a grid (GRID_SPACE): the gap
+    between them, and what of a glyph wider than its column ('==') reaches out of it."""
+    reach = max(0.0, a.advance - pitch) / 2 + max(0.0, b.advance - pitch) / 2
+    return b.origin[0] - a.origin[0] - a.advance + reach >= GRID_SPACE * pitch
+
+
+def _stretches(chars: list[Char], line: list[int], pitch: float) -> list[list[int]]:
+    """A line's glyphs in stretches split at empty columns."""
+    out: list[list[int]] = []
+    for k in line:
+        if out and not _empty_column(chars[out[-1][-1]], chars[k], pitch):
+            out[-1].append(k)
+            continue
+        out.append([k])
+    return out
+
+
+@dataclass(frozen=True, kw_only=True)
+class Phase:
+    """Where a stretch's first column starts, in columns mod 1: `sure` read off a token at one
+    end of it, else the `maybe`s it could be (see `_phase`)."""
+    sure: float | None
+    maybe: tuple[float, ...]
+
+
+def _phase(chars: list[Char], stretch: list[int], pitch: float) -> Phase:
+    """A stretch's phase. A token's glyphs stand one glue apart and that glue is also before its
+    first and after its last glyph, so a stretch opening (or ending) on three glyphs or more one
+    glue apart starts (ends) a glue before (after) them, and a lone glyph is centred in its
+    column. Otherwise its tokens' glues are unknown: it sits centred over its columns, or starts
+    or ends with a glyph alone in its column ('"Content-Type:', each quote its own token)."""
+    first, last = chars[stretch[0]], chars[stretch[-1]]
+    size = first.size
+    glyphs = [chars[k] for k in stretch]
+    gaps = [b.origin[0] - a.origin[0] - a.advance for a, b in zip(glyphs, glyphs[1:])]
+
+    def at(x: float) -> float:
+        return (x / pitch) % 1.0
+
+    def token(run: list[Char], glue: list[float]) -> float | None:
+        """The glue of the token `run` opens with, when its first glyphs - three or more, one
+        glue apart - fill whole columns with that glue around them (single glyphs in their own
+        columns can stand evenly too: '"f"')."""
+        m = 1
+        while m < len(glue) and glue[m] >= 0 and abs(glue[m] - glue[0]) <= GRID_GLUE * size:
+            m += 1
+        for k in range(m + 1, 2, -1):  # (k glyphs: the token may end before the even run does)
+            w = max(c.origin[0] + c.advance for c in run[:k]) - min(c.origin[0] for c in run[:k])
+            if glue[0] >= 0 and abs(w + 2 * glue[0] - k * pitch) <= GRID_BOX * pitch:
+                return glue[0]
+        return None
+    n = len(stretch)
+    if n == 1:
+        return Phase(sure=at(first.origin[0] + first.advance / 2 - pitch / 2), maybe=())
+    g = token(glyphs, gaps) if n >= 3 else None
+    if g is not None:
+        return Phase(sure=at(first.origin[0] - g), maybe=())
+    g = token(glyphs[::-1], gaps[::-1]) if n >= 3 else None
+    if g is not None:
+        return Phase(sure=at(last.origin[0] + last.advance + g), maybe=())
+    centre = (first.origin[0] + last.origin[0] + last.advance) / 2
+    return Phase(sure=None, maybe=(at(centre - n * pitch / 2), at(first.origin[0] + first.advance / 2 - pitch / 2),
+                                   at(last.origin[0] + last.advance / 2 + pitch / 2)))
+
+
+def _touching(chars: list[Char], stretch: list[int], pitch: float) -> bool:
+    """Whether glyphs of a stretch touch as a word's do. Not those of a glyph wider than its
+    column ('==', 'm' of 'nom'), nor a token squeezed into fewer columns than its glyphs need:
+    one glue apart all the same, that glue below nothing ('nom' -0.012 pt; a word's letters
+    touch at 0 or kern by a glyph's own amount)."""
+    size = chars[stretch[0]].size
+    glyphs = [chars[k] for k in stretch]
+    gaps = [b.origin[0] - a.origin[0] - a.advance for a, b in zip(glyphs, glyphs[1:])]
+    for i, g in enumerate(gaps):
+        if g >= GRID_TOUCH * size or max(glyphs[i].advance, glyphs[i + 1].advance) >= 0.95 * pitch:
+            continue
+        lo = hi = i
+        while lo > 0 and abs(gaps[lo - 1] - g) <= GRID_SQUEEZE * size:
+            lo -= 1
+        while hi + 1 < len(gaps) and abs(gaps[hi + 1] - g) <= GRID_SQUEEZE * size:
+            hi += 1
+        squeezed = g <= -GRID_SQUEEZE * size and hi > lo \
+            and any(c.advance >= 0.95 * pitch for c in glyphs[lo:hi + 2])
+        if not squeezed:
+            return True
+    return False
+
+
+def _near(p: float, at: float) -> bool:
+    return min((p - at) % 1.0, (at - p) % 1.0) <= GRID_FIT
+
+
+def _on_phase(phases: Sequence[float], at: float) -> bool:
+    return all(_near(p, at) for p in phases)
+
+
+def _fits(phase: Phase, at: float) -> bool:
+    """Whether a stretch can sit on a line's phase `at`."""
+    return _near(phase.sure, at) if phase.sure is not None else any(_near(m, at) for m in phase.maybe)
+
+
+def _common_phase(phases: Sequence[Phase]) -> tuple[float, int]:
+    """The phase most stretches share (the circular mean of the sure readings near the one most
+    others are near, else of the centred readings) and how many stretches are off it by GRID_FIT."""
+    sure = [p.sure for p in phases if p.sure is not None] or [p.maybe[0] for p in phases]
+    ref = max(sure, key=lambda r: sum(_fits(p, r) for p in phases))
+    near = [p for p in sure if _near(p, ref)]
+    at = math.atan2(sum(math.sin(2 * math.pi * p) for p in near),
+                    sum(math.cos(2 * math.pi * p) for p in near)) / (2 * math.pi) % 1.0
+    return at, sum(not _fits(p, at) for p in phases)
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Read:
+    """A line read on a pitch: its stretches (a leading line number off the grid left out,
+    `numbered`), their phase, how many are read surely on it and how many are off it, and
+    whether one of its tokens is spread at the pitch."""
+    parts: list[list[int]]
+    phase: float
+    surely: int
+    off: int
+    numbered: bool
+    at_pitch: bool
+
+
+def column_grid(chars: list[Char]) -> dict[int, Columns]:
+    """Character index -> its line's column grid, for the lines set on one (listings'
+    columns=fixed in a proportional face: GRID_EM, above). A page's pitch, per size, is the one
+    GRID_TOKENS evenly spread tokens agree on (GRID_AGREE) - with glues of their own: equal glues
+    everywhere are letterspacing (\\textls), not a grid; fewer tokens' pitch holds where a line
+    has GRID_STRETCHES stretches read surely on it ('data [] a = [] | a : [a]'), or is numbered
+    off the grid and spread at the pitch ('1  import java.util.Arrays;'). A line is on it
+    when every stretch sits on one phase (GRID_FIT, `_phase`) and no stretch's glyphs touch, and
+    it has a token at the pitch or GRID_STRETCHES stretches read surely; a shorter line within
+    GRID_NEAR of such a line, on its phase, is too (a lone '}'). A leading number off the grid (a
+    listing's line number) stays out.
+    Monospaced lines are left to the monospaced path (MONO_JOIN_GAP, classify's code_pitch)."""
+    lines = [l for l in _grid_lines(chars)
+             if sum(font_info(chars[k].font).family in ("sans", "serif") for k in l) >= 0.5 * len(l)]
+    by_size: dict[float, list[tuple[float, float]]] = {}
+    tokens = {id(l): _tokens(chars, l) for l in lines}
+    for l in lines:
+        size = chars[l[0]].size
+        by_size.setdefault(round(size, 1), []).extend(
+            (p, g) for p, g in tokens[id(l)] if GRID_EM[0] * size <= p <= GRID_EM[1] * size)
+    pitches: dict[float, float] = {}
+    weak: dict[float, list[float]] = {}  # (pitches fewer tokens say: taken where a line proves one)
+    for key, found in by_size.items():
+        found.sort()
+        best: list[tuple[float, float]] = []
+        for i in range(len(found)):
+            group = [t for t in found[i:] if t[0] <= found[i][0] * (1 + GRID_AGREE)]
+            if len(group) > len(best):
+                best = group
+        glues = [g for _, g in best]
+        if len(best) >= GRID_TOKENS and max(glues) - min(glues) > GRID_GLUE * key:
+            pitches[key] = best[len(best) // 2][0]
+        elif 0 < len(best) < GRID_TOKENS:
+            weak[key] = [p for p, _ in found]
+    if not pitches and not weak:
+        return {}
+
+    def on_grid(l: list[int], pitch: float) -> _Read | None:
+        parts = _stretches(chars, l, pitch)
+        numbered = False
+        if len(parts) > 1 and all(chars[k].c.isdigit() for k in parts[0]):
+            rest, off = _common_phase([_phase(chars, s, pitch) for s in parts[1:]])
+            if not off and not _fits(_phase(chars, parts[0], pitch), rest):
+                parts = parts[1:]  # a line number set right of its own box, off the grid
+                numbered = True
+        if any(_touching(chars, s, pitch) for s in parts):
+            return None  # touching glyphs: words, not a grid
+        phases = [_phase(chars, s, pitch) for s in parts]
+        at, off = _common_phase(phases)
+        return _Read(parts=parts, phase=at, surely=sum(p.sure is not None and _near(p.sure, at) for p in phases),
+                     off=off, numbered=numbered,
+                     at_pitch=any(abs(p - pitch) <= GRID_AGREE * pitch for p, _ in tokens[id(l)]))
+
+    for l in lines:
+        key = round(chars[l[0]].size, 1)
+        if key in pitches:
+            continue
+        for candidate in weak.get(key, []):
+            read = on_grid(l, candidate)
+            if read is not None and not read.off and (
+                    read.surely >= GRID_STRETCHES or read.numbered and read.at_pitch and len(read.parts) >= 2):
+                # (a listing of short tokens: a long line on it proves the pitch, or a numbered one)
+                pitches[key] = candidate
+                break
+    found_lines: list[tuple[list[int], Columns, bool, float]] = []  # (glyphs, grid, sure, baseline)
+    for l in lines:
+        pitch = pitches.get(round(chars[l[0]].size, 1))
+        if pitch is None:
+            continue
+        read = on_grid(l, pitch)
+        if read is None or read.off > (1 if len(read.parts) >= GRID_OUTLIER else 0):
+            continue
+        # (one stretch off a long line's phase - listings spreading a string's escape its own
+        # way - is on the grid beside a line that surely is)
+        sure = not read.off and (read.surely >= GRID_STRETCHES or read.at_pitch)
+        found_lines.append(([k for s in read.parts for k in s], Columns(pitch=pitch, edge=read.phase * pitch), sure,
+                            chars[read.parts[0][0]].origin[1]))
+    taken = [f for f in found_lines if f[2]]
+    rest = [f for f in found_lines if not f[2]]
+    while rest:  # (line by line out from the sure ones: a listing's '}' under a short line)
+        near = [f for f in rest if any(
+            abs(b - f[3]) <= GRID_NEAR * chars[f[0][0]].size and g.pitch == f[1].pitch
+            and _on_phase([(f[1].edge - g.edge) / g.pitch % 1.0], 0.0) for _, g, _, b in taken)]
+        if not near:
+            break
+        taken += near
+        rest = [f for f in rest if f not in near]
+    return {k: grid for glyphs, grid, _, _ in taken for k in glyphs}
+
+
 def _accent_overhang(page: Page, chars: list[Char]) -> list[Char]:
     """An accented italic letter's accent can reach past its advance (Calibri Italic's ì), and
     PDFium's loose box - the advance the text page gives - reaches to the ink: the word space
@@ -587,7 +893,8 @@ class PageSpan:
     """A run of glyphs on one line in one font, size and colour (`spans`): its text as drawn, the
     first glyph's style and origin, the box of its glyphs (combining marks left out), the glyphs
     (word spaces made by `spans` among them, `Char.synthetic`) and the B2S marks around it
-    (outermost first; none off an adopted page)."""
+    (outermost first; none off an adopted page). `columns`: (pitch, x of its first column's left
+    edge) when its line is set on a column grid (`column_grid`), else None."""
     text: str
     font: str
     size: float
@@ -598,6 +905,7 @@ class PageSpan:
     dir: tuple[float, float]
     chars: tuple[Char, ...]
     marks: Marks
+    columns: tuple[float, float] | None
 
 
 def shown_spans(page: Page) -> list[PageSpan]:
@@ -615,6 +923,7 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
     out: list[PageSpan] = []
     run: list[Char] = []
     x0, y0, x1, y1 = page.rect
+    run_grid: list[Columns] = []  # the column grid of the run's glyphs, when they are on one
 
     def mark_of(ch: Char) -> Marks:
         return marks.get(ch.obj, ())
@@ -631,10 +940,16 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
             by1 = max(ch.box[3] for ch in boxed)
             first = run[0]
             mark: Marks = next((mark_of(ch) for ch in run if not ch.synthetic), ())
+            columns = None
+            if run_grid:
+                # (the stretch sits centred over its columns: GRID_EM)
+                grid = run_grid[0]
+                columns = (grid.pitch, grid.cell((bx0 + bx1) / 2 - len(boxed) * grid.pitch / 2))
             out.append(PageSpan(text=text, font=first.font, size=first.size, color=first.color, alpha=first.alpha,
                                 origin=first.origin, bbox=(bx0, by0, bx1, by1), dir=first.dir, chars=tuple(run),
-                                marks=mark))
+                                marks=mark, columns=columns))
         run.clear()
+        run_grid.clear()
 
     # characters outside the page (e.g. the cut-off half of a notes-on-second-screen page)
     shown = [ch for ch in chars
@@ -643,6 +958,7 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
     shown = _italic_corrections(_accent_overhang(page, shown))
     tracks: dict[int, float] = {}
     tracked, narrow = tracked_gaps(shown, tracks), narrow_spaces(shown)
+    grid = column_grid(shown)
 
     def letter_space(at: Char, width: float) -> Char:
         """A no-break space `width` pt wide after the glyph `at` (TRACK_SPACED)."""
@@ -668,6 +984,24 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
                 prev = ch
                 continue
             last_mark = mark
+        on = grid.get(k)
+        if run_grid and on is None and combining_mark(ch.c):
+            run.append(ch)  # (over the letter before it, in its column)
+            continue
+        if run_grid and on is not run_grid[0] or on is not None and not run_grid:
+            flush()  # a grid line's glyphs are spans of their own
+        if on is not None:
+            # On a column grid (column_grid): a stretch's glyphs join, an empty column splits
+            # (classify counts the spaces from the columns), and so does a change of style.
+            if prev is not None and run:
+                style = (ch.font, round(ch.size, 3), ch.color, ch.alpha) != \
+                    (prev.font, round(prev.size, 3), prev.color, prev.alpha)
+                if style or _empty_column(prev, ch, on.pitch):
+                    flush()
+            run.append(ch)
+            run_grid[:] = [on]
+            prev = ch
+            continue
         if k in tracked and prev is not None and not combining_mark(ch.c):
             # letterspaced: a tracked gap joins, a word gap is a space (classify reads one between
             # spans); a wide tracking is a no-break space between letters, and one more at a word gap
@@ -873,6 +1207,8 @@ def extract_page(page: Page, label: str) -> RawPage:
         }
         if s.marks:
             span["marks"] = _marks_json(s.marks)
+        if s.columns is not None:
+            span["columns"] = _r(s.columns, 3)
         return span
 
     for s in spans(page, visibility, False, chars, marks):

@@ -260,7 +260,7 @@ def test_a_quad_before_a_graphic_in_the_words_stays_wide() -> None:
                                "drawings": [], "links": []}, 10)
         line = new_line(page.spans())
         line.holes = [[s for s in line.spans if s.font == "PZDR"]]
-        return [r["text"] for r in PageClassifier.runs(new_paragraph([line], align="left", reason=None), "", False, None, 0.0)]
+        return [r["text"] for r in PageClassifier.runs(new_paragraph([line], align="left", reason=None), "", False, None)]
 
     assert texts_around(18.6)[0] == "Questions? \u2003"   # a word space and a quad (1.33 em)
     assert texts_around(4.6)[0] == "Questions? "          # a word space

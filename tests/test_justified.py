@@ -208,7 +208,7 @@ def test_a_compound_longer_than_its_column_keeps_its_line_break() -> None:
     # Slides cannot fit and breaks in the middle ('Datenschutz-Folgenabsc / hätzung').
     def text(*lines: str) -> str:
         par = new_paragraph([new_line([span(t, 11.4, 100.0 + 11 * i, 9.0)]) for i, t in enumerate(lines)], align="left", reason=None)
-        return "".join(r["text"] for r in PageClassifier.runs(par, "", False, None, 0.0))
+        return "".join(r["text"] for r in PageClassifier.runs(par, "", False, None))
 
     assert text("Datenschutz-", "Folgenabschätzung") == "Datenschutz-\vFolgenabschätzung"
     assert text("Cases of Covid-", "19 rose in spring") == "Cases of Covid-19 rose in spring"  # (it fits: joined)
