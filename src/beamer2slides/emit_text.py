@@ -11,7 +11,7 @@ once through `emit_model`.
 import math
 from collections.abc import Callable, Mapping, Sequence
 from copy import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from .emit_metrics import (
@@ -23,7 +23,8 @@ from .emit_model import (
     json_number, number_box, number_box_of, run_of, set_text, text_of,
 )
 from .emit_widths import (
-    SCRIPT_SIZE, SMALL_CAPS_SIZE, paragraph_dict, runs_between, set_runs_of, slides_lines_of, slides_width_of,
+    SCRIPT_SIZE, SMALL_CAPS_SIZE, guessed_chars, paragraph_dict, runs_between, set_runs_of, slides_lines_of,
+    slides_width_of,
 )
 from .fonts import cjk_font, font_info, google_font
 from .google_types import (
@@ -603,6 +604,212 @@ def flowed_lines(p: SetParagraph, scale: float, fonts: FontMapper, right: float,
     return count
 
 
+@dataclass(frozen=True, kw_only=True)
+class Page:
+    """A slide's size (Slides pt), which every box emit writes is kept within where its words
+    allow (`on_page`)."""
+    width: float
+    height: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class Frame:
+    """A text box as `_text_requests` sizes it (Slides pt), with each paragraph's (JUSTIFIED,
+    indentEnd) (`paragraph_ends`) and the edge it is set against (`hugs_of`)."""
+    x: float
+    y: float
+    w: float
+    h: float
+    ends: tuple[tuple[bool, float], ...]
+    edges: tuple[Align, ...]
+
+
+# A character slides_width guesses (guessed_chars) may come out this much (em) wider than its guess.
+GUESSED_PAD_EM = 0.4
+# Past a run in a face nobody measured (a Google font the PDF uses itself, so its widths are the
+# PDF's up to kerning and rounding), room kept beyond its PDF extent: this share of it, at least
+# UNMEASURED_EM, as much as a guessed character's (a footline's lone page number in Fira Sans keeps
+# its left edge and its box ends at the page's, 09_metropolis_fira).
+UNMEASURED_PAD = 0.05
+UNMEASURED_EM = GUESSED_PAD_EM
+
+
+def on_page(f: Frame, paras: Sequence[SetParagraph], bottom: float | None, page: Page, scale: float,
+            fonts: FontMapper) -> Frame:
+    """A text box `f` brought within `page` as far as no word moves or wraps: Slides sets the
+    words from the box's left edge (PAD_X in) for left-aligned text, from its right edge for
+    right-aligned, from its middle for centred, so
+
+    * a box of left-aligned paragraphs gives up room past its words on the right: down to
+      `LINE_MARGIN` past the widest line as Slides sets it (`_reach`), keeping each paragraph's
+      own edge (its indentEnd shrinks by what the box does; a JUSTIFIED one gives up no more
+      than its indentEnd, its lines being set out to that edge);
+    * a box of right-aligned lines gives up room on the left, a box of centred lines the same on
+      both sides (its middle stays), down to `LINE_MARGIN` past its widest line;
+    * a top-aligned box (`bottom`: where its words end, None for one centred vertically) gives up
+      the room under them.
+
+    What it cannot give up stays: the insets beside words drawn at the page's edge, a box mixing
+    alignments, paragraphs nobody can measure. Slides breaks a line where it no longer fits, so
+    a narrower box keeps every line that fitted before, and joins none it had not."""
+    x, w, h, ends = f.x, f.w, f.h, list(f.ends)
+    edges: list[Align] = list(f.edges)
+    aligns = set(edges)
+    rtl = any(p.direction == "rtl" for p in paras)
+    if x + w > page.width and aligns == {"left"} and not rtl:
+        text_right = x + w - PAD_X
+        cut = x + w - page.width
+        for p, (justify, end) in zip(paras, ends):
+            allow = end
+            reach = None if justify else _reach(p, scale, fonts)
+            if reach is not None:
+                allow = max(end, text_right - reach - LINE_MARGIN)
+            cut = min(cut, allow)
+        if cut > 0:
+            w -= cut
+            ends = [(justify, max(0.0, end - cut)) for justify, end in ends]
+        if x + w > page.width + 0.01:
+            flush = flush_right(paras, w, page, scale, fonts)
+            if flush is not None:
+                x, w = flush
+                edges = ["right" for _ in paras]
+                ends = [(False, 0.0)] * len(paras)
+    elif (x < 0 or x + w > page.width) and aligns <= {"center", "right"} and len(aligns) == 1 and not rtl and \
+            all(p.bullet is None and not p.tab_x0 for p in paras):
+        lines = [_own_lines(p, scale, fonts) for p in paras]
+        if all(ls is not None for ls in lines):
+            free = w - 2 * PAD_X - max(ln.slides for ls in lines if ls is not None for ln in ls) - LINE_MARGIN
+            if aligns == {"center"}:
+                cut = max(0.0, min(max(-x, x + w - page.width), free / 2))
+                x, w = x + cut, w - 2 * cut
+            else:
+                cut = max(0.0, min(-x, free))
+                x, w = x + cut, w - cut
+    if bottom is not None and f.y + h > page.height:
+        h = max(min(h, page.height - f.y), bottom - f.y)
+    return Frame(x=x, y=f.y, w=w, h=h, ends=tuple(ends), edges=tuple(edges))
+
+
+# How far apart (Slides pt) the right ends of a box's lines, and each line's Slides width and its
+# PDF extent, may be for the box to be written right-aligned instead (`flush_right`).
+FLUSH_TOL = 1.0
+
+
+def flush_right(paras: Sequence[SetParagraph], w: float, page: Page, scale: float,
+                fonts: FontMapper) -> tuple[float, float] | None:
+    """(x, w) of a left-aligned box of single lines, `w` wide, that must reach past `page` to keep its words
+    from wrapping (words set at the page's edge: a frame number in the footline), written
+    right-aligned instead: the box ends `PAD_X` past where the PDF's lines end, and its room for a
+    wider face lies on the left. Only where the lines end together, as the PDF draws them, and Slides
+    sets each as wide as the PDF does to `FLUSH_TOL` (or in the PDF's own face), so its words land
+    where the left-aligned box set them, within that. None where that does not hold or the box would
+    still not fit."""
+    lines = [_own_lines(p, scale, fonts) for p in paras]
+    own = [ln for ls in lines if ls is not None for ln in ls]
+    if any(ls is None or len(ls) != 1 or p.bullet is not None or p.tab_x0 for ls, p in zip(lines, paras)) or not own or \
+            any(abs(ln.slides - (ln.x1 - ln.x0)) > FLUSH_TOL for ln in own if ln.measured):
+        return None
+    right = max(ln.x1 for ln in own)
+    if right - min(ln.x1 for ln in own) > FLUSH_TOL or right + PAD_X > page.width:
+        return None
+    width = min(w, right + PAD_X)  # (its width, the room past the words now on their left; or to the page's edge)
+    if width - 2 * PAD_X < max(ln.slides for ln in own) + LINE_MARGIN:
+        return None
+    return right + PAD_X - width, width
+
+
+@dataclass(frozen=True, kw_only=True)
+class OwnLine:
+    """A line of a paragraph that Slides cannot break elsewhere (`_own_lines`), in Slides pt: where
+    the PDF's starts and ends, and how wide Slides sets it (`measured`), or the PDF's extent and
+    `UNMEASURED_PAD` for a face nobody measured."""
+    x0: float
+    x1: float
+    slides: float
+    measured: bool
+
+
+def _own_lines(p: SetParagraph, scale: float, fonts: FontMapper) -> list[OwnLine] | None:
+    """A paragraph's lines when they are its own (one line, or lines a soft break ends: a title's);
+    None for one Slides wraps, or with a hole in a face nobody measured. A hanging label's line
+    ("label<TAB>text") is measured from its label's start, its text from the tab stop
+    (indentStart, `p.tab_x0`); None where the label would run past that stop."""
+    text = "".join(r.text for r in p.runs)
+    tab, tab_x0 = text.find("\t"), p.tab_x0
+    if tab >= 0 and (text.count("\t") > 1 or not tab_x0 or len(p.lines) > 1):
+        return None
+    cuts = [i for i, ch in enumerate(text) if ch == SOFT_BREAK]
+    if not cuts and len(p.lines) > 1 or cuts and len(cuts) + 1 != len(p.lines):
+        return None
+    bounds = [-1, *cuts, len(text)]
+    out: list[OwnLine] = []
+    for a, b, ln in zip(bounds, bounds[1:], p.lines):
+        x0, x1 = ln.x0 * scale, ln.x1 * scale
+        if tab >= 0 and tab_x0:
+            label = _span_width(runs_between(p.runs, a + 1, tab), scale, fonts)
+            rest = _span_width(runs_between(p.runs, tab + 1, b), scale, fonts)
+            stop = tab_x0 * scale
+            if label is None or rest is None or x0 + label + LINE_MARGIN > stop:
+                return None
+            out.append(OwnLine(x0=x0, x1=x1, slides=stop - x0 + rest, measured=True))
+            continue
+        runs = runs_between(p.runs, a + 1, b)
+        w = _span_width(runs, scale, fonts)
+        if w is None:
+            if any(r.hole_size for r in runs):
+                return None
+            pad = max(UNMEASURED_PAD * (x1 - x0), UNMEASURED_EM * p.size * scale)
+            out.append(OwnLine(x0=x0, x1=x1, slides=x1 - x0 + pad, measured=False))
+        else:
+            out.append(OwnLine(x0=x0, x1=x1, slides=w, measured=True))
+    return out
+
+
+def _span_width(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> float | None:
+    """How wide Slides sets these runs (pt) at most: holes as their no-break spaces, a guessed
+    advance with GUESSED_PAD_EM more; None where a face is not measured."""
+    total = 0.0
+    for run in runs:
+        if run.hole_size:
+            total += len(run.text) * HOLE_SPACE_EM * run.hole_size
+            continue
+        w = slides_width_of([run], scale, fonts)
+        if w is None:
+            return None
+        total += w + guessed_chars([run], scale, fonts) * GUESSED_PAD_EM * fonts.size_of(run, scale)[1]
+    return total
+
+
+def words_right(text: SetText, scale: float, fonts: FontMapper) -> float | None:
+    """How far right (Slides pt) the box of an upright text set against its left edge must reach for
+    its words, as Slides sets them, not to wrap: past its widest line (`_reach`), `LINE_MARGIN` and
+    the inset; what `on_page` cannot give up where the words themselves come within that of the
+    page's edge. None for other texts, or lines nobody can measure."""
+    paras = _prepared(text, scale, fonts)[0]
+    if text.rotation or {hugs_of(p) for p in paras} != {"left"} or any(p.direction == "rtl" for p in paras):
+        return None
+    reaches = [_reach(p, scale, fonts) for p in paras]
+    known = [r for r in reaches if r is not None]
+    return max(known) + LINE_MARGIN + PAD_X if known and len(known) == len(reaches) else None
+
+
+def _reach(p: SetParagraph, scale: float, fonts: FontMapper) -> float | None:
+    """How far right (Slides pt) a left-aligned paragraph's words run as Slides sets its PDF lines:
+    each line from where the PDF's starts (`slides_lines_of`, `_own_lines`), never short of the
+    PDF's own extent. None where its lines are not known."""
+    pdf_right = max(ln.x1 for ln in p.lines) * scale
+    lines = _own_lines(p, scale, fonts)
+    if lines is not None:
+        return max([pdf_right] + [ln.x0 + ln.slides for ln in lines])
+    text = "".join(r.text for r in p.runs)
+    if any(r.hole_size for r in p.runs) or "\t" in text or SOFT_BREAK in text:
+        return None
+    g = slides_lines_of(p, scale, fonts)
+    if g is None:
+        return None
+    return max(g[0] + guessed_chars(p.runs, scale, fonts) * GUESSED_PAD_EM * p.size * scale, pdf_right)
+
+
 def text_box_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[SlidesRequest]:
     """`text_box_requests_of` a text dict in a box of its own (no placeholder, no internal links, no
     block bar, right limit or marks): a layout's text (theme), the tests' texts."""
@@ -686,7 +893,8 @@ def text_shell_requests_of(text: SetText, slide_id: str, object_id: str, scale: 
     """`text_box_requests_of` for a text the .pptx brought as a shell (`text_shell_of`): the same
     box, words, styles and indents, written into the shell instead of a box created here, and no
     createParagraphBullets (the shell's bullets are the PDF's own)."""
-    return _text_requests(text, slide_id, object_id, scale, fonts, None, shell, page_slide, bar, right_limit, marks)
+    return _text_requests(text, slide_id, object_id, scale, fonts, None, shell, page_slide, bar, right_limit, marks,
+                          None)
 
 
 def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
@@ -697,9 +905,68 @@ def text_box_requests_of(text: SetText, slide_id: str, object_id: str, scale: fl
     one-line text sits on) the box fills the bar and centres its text vertically, so the
     title stays in the middle of the bar when the block is resized. `right_limit` (PDF x) is
     how far a box of unwrapped left-aligned text may extend. `marks` highlights the hole runs,
-    one colour each (measure_places)."""
+    one colour each (measure_places). The box is sized for its words alone, wherever that puts
+    it: `text_requests_on_page` keeps it on a slide."""
     return _text_requests(text, slide_id, object_id, scale, fonts, placeholder, None, page_slide, bar, right_limit,
-                          marks)
+                          marks, None)
+
+
+def text_requests_on_page(planned: Sequence[SlidesRequest], el: TextElement, slide_id: str, object_id: str,
+                          scale: float, fonts: FontMapper, placeholder: Placeholder | None, shell: Shell | None,
+                          page_slide: Mapping[int, str] | None, bar: Sequence[float] | None,
+                          right_limit: float | None, page: Page) -> list[SlidesRequest]:
+    """A text element's requests as `text_element_requests` (`shell`: `text_shell_requests`)
+    planned them, or, where that box reaches past `page`, the text planned again with its box
+    kept on the page as far as its words allow (`on_page`: no word moves or wraps elsewhere).
+    `placeholder` and `shell` say what the planned transform scales (their base size)."""
+    base = (placeholder.base_w, placeholder.base_h) if placeholder is not None else \
+        (shell.base_w, shell.base_h) if shell is not None else None
+    if not past_page(planned, object_id, base, page):
+        return list(planned)
+    return _text_requests(set_text(el), slide_id, object_id, scale, fonts, placeholder, shell, page_slide, bar,
+                          right_limit, None, page)
+
+
+def past_page(reqs: Sequence[SlidesRequest], object_id: str, base: tuple[float, float] | None, page: Page) -> bool:
+    """Whether the box `reqs` create (or, with `base` - the size the imported object had -, place
+    by an ABSOLUTE transform) for `object_id` reaches past `page` (by 0.01 pt). A turned box is
+    never said to: `on_page` leaves it alone."""
+    for r in reqs:
+        made, moved = r.get("createShape"), r.get("updatePageElementTransform")
+        if made is not None and made.get("objectId") == object_id:
+            props = made.get("elementProperties")
+            size = None if props is None else props.get("size")
+            t = None if props is None else props.get("transform")
+            width = None if size is None else size.get("width")
+            height = None if size is None else size.get("height")
+            if t is None or width is None or height is None:
+                return False
+            w, h = width.get("magnitude", 0.0) / EMU_PER_PT, height.get("magnitude", 0.0) / EMU_PER_PT
+        elif moved is not None and moved["objectId"] == object_id and moved["applyMode"] == "ABSOLUTE" and base:
+            t = moved["transform"]
+            w, h = base
+        else:
+            continue
+        if t.get("shearX") or t.get("shearY"):
+            return False
+        sx, sy = t.get("scaleX", 1.0), t.get("scaleY", 1.0)
+        x0, y0 = t.get("translateX", 0.0) / EMU_PER_PT, t.get("translateY", 0.0) / EMU_PER_PT
+        x1, y1 = x0 + sx * w, y0 + sy * h
+        return min(x0, x1) < -0.01 or min(y0, y1) < -0.01 or max(x0, x1) > page.width + 0.01 or \
+            max(y0, y1) > page.height + 0.01
+    return False
+
+
+def turned_about(x: float, y: float, rotation: float, pivot: tuple[float, float]) -> AffineTransform:
+    """The transform of a box whose corner is at (`x`, `y`) upright (Slides pt), turned `rotation`
+    degrees clockwise on the page about `pivot`."""
+    angle = math.radians(rotation)
+    cos, sin = math.cos(angle), math.sin(angle)
+    px, py = pivot
+    tx = cos * (x - px) - sin * (y - py) + px
+    ty = sin * (x - px) + cos * (y - py) + py
+    return {"scaleX": round(cos, 6), "shearX": round(-sin, 6), "shearY": round(sin, 6), "scaleY": round(cos, 6),
+            "unit": "EMU", "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)}
 
 
 def _bullet_requests(paras: Sequence[SetParagraph], texts: Sequence[str], object_id: str, scale: float,
@@ -764,9 +1031,9 @@ def _bullet_requests(paras: Sequence[SetParagraph], texts: Sequence[str], object
 def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                    placeholder: Placeholder | None, shell: Shell | None, page_slide: Mapping[int, str] | None,
                    bar: Sequence[float] | None, right_limit: float | None,
-                   marks: Sequence[str] | None) -> list[SlidesRequest]:
+                   marks: Sequence[str] | None, page: Page | None) -> list[SlidesRequest]:
     """`text_box_requests_of`, or with `shell` its words written into a text shell the .pptx
-    carried (`text_shell_requests`)."""
+    carried (`text_shell_requests`); with `page`, its box kept on it (`on_page`)."""
     marks_left = list(marks or [])
     paras, sized, base_sizes, bullet_caps = _prepared(text, scale, fonts)
     per_line = [line_sizes_of(p, zs, scale, fonts) for p, zs in zip(paras, sized)]
@@ -849,11 +1116,19 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
         if aligns == {"left"}:
             w = max(w, (bar[2] - 1) * scale - x)  # to the bar's end: the title wraps with the block
 
+    if placeholder is not None:
+        y += placeholder.dy
+    if page is not None and not text.rotation:
+        # (the words' bottom: emit's box keeps BOX_ROOM under it, which the page may take back)
+        bottom = None if middle else last_baseline + DESCENT_EM * z_last + extra_below(ratios[-1], z_last)
+        framed = on_page(Frame(x=x, y=y, w=w, h=h, ends=tuple(ends), edges=tuple(edges)), paras, bottom, page,
+                         scale, fonts)
+        x, w, h, ends, edges = framed.x, framed.w, framed.h, list(framed.ends), list(framed.edges)
+
     reqs: list[SlidesRequest]
     if placeholder is not None:
         # An existing layout placeholder (the slide title): its size is fixed at creation, so
         # it is resized through the transform's scale. Text is not scaled by that.
-        y += placeholder.dy
         reqs = [
             {"updatePageElementTransform": {"objectId": object_id, "applyMode": "ABSOLUTE", "transform": {
                 "scaleX": w / placeholder.base_w, "scaleY": h / placeholder.base_h, "unit": "EMU",
@@ -877,11 +1152,17 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
     else:
         transform: AffineTransform = {"scaleX": 1, "scaleY": 1, "unit": "EMU",
                                       "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}
-        if text.rotation:
+        if text.rotation and abs(abs(text.rotation) - 90) < 0.01:
             # Laid out in the text's own frame (classify.rotated_texts): turn the box onto the page.
             turn = 1 if text.rotation > 0 else -1
             transform = {"scaleX": 0, "scaleY": 0, "shearX": -turn, "shearY": turn, "unit": "EMU",
                          "translateX": round(-turn * y * EMU_PER_PT), "translateY": round(turn * x * EMU_PER_PT)}
+        elif text.rotation:
+            # Set upright about the middle of its words (a tilted box adopt wrote: marked.unturned):
+            # turned back about it. (Written as a quarter turn, it stood hundreds of points off the page.)
+            middle = ((left_pdf + right_pdf) / 2 * scale,
+                      (first_baseline - ASCENT_EM * z_first + last_baseline + DESCENT_EM * z_last) / 2)
+            transform = turned_about(x, y, text.rotation, middle)
         reqs = [{"createShape": {
             "objectId": object_id, "shapeType": "TEXT_BOX",
             "elementProperties": {
@@ -1015,27 +1296,35 @@ def number_box_requests(number: JsonMap, slide_id: str, object_id: str, scale: f
                         fonts: FontMapper) -> list[SlidesRequest]:
     """`number_requests` of a ball's number dict."""
     run, center, height = number_box_of(number)
-    return number_box_requests_of(run, center, height, slide_id, object_id, scale, fonts)
+    return number_box_requests_of(run, center, height, slide_id, object_id, scale, fonts, None)
 
 
-def number_requests(number: Number, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[SlidesRequest]:
-    """The box of a parsed ball's number."""
+def number_requests(number: Number, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
+                    page: Page | None) -> list[SlidesRequest]:
+    """The box of a parsed ball's number, kept within `page` where given."""
     run, center, height = number_box(number)
-    return number_box_requests_of(run, center, height, slide_id, object_id, scale, fonts)
+    return number_box_requests_of(run, center, height, slide_id, object_id, scale, fonts, page)
 
 
 def number_box_requests_of(run: SetRun, center: tuple[float, float], height: float, slide_id: str, object_id: str,
-                           scale: float, fonts: FontMapper) -> list[SlidesRequest]:
+                           scale: float, fonts: FontMapper, page: Page | None) -> list[SlidesRequest]:
     """A literal list number (`run`) centred on its ball picture (classify.literal_list_numbers),
     `height` PDF pt tall around `center`: a box around the ball's centre with centred text and
     contentAlignment MIDDLE. Lato digits are 0.72 em tall, so a baseline 0.362 em below the middle
-    puts them in the middle too."""
+    puts them in the middle too. A box that would reach past `page` (a ball at a slide's left edge)
+    is narrowed about its middle, down to its number and `LINE_MARGIN` between the insets."""
     font, fields = fonts.style_of(run, scale)
     style = slides_text_style(font, "a number's font (FontMapper.style_of)")
     size = fonts.size_of(run, scale)[1]
     cx, cy = center[0] * scale, center[1] * scale
     w = height * scale + 2 * PAD_X + len(run.text) * size  # never wraps "(iv)"
     h = max(height * scale, LINE_EM * size + 2)
+    if page is not None:
+        over = max(w / 2 - cx, cx + w / 2 - page.width)
+        number_w = _span_width([run], scale, fonts)
+        least = 2 * PAD_X + LINE_MARGIN + (number_w if number_w is not None else len(run.text) * size)
+        if over > 0:
+            w = min(w, max(least, w - 2 * over))
     style["foregroundColor"] = text_color(run.color)
     return [
         {"createShape": {"objectId": object_id, "shapeType": "TEXT_BOX", "elementProperties": {

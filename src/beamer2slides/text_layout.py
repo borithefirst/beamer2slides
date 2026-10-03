@@ -61,7 +61,9 @@ class ParaStyle:
 @dataclass(frozen=True, kw_only=True)
 class Line:
     """One laid-out line: its ink band, baseline, size (its largest run), paragraph, character
-    range [start, end) of the layout's text, x where its words start, and its line spacing."""
+    range [start, end) of the layout's text, x where its words start, and its line spacing;
+    `tab_to`: where its first tab takes the words after it, a hanging label's (`hanging_tab`), or
+    None for a tab of TAB_EM."""
     box: Rect
     baseline: float
     size: float
@@ -70,6 +72,7 @@ class Line:
     end: int
     x: float
     spacing: float
+    tab_to: float | None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -314,6 +317,32 @@ def wrap(chars: str, styles: Sequence[JsonMap], width: float) -> list[tuple[int,
     return lines
 
 
+def hanging_tab(para: str, styles: Sequence[JsonMap], ps: ParaStyle) -> int | None:
+    """Where the words after a hanging label start (the index after its tab), when the paragraph
+    is `label<TAB>text` with the label inside its hang (indentFirstLine to indentStart): Slides
+    takes that tab to indentStart, as emit writes hanging labels and tabbed lines (27_text_fit
+    s7). None otherwise: a bullet, another alignment, no hang, a label running past it."""
+    if ps.bullet or ps.alignment not in ("START", "JUSTIFIED") or ps.indent_first_line >= ps.indent_start:
+        return None
+    t = para.find("\t")
+    if t < 0 or SOFT_BREAK in para[:t]:
+        return None
+    label = sum(advance(para[k], styles[k], font_size(styles[k])) for k in range(t))
+    return t + 1 if ps.indent_first_line + label <= ps.indent_start else None
+
+
+def x_at(ln: Line, text: str, styles: Sequence[JsonMap], k: int) -> float:
+    """Where character `k` of a laid-out line starts: the advances before it from the line's x,
+    its first tab taking the words to `tab_to` when it has one."""
+    x, tabbed = ln.x, False
+    for m in range(ln.start, k):
+        if text[m] == "\t" and ln.tab_to is not None and not tabbed:
+            x, tabbed = ln.tab_to, True
+        else:
+            x += advance(text[m], styles[m], font_size(styles[m]))
+    return x
+
+
 def layout(rb: JsonMap) -> Layout | None:
     """`layout_at` with the read-back's own sizes."""
     return layout_at(rb, None)
@@ -354,7 +383,13 @@ def layout_at(rb: JsonMap, size: float | list[float] | None) -> Layout | None:
         indent = ps.indent_start
         # a paragraph keeps its indentEnd free before the box's edge (emit.paragraph_ends)
         end = right - ps.indent_end
-        broken = wrap(para, pst, max(1.0, end - left - indent)) if para else [(0, 0, 0.0)]
+        width = max(1.0, end - left - indent)
+        hang = hanging_tab(para, pst, ps)
+        if hang is None:
+            broken = wrap(para, pst, width) if para else [(0, 0, 0.0)]
+        else:  # the label stands in its hang, the words flow from indentStart on every line
+            broken = [(a + hang if k else 0, b + hang, ink + (indent - ps.indent_first_line if k == 0 else 0.0))
+                      for k, (a, b, ink) in enumerate(wrap(para[hang:], pst[hang:], width))]
         for li, (a, b, ink) in enumerate(broken):
             sizes: list[float] = [font_size(pst[k]) for k in range(a, b) if not para[k].isspace()] if b > a else []
             z = max(sizes) if sizes else font_size(pst[min(a, len(pst) - 1)])
@@ -372,10 +407,11 @@ def layout_at(rb: JsonMap, size: float | list[float] | None) -> Layout | None:
             elif ps.alignment == "END":
                 lx = end - ink
             else:
-                lx = left + indent
+                lx = left + (ps.indent_first_line if hang is not None and li == 0 else indent)
             bx = left + min(ps.indent_first_line, indent) if ps.bullet and li == 0 and ink > 0 else lx
             lines.append(Line(box=_band(min(bx, lx), lx + ink, baseline, z), baseline=baseline, size=z, para=pi,
-                              start=at + a, end=at + b, x=lx, spacing=r))
+                              start=at + a, end=at + b, x=lx, spacing=r,
+                              tab_to=left + indent if hang is not None and li == 0 else None))
         at += len(para) + 1
         below, bullet_prev = ps.space_below, ps.bullet
     if not lines:
@@ -397,9 +433,9 @@ def layout_at(rb: JsonMap, size: float | list[float] | None) -> Layout | None:
                 j = k
                 while j < ln.end and text[j] == NBSP and styles[j].get("fontFamily") == emit.HOLE_FONT:
                     j += 1
-                hx = ln.x + sum(advance(text[m], styles[m], font_size(styles[m])) for m in range(ln.start, k))
-                hw = sum(advance(text[m], styles[m], font_size(styles[m])) for m in range(k, j))
-                holes.append(Hole(box=_band(hx, hx + hw, ln.baseline, ln.size), start=k, end=j, line=li))
+                hx = x_at(ln, text, styles, k)
+                holes.append(Hole(box=_band(hx, x_at(ln, text, styles, j), ln.baseline, ln.size), start=k, end=j,
+                                  line=li))
                 k = j
             else:
                 k += 1
@@ -413,9 +449,8 @@ def span_box(lay: Layout, a: int, b: int) -> SpanBox | None:
     text, styles = lay.text, lay.styles
     for i, ln in enumerate(lay.lines):
         if ln.start <= a < max(ln.end, ln.start + 1) and b <= ln.end:
-            x = ln.x + sum(advance(text[m], styles[m], font_size(styles[m])) for m in range(ln.start, a))
-            w = sum(advance(text[m], styles[m], font_size(styles[m])) for m in range(a, b))
-            return SpanBox(box=_band(x, x + w, ln.baseline, ln.size), line=i, baseline=ln.baseline)
+            return SpanBox(box=_band(x_at(ln, text, styles, a), x_at(ln, text, styles, b), ln.baseline, ln.size),
+                           line=i, baseline=ln.baseline)
     return None
 
 

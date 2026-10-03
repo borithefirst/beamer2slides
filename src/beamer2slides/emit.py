@@ -21,9 +21,11 @@ from typing import TYPE_CHECKING, Callable, TypedDict, TypeVar
 
 from . import emit_state
 from .emit_state import Emitted
-from .emit_diagrams import block_groups, block_stacking, diagram_requests_of, element_template_keys, rule_groups
+from .emit_diagrams import (
+    block_groups, block_stacking, diagram_requests_of, element_template_keys_on, rule_groups,
+)
 from .emit_diagrams import (  # noqa: F401 (callers take these from here)
-    bend_template_key, connection, diagram_requests, label_inside, node_template_key,
+    bend_template_key, connection, diagram_requests, element_template_keys, label_inside, node_template_key,
 )
 from .emit_holes import fit_holes, formula_shifts, overlay_boxes, text_right_limit
 from .emit_holes import (  # noqa: F401 (callers take these from here)
@@ -55,7 +57,10 @@ from .emit_tables import (  # noqa: F401 (callers take these from here)
     TABLE_CELL_PAD, TABLE_MARGIN, TABLE_MIN_SHRINK, TABLE_TEXT_TOP, fit_columns, pptx_table, squeezed_columns,
     table_columns, table_fits, table_layout, table_requests,
 )
-from .emit_text import merge_blocks, number_requests, text_element_requests, text_shell_of, text_shell_requests
+from .emit_text import (
+    Page, merge_blocks, number_requests, text_element_requests, text_requests_on_page, text_shell_of,
+    text_shell_requests,
+)
 from .emit_text import (  # noqa: F401 (callers take these from here)
     number_box_requests, text_box_requests,
 )
@@ -751,8 +756,10 @@ class DeckPlan:
         fitted = [fit_holes(s, scale, fonts) for s in objects_of(merged["slides"], "slides")]
         self.deck = deck_out = copy(whole)
         deck_out["slides"] = _json_list(fitted)
-        self.keys = list(dict.fromkeys(k for s in fitted for e in _elements(s) for k in element_template_keys(e, scale)))
-        self.uses_templates = {_page(s): any(element_template_keys(e, scale) for e in _elements(s)) for s in fitted}
+        self.keys = list(dict.fromkeys(k for s in fitted for e in _elements(s)
+                                       for k in element_template_keys_on(e, scale, _bounds(s, page_width, scale))))
+        self.uses_templates = {_page(s): any(element_template_keys_on(e, scale, _bounds(s, page_width, scale))
+                                             for e in _elements(s)) for s in fitted}
         self.shifts = {_page(s): formula_shifts(s, scale, fonts) for s in fitted}
         self.overlays = {_page(s): overlay_boxes(s, scale, fonts) for s in fitted}
 
@@ -809,7 +816,7 @@ class DeckPlan:
         failed: list[tuple[int, Exception]] = []
         for i, el in enumerate(_elements(slide)):  # what the .pptx carries for it (build_pptx)
             try:
-                keys = element_template_keys(el, scale)
+                keys = element_template_keys_on(el, scale, _bounds(slide, self.page_width, scale))
                 if keys:
                     _add_template_shapes(self._scratch_slide(), keys)
                 if self.pptx_tables and el["kind"] == "table":
@@ -956,6 +963,8 @@ class DeckPlan:
         scale, fonts, keys = self.scale, self.fonts, self.keys
         placed, page_slide, uses_templates = self.placed, self.page_slide, self.uses_templates
         placeholder_dy = PPTX_TITLE_DY
+        # (what every box written here is kept within, as far as its words allow: on_page)
+        bounds = _bounds(slide, self.page_width, scale)
 
         n = _page(slide)
         slide = grown_panels(slide, scale, fonts)
@@ -992,7 +1001,8 @@ class DeckPlan:
                 case TableElement():
                     return table_element_requests(typed, slide_id, oid, scale, fonts, self.pptx_tables)
                 case DiagramElement():
-                    return diagram_requests_of(typed, slide_id, oid, scale, fonts, template_record if keys else None)
+                    return diagram_requests_of(typed, slide_id, oid, scale, fonts, template_record if keys else None,
+                                               bounds)
                 case ImageElement() | FallbackImage():
                     # The picture came with the slide: move it to its place in the z-order.
                     reqs: list[SlidesRequest] = [
@@ -1006,22 +1016,29 @@ class DeckPlan:
                             "translateX": round((dx + (1 - sx) * typed.bbox[0] * scale) * EMU_PER_PT),
                             "translateY": round(dy * EMU_PER_PT)}}})
                     if isinstance(typed, ImageElement) and typed.number is not None:
-                        reqs += number_requests(typed.number, slide_id, f"{oid}n", scale, fonts)
+                        reqs += number_requests(typed.number, slide_id, f"{oid}n", scale, fonts, bounds)
                     return reqs
                 case TextElement():
+                    # (planned by the entries tests may stand in for, then kept on the page where
+                    # that box would reach past it: text_requests_on_page)
                     placeholder = None
+                    bar, right_limit = title_bar_under(el, slide), text_right_limit(el, slide)
                     if oid in shells:  # (bullets no preset draws: the .pptx's, text_shell_of)
                         size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
                         shell = Shell(base_w=_magnitude(size, "width") / EMU_PER_PT,
                                       base_h=_magnitude(size, "height") / EMU_PER_PT)
-                        return text_shell_requests(typed, slide_id, oid, scale, fonts, shell, page_slide,
-                                                   title_bar_under(el, slide), text_right_limit(el, slide), None)
+                        planned = text_shell_requests(typed, slide_id, oid, scale, fonts, shell, page_slide, bar,
+                                                      right_limit, None)
+                        return text_requests_on_page(planned, typed, slide_id, oid, scale, fonts, None, shell,
+                                                     page_slide, bar, right_limit, bounds)
                     if oid in (title_oid, subtitle_oid):
                         size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
                         placeholder = Placeholder(base_w=_magnitude(size, "width") / EMU_PER_PT,
                                                   base_h=_magnitude(size, "height") / EMU_PER_PT, dy=placeholder_dy)
-                    return text_element_requests(typed, slide_id, oid, scale, fonts, placeholder, page_slide,
-                                                 title_bar_under(el, slide), text_right_limit(el, slide), None)
+                    planned = text_element_requests(typed, slide_id, oid, scale, fonts, placeholder, page_slide, bar,
+                                                    right_limit, None)
+                    return text_requests_on_page(planned, typed, slide_id, oid, scale, fonts, placeholder, None,
+                                                 page_slide, bar, right_limit, bounds)
                 case _:
                     assert_never(typed)
 
@@ -1158,14 +1175,21 @@ def _offline_copy(plan: DeckPlan, slide: JsonObject, placeholder_size: tuple[flo
     return _duplicate(source, ids), sizes, copied
 
 
+def _bounds(slide: JsonMap, page_width: float, scale: float) -> Page:
+    """The page a slide's objects are kept within (`on_page`, `arc_plan`), slide pt."""
+    return Page(width=page_width, height=json_number(as_array(slide["size"], "size")[1], "size") * scale)
+
+
 def _slide_plan(slide: JsonObject, scale: float, fonts: FontMapper, pptx_tables: bool,
                 page_slide: Mapping[int, str]) -> DeckPlan:
     """A DeckPlan of one slide (holes fitted), with none of the deck-wide work __init__ does: the
     template shapes are the slide's own (`slide_emission`, `DeckPlan._rehearse`)."""
     n = _page(slide)
-    keys = list(dict.fromkeys(k for e in _elements(slide) for k in element_template_keys(e, scale)))
+    page_width = json_number(as_array(slide["size"], "size")[0], "size") * scale
+    keys = list(dict.fromkeys(k for e in _elements(slide)
+                              for k in element_template_keys_on(e, scale, _bounds(slide, page_width, scale))))
     plan = DeckPlan.__new__(DeckPlan)
-    plan.page_width = json_number(as_array(slide["size"], "size")[0], "size") * scale
+    plan.page_width = page_width
     plan.pptx_tables, plan.scale, plan.fonts = pptx_tables, scale, fonts
     plan.deck = {"slides": [slide]}
     plan.keys, plan.uses_templates = keys, {n: bool(keys)}

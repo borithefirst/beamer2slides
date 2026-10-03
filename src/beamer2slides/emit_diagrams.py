@@ -8,7 +8,7 @@ and the tests hold: `diagram_requests`, `element_template_keys`, `label_inside`,
 
 import math
 from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from . import curves, ir_types
@@ -18,7 +18,8 @@ from .emit_model import (
     set_runs, template_of,
 )
 from .emit_pptx import arc_kind, template_key
-from .emit_text import baseline_offset, in_sentence_of, run_sizes_of, text_box_requests_of
+from .emit_text import LINE_MARGIN, Page, baseline_offset, in_sentence_of, run_sizes_of, text_box_requests_of
+from .emit_widths import slides_width_of
 from .google_types import (
     AffineTransform, LineConnection, LineProperties, Outline, ShapeProperties, SlidesRequest, slides_text_style,
 )
@@ -159,13 +160,31 @@ def _bend(value: Json) -> Bend:
 
 
 def element_template_keys(el: JsonMap, scale: float) -> list[TemplateKey]:
-    """The template shapes an element dict is copied from (a panel's, a diagram's nodes' and
-    elbows'), as DeckPlan and sync read every element of a deck."""
+    """The template shapes an element dict may be copied from (a panel's, a diagram's nodes',
+    elbows' and arcs'), whatever its page: an arc's every form (`arc_template_keys`). sync asks
+    so for the elements it writes (DeckPlan's `keys` are the page's own: `element_template_keys_on`)."""
+    return _template_keys(el, scale, arc_template_keys)
+
+
+def element_template_keys_on(el: JsonMap, scale: float, page: Page) -> list[TemplateKey]:
+    """The template shapes an element dict is copied from on its slide's `page` (slide pt): an
+    arc's are those of the form `arc_plan` gives it there. DeckPlan's, for every element."""
+    def arc_keys(line: JsonMap) -> list[TemplateKey]:
+        sweep = _sweep(line)
+        if sweep is None:
+            return []
+        start, end = _point(line["from"]), _point(line["to"])
+        arrow_from, arrow_to = _arrow(line.get("arrow_from")), _arrow(line.get("arrow_to"))
+        return arc_plan_keys(sweep, arrow_from, arrow_to, arc_plan(start, end, sweep, scale, page))
+    return _template_keys(el, scale, arc_keys)
+
+
+def _template_keys(el: JsonMap, scale: float, arc_keys: Callable[[JsonMap], list[TemplateKey]]) -> list[TemplateKey]:
     if el["kind"] == "diagram":
         nodes = [node_look_of(_object(n)) for n in _items(el["nodes"])]
         bends = [_bend(bend) for ln in _items(el["lines"]) if (bend := _object(ln).get("bend"))]
         return [node_template_key_of(n) for n in nodes if node_templated_of(n)] + [bend_template_key_of(b) for b in bends] \
-            + [k for ln in _items(el["lines"]) if (k := arc_template_key(_object(ln))) is not None]
+            + [k for ln in _items(el["lines"]) for k in arc_keys(_object(ln))]
     key = template_key(el, scale)
     return [key] if key else []
 
@@ -175,23 +194,65 @@ def diagram_template_keys(el: DiagramElement) -> list[TemplateKey]:
     nodes = [node_look(n) for n in el.nodes]
     return [node_template_key_of(n) for n in nodes if node_templated_of(n)] + \
         [bend_template_key_of(ln.elbow.bend) for ln in el.lines if ln.elbow is not None] + \
-        [k for ln in el.lines if (k := arc_template_key_of(ln)) is not None]
+        [k for ln in el.lines if ln.sweep is not None
+         for k in arc_keys_any(ln.from_, ln.to, ln.sweep, ln.arrow_from, ln.arrow_to)]
 
 
-def arc_template_key(line: JsonMap) -> TemplateKey | None:
-    """`arc_template_key_of` a line dict (sync's base diagrams); None for a line that is no arc."""
+def arc_template_keys(line: JsonMap) -> list[TemplateKey]:
+    """Every template a line dict's arc may be copied from, whatever its page (`arc_keys_any`)."""
+    sweep = _sweep(line)
+    if sweep is None:
+        return []
+    return arc_keys_any(_point(line["from"]), _point(line["to"]), sweep,
+                        _arrow(line.get("arrow_from")), _arrow(line.get("arrow_to")))
+
+
+def arc_keys_any(start: Point, end: Point, sweep: float, arrow_from: Arrow | None,
+                 arrow_to: Arrow | None) -> list[TemplateKey]:
+    """Every template an arc may be copied from, whatever its page: turned, upright and its
+    elliptical pieces' (`arc_plan`)."""
+    keys = [_arc_key(sweep, arrow_from, arrow_to)]
+    at = upright_at(start, end, sweep)
+    if at != 0:
+        keys += arc_plan_keys(sweep, arrow_from, arrow_to, ArcPlan(form="upright", at=at, pieces=()))
+    pieces = ellipse_pieces(start, end, sweep)
+    if pieces is not None:
+        keys += arc_plan_keys(sweep, arrow_from, arrow_to, ArcPlan(form="ellipses", at=0.0, pieces=pieces))
+    return list(dict.fromkeys(keys))
+
+
+def _sweep(line: JsonMap) -> float | None:
     sweep = line.get("sweep")
     if sweep is None:
         return None
     if isinstance(sweep, bool) or not isinstance(sweep, (int, float)):
         raise TypeError(f"sweep: {sweep!r} is not a number")
+    return float(sweep)
+
+
+def _point(value: Json) -> Point:
+    items = _items(value)
+    if len(items) != 2:
+        raise TypeError(f"{value!r} is not a point")
+    x, y = items
+    if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        raise TypeError(f"{value!r} is not a point")
+    return float(x), float(y)
+
+
+def arc_template_key(line: JsonMap) -> TemplateKey | None:
+    """`arc_template_key_of` a line dict (sync's base diagrams); None for a line that is no arc."""
+    sweep = _sweep(line)
+    if sweep is None:
+        return None
     return _arc_key(sweep, _arrow(line.get("arrow_from")), _arrow(line.get("arrow_to")))
 
 
 def arc_template_key_of(ln: DiagramLine) -> TemplateKey | None:
-    """An arc's template (emit_pptx's `arc` preset): its heads and its sweep as drawn
-    (`curves.drawn_sweep`). A copy is turned and mirrored to its place (`arc_requests`), so
-    neither where the arc starts nor which way it turns makes another template."""
+    """A turned arc's template (emit_pptx's `arc` preset): its heads and its sweep as drawn
+    (`curves.drawn_sweep`). A copy is turned and mirrored to its place (`arc_transform`), so
+    neither where the arc starts nor which way it turns makes another template. (The one sync
+    finds under the line's id; an arc's other forms: `arc_plan`, `arc_keys_any`.)"""
     return None if ln.sweep is None else _arc_key(ln.sweep, ln.arrow_from, ln.arrow_to)
 
 
@@ -253,7 +314,7 @@ def diagram_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, f
         raise TypeError(f"element {el.get('id')!r} is not a diagram")
     tpl = template
     return diagram_requests_of(typed, slide_id, object_id, scale, fonts,
-                               None if tpl is None else (lambda key: template_of(tpl(key))))
+                               None if tpl is None else (lambda key: template_of(tpl(key))), None)
 
 
 def _transform(oid: str, sx: float, sy: float, x: float, y: float) -> SlidesRequest:
@@ -318,32 +379,255 @@ def site_point(box: Box, fx: float, fy: float, rotation: float | None) -> Point:
 
 
 CHORD_STEP = 15.0  # degrees of an arc one straight piece stands for, where no template is at hand
+KINK = 2.0         # degrees two straight pieces of an arc turn at their join, where no curve fits its page
+ELLIPSE_TOLERANCE = curves.ARC_TOLERANCE / 2  # pt: how far an elliptical piece may run from its arc
+ELLIPSE_SPAN = 35.0  # degrees: the least half span (parametric) a piece takes of its ellipse, else more pieces
+MAX_ELLIPSES = 6     # elliptical pieces one arc may become
+ELLIPSE_SAMPLES = 64  # points of a piece its distance from its arc is measured on
 
 
-def arc_requests(tpl: Template, oid: str, ln: DiagramLine, sweep: float, scale: float) -> list[SlidesRequest]:
-    """An arc copied from its template (the preset `arc` from 0° clockwise through the drawn
-    sweep, in a square `tpl.w` x `tpl.h`) and put on its circle (`curves.arc_circle`) by one
-    ABSOLUTE transform: scaled to the circle, mirrored when it turns anticlockwise, turned to
-    start where it starts. Its ends land on `from` and `to` exactly; its outline takes the
-    line's colour and weight (the template's heads stay)."""
+# An arc's ARC preset copy is its whole circle's box, however little of the circle it draws: a
+# gentle bend's reaches far past the page (29_tikz_diagrams pages 3 and 4). `arc_plan` writes it,
+# in this order, as the first form whose box lies on the page:
+# - "turned": the template running from 0 degrees, turned to the arc's start (`arc_transform`);
+# - "upright": a template starting where the arc starts (to `ARC_STEP`), so the box is the
+#   circle's own upright square (turned by under half a degree);
+# - "ellipses": the arc in a few pieces, each the top of a flat ellipse (`Ellipse`): the preset
+#   about its template's top, scaled unevenly. Each piece leaves its ends in the circle's
+#   directions, so the heads point as the arc's and the pieces join without a kink; each stays
+#   within `ELLIPSE_TOLERANCE` of the arc;
+# - "chords": straight pieces turning `KINK` degrees at most at a join (`fine_step`).
+# The ellipses take Slides at its word that a preset is drawn at the size it shows (its
+# rounded corners are), so the `arc` preset's angles are OOXML's: seen from the ellipse's centre
+# (`ellipse_axes`). (Not yet seen live: 29_tikz_diagrams pages 3 and 4 are the check.)
+ArcForm = Literal["turned", "upright", "ellipses", "chords"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Ellipse:
+    """One piece of an arc drawn as the top of an ellipse: from `start` to `end` (PDF pt), standing
+    for `sweep` degrees of the arc's circle (signed as the arc's). Its template is the preset `arc`
+    over `visual` degrees about its top (`ellipse_key`), the ellipse's half axes `a` along the
+    piece's chord and `b` across it (PDF pt); it runs at most `deviation` pt from the arc."""
+    start: Point
+    end: Point
+    sweep: float
+    visual: float
+    a: float
+    b: float
+    deviation: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class ArcPlan:
+    """How an arc is written (`arc_plan`): its form, the template's start angle of an upright
+    copy (`at`, degrees; 0 for the others) and an elliptical arc's pieces."""
+    form: ArcForm
+    at: float
+    pieces: tuple[Ellipse, ...]
+
+
+def ellipse_axes(chord: float, sweep: float, visual: float) -> tuple[float, float, float]:
+    """(a, b, phi): the ellipse whose top runs through both ends of a piece of circle (turning
+    `sweep` degrees, unsigned, over `chord` pt) and leaves them in the circle's directions, on
+    which the piece spans `visual` degrees seen from its centre - the arc preset's angles (OOXML's
+    `arc`: its ends are where rays at adj1 and adj2 meet the ellipse) - and `phi` radians on
+    either side of the top as its parameter runs. With `visual` = `sweep` it is the circle."""
+    half = math.radians(sweep) / 2
+    psi = math.radians(90 - visual / 2)  # how far an end sees above the centre
+    # an end at parameter phi: x = a sin phi = chord / 2; its slope (b / a) tan phi = tan half;
+    # seen from the centre at tan psi = (b / a) cot phi
+    phi = math.atan(math.sqrt(math.tan(half) / math.tan(psi)))
+    a = chord / (2 * math.sin(phi))
+    return a, a * math.tan(half) / math.tan(phi), phi
+
+
+def ellipse_deviation(chord: float, sweep: float, a: float, b: float, phi: float) -> float:
+    """How far the ellipse's top (`ellipse_axes`) runs from the piece of circle it stands for, pt."""
+    half = math.radians(sweep) / 2
+    r = chord / (2 * math.sin(half))
+    below = r * math.cos(half)  # (the chord on y = 0, both bulging up: the circle's centre below)
+    worst = 0.0
+    for i in range(ELLIPSE_SAMPLES + 1):
+        t = -phi + 2 * phi * i / ELLIPSE_SAMPLES
+        x, y = a * math.sin(t), b * (math.cos(t) - math.cos(phi))
+        worst = max(worst, abs(math.hypot(x, y + below) - r))
+    return worst
+
+
+def piece_visual(chord: float, sweep: float) -> float | None:
+    """The widest span seen from its centre (a multiple of `curves.ARC_STEP` below 180 degrees:
+    the template's) of an ellipse standing for a piece of circle within `ELLIPSE_TOLERANCE`; the
+    wider, the flatter and smaller its box. None when the piece turns half a turn or more."""
+    def off(steps: int) -> float:
+        a, b, phi = ellipse_axes(chord, sweep, steps * curves.ARC_STEP)
+        return ellipse_deviation(chord, sweep, a, b, phi)
+    lo, hi = math.ceil(sweep / curves.ARC_STEP - 1e-9), round(180 / curves.ARC_STEP) - 1
+    if lo > hi or off(lo) > ELLIPSE_TOLERANCE:
+        return None
+    while lo < hi:  # (the farther from the circle, the farther it runs from it)
+        mid = (lo + hi + 1) // 2
+        if off(mid) <= ELLIPSE_TOLERANCE:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo * curves.ARC_STEP
+
+
+def ellipse_pieces(start: Point, end: Point, sweep: float) -> tuple[Ellipse, ...] | None:
+    """An arc as the fewest equal pieces whose ellipses take `ELLIPSE_SPAN` or more of their
+    span within `ELLIPSE_TOLERANCE` (`piece_visual`); None past `MAX_ELLIPSES`. The plan is the
+    arc's alone, whatever its page, so its templates are known before the page is."""
+    circle = curves.arc_circle(start, end, sweep)
+    turn = abs(sweep)
+    for k in range(int(turn // 180) + 1, MAX_ELLIPSES + 1):
+        part = turn / k
+        chord = 2 * circle.radius * math.sin(math.radians(part) / 2)
+        visual = piece_visual(chord, part)
+        if visual is None:
+            continue
+        a, b, phi = ellipse_axes(chord, part, visual)
+        if math.degrees(phi) < ELLIPSE_SPAN:
+            continue
+        off = ellipse_deviation(chord, part, a, b, phi)
+        points = [start, *(curves.arc_point(circle, j * sweep / k) for j in range(1, k)), end]
+        return tuple(Ellipse(start=points[j], end=points[j + 1], sweep=sweep / k, visual=visual, a=a, b=b,
+                             deviation=off) for j in range(k))
+    return None
+
+
+def ellipse_key(visual: float, arrow_from: Arrow | None, arrow_to: Arrow | None) -> TemplateKey:
+    """An elliptical piece's template: the preset `arc` over `visual` degrees about its top
+    (from 270 - visual / 2 clockwise), with the heads the piece carries."""
+    return arc_kind(arrow_from, arrow_to), visual, 270 - visual / 2
+
+
+def upright_at(start: Point, end: Point, sweep: float) -> float:
+    """The start (degrees, to `curves.ARC_STEP`) of a template whose copy stands upright on the
+    arc's circle: mirrored for an anticlockwise arc, it is turned by less than half a step."""
+    drawn = curves.drawn_sweep(sweep)
+    turn = 1.0 if drawn > 0 else -1.0
+    start_angle = curves.arc_circle(start, end, drawn).start
+    return (round(turn * start_angle / curves.ARC_STEP) * curves.ARC_STEP) % 360
+
+
+def frame_corners(centre: Point, angle: float, half_u: float, half_v: float, scale: float) -> list[Point]:
+    """The corners (slide pt) of a box of half sides `half_u`, `half_v` (PDF pt) about `centre`,
+    turned `angle` radians."""
+    cos, sin = math.cos(angle), math.sin(angle)
+    return [((centre[0] + cos * du - sin * dv) * scale, (centre[1] + sin * du + cos * dv) * scale)
+            for du in (-half_u, half_u) for dv in (-half_v, half_v)]
+
+
+def within(corners: Sequence[Point], page: Page) -> bool:
+    return min(x for x, _ in corners) >= -0.01 and min(y for _, y in corners) >= -0.01 and \
+        max(x for x, _ in corners) <= page.width + 0.01 and max(y for _, y in corners) <= page.height + 0.01
+
+
+def circle_corners(start: Point, end: Point, sweep: float, at: float, scale: float) -> list[Point]:
+    """The corners of an arc's circle copy (`arc_transform`) from a template starting at `at`."""
+    drawn = curves.drawn_sweep(sweep)
+    circle = curves.arc_circle(start, end, drawn)
+    turn = 1.0 if drawn > 0 else -1.0
+    r = circle.radius
+    return frame_corners(circle.centre, math.radians(circle.start - turn * at), r, r, scale)
+
+
+def ellipse_centre(piece: Ellipse) -> tuple[Point, float, float]:
+    """(centre, the chord's angle in radians, turn) of an elliptical piece: its ends are the
+    piece's, so its centre is b cos(phi) from the chord's middle towards the circle's centre."""
+    (x0, y0), (x1, y1) = piece.start, piece.end
+    angle = math.atan2(y1 - y0, x1 - x0)
+    turn = 1.0 if piece.sweep > 0 else -1.0
+    nx, ny = -math.sin(angle) * turn, math.cos(angle) * turn  # (the template's down: towards the circle's centre)
+    across = piece.b * math.sqrt(max(0.0, 1 - (math.hypot(x1 - x0, y1 - y0) / (2 * piece.a)) ** 2))
+    return ((x0 + x1) / 2 + nx * across, (y0 + y1) / 2 + ny * across), angle, turn
+
+
+def ellipse_corners(piece: Ellipse, scale: float) -> list[Point]:
+    centre, angle, _ = ellipse_centre(piece)
+    return frame_corners(centre, angle, piece.a, piece.b, scale)
+
+
+def arc_plan(start: Point, end: Point, sweep: float, scale: float, page: Page | None) -> ArcPlan:
+    """How an arc is written within `page` (the header above): turned, upright, ellipses or
+    chords, the first whose boxes lie on it. With no page, turned."""
+    turned = ArcPlan(form="turned", at=0.0, pieces=())
+    if page is None or within(circle_corners(start, end, sweep, 0.0, scale), page):
+        return turned
+    at = upright_at(start, end, sweep)
+    if at != 0 and within(circle_corners(start, end, sweep, at, scale), page):
+        return ArcPlan(form="upright", at=at, pieces=())
+    pieces = ellipse_pieces(start, end, sweep)
+    if pieces is not None and all(within(ellipse_corners(p, scale), page) for p in pieces):
+        return ArcPlan(form="ellipses", at=0.0, pieces=pieces)
+    return ArcPlan(form="chords", at=0.0, pieces=())
+
+
+def piece_heads(j: int, count: int, arrow_from: Arrow | None, arrow_to: Arrow | None) -> tuple[Arrow | None, Arrow | None]:
+    """The heads piece `j` of `count` carries: the start's on the first, the end's on the last."""
+    return arrow_from if j == 0 else None, arrow_to if j == count - 1 else None
+
+
+def arc_plan_keys(sweep: float, arrow_from: Arrow | None, arrow_to: Arrow | None, plan: ArcPlan) -> list[TemplateKey]:
+    """The templates an arc written as `plan` is copied from."""
+    match plan.form:
+        case "turned":
+            return [_arc_key(sweep, arrow_from, arrow_to)]
+        case "upright":
+            return [(arc_kind(arrow_from, arrow_to), abs(curves.drawn_sweep(sweep)), plan.at)]
+        case "ellipses":
+            n = len(plan.pieces)
+            return [ellipse_key(p.visual, *piece_heads(j, n, arrow_from, arrow_to)) for j, p in enumerate(plan.pieces)]
+        case "chords":
+            return []
+        case _:
+            assert_never(plan.form)
+
+
+def arc_transform(tpl: Template, ln: DiagramLine, sweep: float, scale: float, at: float) -> AffineTransform:
+    """The transform putting an arc's template (the preset `arc` from `at` degrees clockwise
+    through the drawn sweep, in a square `tpl.w` x `tpl.h`) on its circle (`curves.arc_circle`):
+    scaled to the circle, mirrored when it turns anticlockwise, turned to start where it starts."""
     drawn = curves.drawn_sweep(sweep)
     circle = curves.arc_circle(ln.from_, ln.to, drawn)
     turn = 1.0 if drawn > 0 else -1.0
-    angle = math.radians(circle.start)
+    # rotation . mirror(turn) . scale: the template's point at angle a goes to rotation + turn * a
+    return _placed(tpl, circle.centre, math.radians(circle.start - turn * at), turn,
+                   2 * circle.radius * scale / tpl.w, 2 * circle.radius * scale / tpl.h, scale)
+
+
+def ellipse_transform(tpl: Template, piece: Ellipse, scale: float) -> AffineTransform:
+    """The transform putting an elliptical piece's template (`ellipse_key`, a square `tpl.w` x
+    `tpl.h`) on its ellipse: scaled to 2a x 2b, turned to its chord, mirrored for an
+    anticlockwise arc (its top bulges away from the circle's centre either way)."""
+    centre, angle, turn = ellipse_centre(piece)
+    return _placed(tpl, centre, angle, turn, 2 * piece.a * scale / tpl.w, 2 * piece.b * scale / tpl.h, scale)
+
+
+def _placed(tpl: Template, centre: Point, angle: float, turn: float, sx: float, sy: float,
+            scale: float) -> AffineTransform:
+    """rotation(angle) . mirror(turn) . scale(sx, sy), the template's centre on `centre` (PDF pt)."""
     cos, sin = math.cos(angle), math.sin(angle)
-    sx, sy = 2 * circle.radius * scale / tpl.w, 2 * circle.radius * scale / tpl.h
-    # rotation(start) . mirror(turn) . scale: the template's point at angle a goes to start + turn * a
     a, b, c, d = cos * sx, -sin * turn * sy, sin * sx, cos * turn * sy
-    tx = circle.centre[0] * scale - (a * tpl.w + b * tpl.h) / 2
-    ty = circle.centre[1] * scale - (c * tpl.w + d * tpl.h) / 2
+    tx = centre[0] * scale - (a * tpl.w + b * tpl.h) / 2
+    ty = centre[1] * scale - (c * tpl.w + d * tpl.h) / 2
+    return {"scaleX": round(a, 6), "shearX": round(b, 6), "shearY": round(c, 6), "scaleY": round(d, 6),
+            "unit": "EMU", "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)}
+
+
+def arc_requests(tpl: Template, oid: str, ln: DiagramLine, transform: AffineTransform,
+                 scale: float) -> list[SlidesRequest]:
+    """An arc (or a piece of one) copied from its template and put in place by one ABSOLUTE
+    transform (`arc_transform`, `ellipse_transform`). Its ends land on the arc's; its outline
+    takes the line's colour and weight (the template's heads stay)."""
     outline: Outline = {"outlineFill": {"solidFill": {"color": rgb_color(ln.stroke)}},
                         "weight": pt(round(max(0.5, ln.width * scale), 2))}
     if ln.dash is not None:  # (a solid arc writes no dash, as a solid line)
         outline["dashStyle"] = ln.dash
     return [{"duplicateObject": {"objectId": tpl.id, "objectIds": {tpl.id: oid}}},
-            {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE", "transform": {
-                "scaleX": round(a, 6), "shearX": round(b, 6), "shearY": round(c, 6), "scaleY": round(d, 6),
-                "unit": "EMU", "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)}}},
+            {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE",
+                                            "transform": transform}},
             {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}},
             {"updateShapeProperties": {
                 "objectId": oid,
@@ -356,7 +640,22 @@ def arc_requests(tpl: Template, oid: str, ln: DiagramLine, sweep: float, scale: 
 def arc_chords(oid: str, ln: DiagramLine, sweep: float) -> list[tuple[str, Point, Point, DiagramLine]]:
     """An arc as straight pieces of at most `CHORD_STEP` degrees (no template to copy): the first
     keeps the start's head and object id, the last the end's head."""
-    n = max(2, math.ceil(abs(sweep) / CHORD_STEP))
+    return arc_chords_by(oid, ln, sweep, CHORD_STEP)
+
+
+def fine_step(ln: DiagramLine, sweep: float) -> float:
+    """The degrees of an arc one straight piece stands for where no curve fits its page: no more
+    than turns `KINK` at a join, nor than keeps the chord within `curves.ARC_TOLERANCE` of it."""
+    radius = curves.arc_circle(ln.from_, ln.to, sweep).radius
+    if radius <= curves.ARC_TOLERANCE:
+        return KINK
+    return min(KINK, math.degrees(2 * math.acos(1 - curves.ARC_TOLERANCE / radius)))
+
+
+def arc_chords_by(oid: str, ln: DiagramLine, sweep: float, step: float) -> list[tuple[str, Point, Point, DiagramLine]]:
+    """An arc as straight pieces of at most `step` degrees: the first keeps the start's head and
+    object id, the last the end's head."""
+    n = max(2, math.ceil(abs(sweep) / step))
     circle = curves.arc_circle(ln.from_, ln.to, sweep)
     points = [ln.from_, *(curves.arc_point(circle, k * sweep / n) for k in range(1, n)), ln.to]
     return [(oid if k == 0 else f"{oid}c{k}", points[k], points[k + 1],
@@ -365,31 +664,81 @@ def arc_chords(oid: str, ln: DiagramLine, sweep: float) -> list[tuple[str, Point
             for k in range(n)]
 
 
+def label_width_on(w: float, cx: float, paragraphs: Sequence[Sequence[ir_types.Run]], scale: float,
+                   fonts: FontMapper, page: Page) -> float:
+    """The width of a label's own box (`w`, centred on `cx`, Slides pt) narrowed about its middle
+    as far as it reaches past `page`, down to its widest line as Slides sets it, `LABEL_ROOM`
+    wider, and `LINE_MARGIN` between the insets: it is centred, so its words stay where they were.
+    A label nobody can measure keeps its box."""
+    over = max(w / 2 - cx, cx + w / 2 - page.width)
+    if over <= 0:
+        return w
+    widths = [slides_width_of(in_sentence_of(set_runs(line)), scale, fonts) for line in paragraphs]
+    known = [v for v in widths if v is not None]
+    if len(known) != len(widths) or not known:
+        return w
+    least = max(known) * LABEL_ROOM + LINE_MARGIN + 2 * PAD_X
+    return min(w, max(least, w - 2 * over))
+
+
 def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                        template: Callable[[TemplateKey], Template] | None) -> list[SlidesRequest]:
+                        template: Callable[[TemplateKey], Template] | None, page: Page | None) -> list[SlidesRequest]:
     """Nodes become shapes, edges become lines with arrow heads; the parts are grouped so the
     diagram moves as one piece but stays editable. A label that fits goes inside its node (a
     template shape without text padding, see label_inside); one that doesn't gets a text box
     grouped with its node. Line ends on a node's connection site are connected to it, so edges
-    follow nodes moved in Slides. `template(key)` gives this slide's template shape for a key."""
+    follow nodes moved in Slides. `template(key)` gives this slide's template shape for a key.
+    With `page`, nothing is written past it that the diagram does not draw there: an arc whose
+    circle's box would reach past it is written as `arc_plan` says (upright, elliptical pieces,
+    else fine chords; its heads on the end pieces), and a label's box narrows about its middle.
+    Only a turned arc is `<id>_l<j>`, as sync looks for an arc's template under the line's id: an
+    upright one is `_l<j>u`, pieces `_l<j>e<k>`, fine chords `_l<j>s`, `_l<j>sc<k>`."""
     reqs: list[SlidesRequest] = []
     children: list[str] = []
     node_oids = [f"{object_id}_n{j}" for j in range(len(el.nodes))]
     # (object id, from, to, line): elbows without a template fall back to two lines
     segments: list[tuple[str, Point, Point, DiagramLine]] = []
+    # an arc's object id -> its template's key, its elliptical piece or None, an upright template's start
+    arcs: dict[str, tuple[TemplateKey, Ellipse | None, float]] = {}
     for j, ln in enumerate(el.lines):
         if ln.elbow is not None and template is None:
             segments += [(f"{object_id}_l{j}", ln.from_, ln.elbow.via, replace(ln, arrow_to=None)),
                          (f"{object_id}_l{j}b", ln.elbow.via, ln.to, replace(ln, arrow_from=None))]
         elif ln.sweep is not None and template is None:
             segments += arc_chords(f"{object_id}_l{j}", ln, ln.sweep)
+        elif ln.sweep is not None:
+            plan = arc_plan(ln.from_, ln.to, ln.sweep, scale, page)
+            keys = arc_plan_keys(ln.sweep, ln.arrow_from, ln.arrow_to, plan)
+            match plan.form:
+                case "turned" | "upright":
+                    oid = f"{object_id}_l{j}" + ("" if plan.form == "turned" else "u")
+                    segments.append((oid, ln.from_, ln.to, ln))
+                    arcs[oid] = (keys[0], None, plan.at)
+                case "ellipses":
+                    n = len(plan.pieces)
+                    for k, (piece, key) in enumerate(zip(plan.pieces, keys)):
+                        start_head, end_head = piece_heads(k, n, ln.arrow_from, ln.arrow_to)
+                        oid = f"{object_id}_l{j}e{k}"
+                        segments.append((oid, piece.start, piece.end,
+                                         replace(ln, sweep=piece.sweep, arrow_from=start_head, arrow_to=end_head)))
+                        arcs[oid] = (key, piece, 0.0)
+                case "chords":
+                    segments += arc_chords_by(f"{object_id}_l{j}s", ln, ln.sweep, fine_step(ln, ln.sweep))
+                case _:
+                    assert_never(plan.form)
         else:
             segments.append((f"{object_id}_l{j}", ln.from_, ln.to, ln))
     for oid, (x1, y1), (x2, y2), ln in segments:
         dx, dy = (x2 - x1) * scale, (y2 - y1) * scale
-        if ln.sweep is not None and template is not None:
-            # A curve's arc: a turned copy of its template, which brought its heads along.
-            reqs += arc_requests(template(_arc_key(ln.sweep, ln.arrow_from, ln.arrow_to)), oid, ln, ln.sweep, scale)
+        drawn = arcs.get(oid)
+        if drawn is not None and ln.sweep is not None and template is not None:
+            # A curve's arc: a copy of its template (which brought its heads along) put on its
+            # circle, or on its piece's ellipse.
+            key, piece, at = drawn
+            tpl = template(key)
+            transform = arc_transform(tpl, ln, ln.sweep, scale, at) if piece is None else \
+                ellipse_transform(tpl, piece, scale)
+            reqs += arc_requests(tpl, oid, ln, transform, scale)
             children.append(oid)
             continue
         if ln.elbow is not None and template is not None:
@@ -457,6 +806,8 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                 # gets its own wider text box, centred on the node and grouped with it.
                 target = f"{object_id}_x{j}"
                 cx, w = (x0 + x1) / 2, (x1 - x0) + 2 * PAD_X + 40
+                if page is not None and node.rotation is None:
+                    w = label_width_on(w, cx, node.paragraphs, scale, fonts, page)
                 made: list[SlidesRequest] = [
                     {"createShape": {"objectId": target, "shapeType": "TEXT_BOX", "elementProperties": {
                         "pageObjectId": slide_id, "size": {"width": emu(w), "height": emu(y1 - y0)},

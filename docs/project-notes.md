@@ -4863,3 +4863,31 @@ background painted 0.02 pt larger over a white one came out under it, and the wh
 page ground (slides 8, 12, 14, 21, 25). `shapes` now swaps two panels whose boxes agree within
 0.5 pt into draw order. A sort of every panel by draw order reordered 14 slides of the built decks
 (soft-masked block shadows and title bars carry draw indices that do not say what is seen).
+
+## Objects past the slide's edge (2026-10-03)
+Reported on a Slides -> beamer -> Slides round trip: the slide looked right, but boxes ran off its
+edges in the editor. A scan of every base under out/ (1169, read-back boxes against the page)
+found 12,259 footer boxes reaching right and down (+21 pt: the frame number's box keeps
+`LINE_MARGIN` and an inset past words set at the page's edge), body boxes grown right for a wider
+face (up to +59 pt on 27_text_fit), number boxes, icons, turned text of adopted decks, and ARC
+copies whose frame is their whole circle (+353 pt on 29_tikz slide 4).
+- Text (`emit_text.on_page`, `text_requests_on_page`): a box reaching past the page is planned
+  again within it as far as no word moves or wraps: a left-aligned box gives up room past its
+  words (`words_right`), lines set at the page's edge are written right-aligned ending `PAD_X` past
+  them (`flush_right`, only where Slides sets them as wide as the PDF to `FLUSH_TOL`), a turned
+  box is moved about its centre (`turned_about`). Number boxes go through the same `Page`.
+- Arcs (`emit_diagrams.arc_on_page`): the first of four forms whose box lies on the page: the
+  turned preset copy (`_l{j}`, as before); an upright copy whose template starts where the arc
+  starts (`upright_at`, `_l{j}u`; the template key's third slot is the start angle); stretched
+  copies matching the arc's ends and end tangents (`ellipse_pieces`, <= `MAX_ELLIPSES`, within
+  `ELLIPSE_TOLERANCE` 0.2 pt of the circle, `_l{j}e{k}`); fine chords of 2 deg or less only when
+  none fits. A first version cut gentle arcs into 5-6 chords: kinked live and smaller heads.
+  Live: stretched ARC presets are drawn as OOXML says, adj angles from the centre of
+  the stretched frame; slide 4's upright arcs and slide 5's ellipses join end to end.
+- Live: 29_tikz, the adopted bees/water/portfolio decks and 09_metropolis_fira have nothing past
+  the edge; 27_text_fit slide 2's words that themselves reach the edge stay (+2.8/+1.3 pt), as do
+  Hannover/Pittsburgh slide 7's title (+2.2 pt). `test_elements_lie_within_the_page` holds the
+  built decks (`OFF_PAGE_ALLOWED` empty).
+- Sync: an old base's footer and number boxes read as width changes once; an arc that is no
+  longer turned has a new object id, so sync recreates its unit, and a recreated upright or
+  stretched arc finds no template under `_l{j}` and falls back to a stand-in with a warning.

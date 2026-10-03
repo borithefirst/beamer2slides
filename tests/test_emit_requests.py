@@ -8,6 +8,7 @@ import re
 import tempfile
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -15,20 +16,20 @@ import numpy as np
 import pytest
 from pptx.presentation import Presentation as PptxPresentation
 
-from beamer2slides import curves, emit, emit_holes
+from beamer2slides import emit, emit_holes
 from beamer2slides.classify import HOLE_PAD, classify
 from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, FontMapper, find_marks, fit_holes,
                                 formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
                                 measure_jobs, overlay_boxes, pick_gap, slide_holes, space_shift)
-from beamer2slides.emit_model import Place, PptxText, table_of, text_of
+from beamer2slides.emit_model import Place, PptxText, set_text, table_of, text_of
 from beamer2slides.emit_pptx import SHELL_CHAR
 from beamer2slides.emit_tables import pptx_table_of, table_requests_of
-from beamer2slides.emit_text import text_box_requests_of
+from beamer2slides.emit_text import text_box_requests_of, words_right
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.fonts import font_info
 from beamer2slides.google_types import SlidesRequest, part_json, slides_json, slides_request_kind
 from beamer2slides.ir import deck_json
-from beamer2slides.ir_types import Mark
+from beamer2slides.ir_types import Mark, TextElement
 from beamer2slides.json_types import Json, JsonObject, as_str
 from beamer2slides.notes import prepare
 
@@ -62,35 +63,6 @@ def box_of(transform: JsonObject, w: float, h: float) -> Box4:
         xs.append(part("scaleX") * x + part("shearX") * y + part("translateX") * k)
         ys.append(part("shearY") * x + part("scaleY") * y + part("translateY") * k)
     return min(xs), min(ys), max(xs), max(ys)
-
-
-def arc_boxes(d: "Emitted") -> dict[str, Box4]:
-    """Page box (pt) of each diagram arc as drawn: an arc copy's frame is its whole circle's square
-    (the preset `arc`), which may reach past the page while the arc itself does not."""
-    out: dict[str, Box4] = {}
-    for _, page, parts, _ in d.result["slides"]:
-        scale = SLIDE_W / jnums(d.slides[page], "size")[0]
-        for el, reqs in parts:
-            if el is None or el["kind"] != "diagram":
-                continue
-            lines = jobjs(el, "lines")
-            for r in reqs:
-                body = slides_json(r)
-                if "duplicateObject" not in body:
-                    continue
-                for copy in jobj(body, "duplicateObject", "objectIds").values():
-                    oid = as_str(copy, "objectIds")
-                    j = re.search(r"_l(\d+)$", oid)
-                    if j is None or "sweep" not in lines[int(j.group(1))]:
-                        continue
-                    ln = lines[int(j.group(1))]
-                    sweep = curves.drawn_sweep(jnum(ln, "sweep"))
-                    (x0, y0), (x1, y1) = jnums(ln, "from"), jnums(ln, "to")
-                    circle = curves.arc_circle((x0, y0), (x1, y1), sweep)
-                    points = [curves.arc_point(circle, sweep * k / 60) for k in range(61)]
-                    out[oid] = (min(x for x, _ in points) * scale, min(y for _, y in points) * scale,
-                                max(x for x, _ in points) * scale, max(y for _, y in points) * scale)
-    return out
 
 
 def pt_of(dim: Json) -> float:
@@ -143,6 +115,8 @@ class Emitted:
         self.font_max: dict[str, float] = {}
         self.sizes: dict[str, tuple[float, float]] = {}
         self.boxes: dict[str, Box4] = {}  # object id -> page box (pt) where its creation gives one
+        self.element: JsonObject | None = None  # the element whose requests are being replayed
+        self.owner: dict[str, JsonObject] = {}  # object id -> the element whose requests made it
         # text shells the .pptx carries (bullets no preset draws): object id -> the shell
         self.shells: dict[str, PptxText] = {
             f"b2s_s{jint(s, 'page'):03}_t{i}": shell for s in self.plan.slides()
@@ -160,6 +134,8 @@ class Emitted:
         if page is not None and self.page_of.get(page, "") is not None:
             self.flag("ids", where, f"{oid} created on {page}, which is no page")
         self.page_of[oid] = page
+        if self.element is not None:
+            self.owner[oid] = self.element
 
     def need(self, oid: str, where: str, what: str) -> bool:
         if oid not in self.page_of:
@@ -182,8 +158,44 @@ class Emitted:
         for slide_id, page, parts, _ in self.result["slides"]:
             for el, reqs in parts:
                 where = f"{slide_id} {el['id'] if el else ''}".strip()
+                self.element = el
                 for r in reqs:
                     self.apply(r, where)
+        self.element = None
+        # what the .pptx brought at its own place: pictures, empty tables, text shells (moved later)
+        for slide_id, page, _, _ in self.result["slides"]:
+            slide = self.slides[page]
+            elements = jobjs(slide, "elements")
+            for i, (e, box) in zip([i for i, e in enumerate(elements) if e["kind"] == "image"],
+                                   self.result["pictures"][page]):
+                self.owner[f"{slide_id}_f{i}"] = e
+                self.boxes.setdefault(f"{slide_id}_f{i}", (box[0], box[1], box[2], box[3]))
+            tables = [i for i, e in enumerate(elements) if e["kind"] == "table"]
+            for i, t in zip(tables, self.plan.tables(slide)):
+                self.owner[f"{slide_id}_tab{i}"] = elements[i]
+                self.boxes.setdefault(f"{slide_id}_tab{i}", (t.x, t.y, t.x + sum(t.widths), t.y + sum(t.heights)))
+            for i, e in enumerate(elements):  # (shells and placeholders: imported, then placed)
+                self.owner.setdefault(f"{slide_id}_t{i}", e)
+
+    def frame(self, oid: str) -> Box4 | None:
+        """An object's frame on its page (pt), a group's the union of its children's; None for one
+        whose place nothing here gives (an imported placeholder never moved)."""
+        if oid in self.groups:
+            kids = [b for b in (self.frame(c) for c in self.groups[oid] if c in self.page_of) if b is not None]
+            if not kids:
+                return None
+            return (min(b[0] for b in kids), min(b[1] for b in kids), max(b[2] for b in kids), max(b[3] for b in kids))
+        return self.boxes.get(oid)
+
+    def owner_of(self, oid: str) -> JsonObject | None:
+        """The element an object (or a group: its first child's) was emitted for."""
+        if oid in self.owner:
+            return self.owner[oid]
+        for c in self.groups.get(oid, []):
+            got = self.owner_of(c)
+            if got is not None:
+                return got
+        return None
 
     def apply(self, request: SlidesRequest, where: str) -> None:
         kind = slides_request_kind(request)
@@ -350,6 +362,46 @@ def problems(decks: Sequence[Emitted], invariant: str) -> list[str]:
 
 def report(found: list[str]) -> str:
     return f"{len(found)} problem(s):\n" + "\n".join(found[:40])
+
+
+@dataclass(frozen=True, kw_only=True)
+class OffPage:
+    """An object whose frame reaches past its slide's page by more than the tolerance."""
+    slide: str
+    oid: str
+    element: str
+    family: str
+    """The element's kind/role and the object: `text/footer shape`, `diagram/figure group`..."""
+    sides: str
+    """Which edges it crosses, of L, T, R, B."""
+    over: float
+    """How far past the furthest of them (pt)."""
+    box: Box4
+
+
+def off_page(d: Emitted, tolerance: float) -> list[OffPage]:
+    """Every object on a deck slide - a group by its children's union, as Slides frames it - whose
+    frame reaches past the page by more than `tolerance` pt (CLAUDE.md: nothing the converter
+    writes sticks out into the editor's canvas)."""
+    out: list[OffPage] = []
+    for oid, page in d.page_of.items():
+        if page is None or not page.startswith("b2s_s") or "scratch" in page:
+            continue
+        box = d.frame(oid)
+        if box is None:
+            continue
+        x0, y0, x1, y1 = box
+        past = (("L", -x0), ("T", -y0), ("R", x1 - SLIDE_W), ("B", y1 - d.page_h))
+        sides = "".join(side for side, by in past if by > tolerance)
+        if not sides:
+            continue
+        el = d.owner_of(oid)
+        what = "group" if oid in d.groups else "picture" if re.search(r"_f\d+$", oid) else \
+            "table" if "_tab" in oid else "shape"
+        family = (f"{el['kind']}/{el.get('role') or ''} " if el is not None else "? ") + what
+        out.append(OffPage(slide=page, oid=oid, element=jstr(el, "id") if el is not None else "", family=family,
+                           sides=sides, over=max(by for _, by in past), box=box))
+    return out
 
 
 def element_parts(parts: Sequence[emit.Part], element_ids: Sequence[str]) -> list[tuple[JsonObject, list[JsonObject], str]]:
@@ -691,33 +743,54 @@ def test_triangle_bullets_come_with_the_pptx(decks: tuple[Emitted, ...]) -> None
     assert not found, report(found)
 
 
+OFF_PAGE_TOLERANCE = 1.0  # pt an object's frame may reach past the page (rounding, a hairline's half)
+# Objects allowed past the page: "deck slide object-id". Empty, and it stays so: an object the
+# converter cannot bring in is explained by `words_at_the_edge`, or it is a defect.
+OFF_PAGE_ALLOWED: frozenset[str] = frozenset()
+
+
+def words_at_the_edge(d: Emitted, f: OffPage) -> bool:
+    """Whether an object reaches past the right edge only as far as a text box must for its words,
+    as Slides sets them, not to wrap (`emit_text.words_right`: the widest line, LINE_MARGIN and the
+    inset), when they come that close to the edge - a group by such boxes alone. What the box
+    shows is its words; `on_page` brought in every point of room past them."""
+    if f.sides != "R":
+        return False
+    if f.oid in d.groups:
+        for c in d.groups[f.oid]:
+            b = d.frame(c)
+            if b is not None and b[2] > SLIDE_W + OFF_PAGE_TOLERANCE and not words_at_the_edge(d, OffPage(
+                    slide=f.slide, oid=c, element="", family="", sides="R", over=b[2] - SLIDE_W, box=b)):
+                return False
+        return True
+    el = d.owner.get(f.oid)
+    if el is None or el["kind"] != "text" or not re.search(r"_t\d+$", f.oid):
+        return False
+    slide = d.slides[int(f.slide[5:])]
+    scale = SLIDE_W / jnums(slide, "size")[0]
+    typed = emit.parse_slide_element(el, "background" in slide, f.slide)
+    if not isinstance(typed, TextElement):
+        return False
+    need = words_right(set_text(typed), scale, FONTS)
+    return need is not None and f.box[2] <= max(SLIDE_W, need) + OFF_PAGE_TOLERANCE
+
+
 def test_elements_lie_within_the_page(decks: tuple[Emitted, ...]) -> None:
-    """Pictures, shapes, tables and lines within 1 pt. A text box may reach past the right edge
-    by its slack (a single line gets 15% or two ems of room, so a wider font never wraps it) and
-    past the bottom by its 4 pt of room below the last line. A number box centred on a ball near
-    the edge only needs its number inside."""
-    found: list[str] = []
-    for d in decks:
-        # (slide, object, box, the largest font size of a text box's text, None for no text box)
-        boxes: list[tuple[str, str, Sequence[float], float | None]] = [
-            (f"b2s_s{page:03}", jstr(e, "id"), box, None) for page, pictures in d.result["pictures"].items()
-            for e, box in pictures]
-        arcs = arc_boxes(d)
-        for oid, created in d.boxes.items():
-            created = arcs.get(oid, created)
-            on = d.page_of.get(oid)
-            if on is not None and on.startswith("b2s_s"):
-                boxes.append((on, oid, created, d.font_max.get(oid, 0.0) if oid in d.texts else None))
-        for slide_id, name, (x0, y0, x1, y1), text in boxes:
-            if re.search(r"_f\d+n$", name):
-                assert text is not None, f"{name}: a number box with no text"
-                pad = (x1 - x0 - len(d.texts[name]) * text) / 2
-                x0, x1 = x0 + pad, x1 - pad
-            right, bottom = (1.0, 1.0) if text is None else (max(0.15 * (x1 - x0), 2 * text) + 1, 4.0)
-            if x0 < -1 or y0 < -1 or x1 > SLIDE_W + right or y1 > d.page_h + bottom:
-                found.append(f"{d.name} {slide_id} {name}: ({x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}) "
-                             f"outside {SLIDE_W:.0f} x {d.page_h:.0f}")
+    """Every object emit writes - pictures, shapes, tables, lines, text boxes, groups by their
+    children - lies within its page to `OFF_PAGE_TOLERANCE`: Slides frames it there in the editor,
+    past the slide's edge, wherever its ink is (live: 15,000 such frames over 1,169 bases, footers'
+    room past their words, single lines' slack, number boxes, an arc's whole circle). The one
+    exception is a text box whose own words come within its inset and LINE_MARGIN of the edge
+    (`words_at_the_edge`)."""
+    found = [f"{d.name} {f.slide} {f.oid} ({f.family}, {f.element}): {f.sides} +{f.over:.1f} pt "
+             f"{tuple(round(v, 1) for v in f.box)}"
+             for d in decks for f in off_page(d, OFF_PAGE_TOLERANCE)
+             if f"{d.name} {f.slide} {f.oid}" not in OFF_PAGE_ALLOWED and not words_at_the_edge(d, f)]
     assert not found, report(found)
+
+
+def test_the_off_page_allowlist_stays_empty() -> None:
+    assert not OFF_PAGE_ALLOWED, "bring the object in, or explain it as words_at_the_edge does"
 
 
 def stacking(page_elements: Sequence[JsonObject], parts: Sequence[emit.Part]) -> list[str]:

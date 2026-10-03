@@ -73,7 +73,8 @@ def template_key_of(shape: str, bbox: Box, radius: float, shadow: float | None, 
 
 ARC = "ARC"
 """An arc template's kind (a diagram's curve, `emit_diagrams.arc_template_key_of`) begins so;
-`arc_kind` adds its heads: (kind, |sweep| in degrees, None)."""
+`arc_kind` adds its heads: (kind, |sweep| in degrees, where it starts in degrees - None for 0,
+the turned copy's; an upright copy's or an elliptical piece's otherwise: `emit_diagrams.arc_plan`)."""
 ARC_HEADS: dict[Arrow, str] = {"OPEN_ARROW": "arrow", "FILL_ARROW": "triangle", "STEALTH_ARROW": "stealth"}
 """Slides' arrow heads as a .pptx line end's `type`."""
 
@@ -100,22 +101,23 @@ def arc_heads(kind: str) -> tuple[Arrow | None, Arrow | None] | None:
     return first, last
 
 
-def _add_arc(slide: Slide, i: int, sweep: float, heads: tuple[Arrow | None, Arrow | None]) -> None:
-    """An arc template: the preset `arc` in a square, from 0° (its right) clockwise through
-    `sweep` degrees, unfilled, with its heads (a .pptx brings them in; tools/probe_curves.py)."""
+def _add_arc(slide: Slide, i: int, sweep: float, start: float, heads: tuple[Arrow | None, Arrow | None]) -> None:
+    """An arc template: the preset `arc` in a square, from `start` degrees (0 its right, 270 its
+    top) clockwise through `sweep` degrees, unfilled, with its heads (a .pptx brings them in;
+    tools/probe_curves.py)."""
     from lxml import etree
 
     tree = slide.shapes._spTree
     shape_id = max([int(e.get("id")) for e in tree.iter(f"{{{NS_P}}}cNvPr")] + [1]) + 1
     side, x, y = round(100 * EMU_PER_PT), round((10 + i % 10 * 20) * EMU_PER_PT), round((10 + i // 10 * 20) * EMU_PER_PT)
-    start, end = heads
-    ends = ("" if start is None else f'<a:headEnd type="{ARC_HEADS[start]}"/>') + \
-        ("" if end is None else f'<a:tailEnd type="{ARC_HEADS[end]}"/>')
+    head, tail = heads
+    ends = ("" if head is None else f'<a:headEnd type="{ARC_HEADS[head]}"/>') + \
+        ("" if tail is None else f'<a:tailEnd type="{ARC_HEADS[tail]}"/>')
     tree.append(etree.fromstring(
         f'<p:sp xmlns:p="{NS_P}" xmlns:a="{NS_A}"><p:nvSpPr><p:cNvPr id="{shape_id}" name="Arc {shape_id}"/>'
         f'<p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{side}" cy="{side}"/>'
-        f'</a:xfrm><a:prstGeom prst="arc"><a:avLst><a:gd name="adj1" fmla="val 0"/>'
-        f'<a:gd name="adj2" fmla="val {round(sweep * 60000)}"/></a:avLst></a:prstGeom><a:noFill/>'
+        f'</a:xfrm><a:prstGeom prst="arc"><a:avLst><a:gd name="adj1" fmla="val {round(start * 60000)}"/>'
+        f'<a:gd name="adj2" fmla="val {round((start + sweep) % 360 * 60000)}"/></a:avLst></a:prstGeom><a:noFill/>'
         f'<a:ln w="{round(EMU_PER_PT)}"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>{ends}</a:ln>'
         f'<a:effectLst/></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr/></a:p></p:txBody></p:sp>'))
 
@@ -179,7 +181,9 @@ def _add_template_shapes(slide: Slide, keys: Sequence[TemplateKey]) -> None:
         if heads is not None:
             if adj is None or not 0 < adj < 360:
                 raise ValueError(f"an arc's template key carries its sweep, not {adj!r}")
-            _add_arc(slide, i, adj, heads)
+            if shadow is not None and not 0 <= shadow < 360:
+                raise ValueError(f"an arc's template key carries where it starts, not {shadow!r}")
+            _add_arc(slide, i, adj, 0.0 if shadow is None else shadow, heads)
             continue
         shape = slide.shapes.add_shape(kinds[kind], Pt(10 + i % 10 * 20), Pt(10 + i // 10 * 20), Pt(100), Pt(100))
         if adj is not None and kind in ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE"):
