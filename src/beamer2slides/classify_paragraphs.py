@@ -729,6 +729,11 @@ class ParagraphsMixin(LinesMixin):
                         "underline": span.underline and not plain, "strike": span.strike and not plain,
                         "highlight": None if plain else span.highlight,
                     }
+                    if span.grid is not None and family == "mono" and size > 0:
+                        # code on a column grid in a proportional face: its Roboto Mono is sized
+                        # to the grid's pitch, not to CMTT's 0.525 em (emit_metrics.mono_pitch)
+                        style["pitch"] = round(span.grid[0] / size, 4)
+
                     def marks(r: Run) -> tuple[bool, bool, str | None]:
                         return r.get("underline", False), r.get("strike", False), r.get("highlight")
 

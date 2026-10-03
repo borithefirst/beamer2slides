@@ -488,7 +488,7 @@ def layout_style_spec_of(deck: JsonMap, scale: float, fonts: FontMapper, dy: flo
         font, size, color, family = body_runs.most_common(1)[0][0]
         body = SetRun(text="", font=font, family=family, size=size, bold=False, italic=False, smallcaps=False,
                       script=None, color=color, underline=False, strike=False, highlight=None, link=None, hole=None,
-                      hole_size=None, cell=False, in_sentence=False)
+                      hole_size=None, cell=False, in_sentence=False, pitch=None)
         w, h = point_of(objects_of(deck["slides"], "slides")[0]["size"], "size")
         body = readable_run(body, {"elements": []}, [0.1 * w, 0.3 * h, 0.9 * w, 0.8 * h], ground)
     spec: PlaceholderSpec = {}

@@ -4836,6 +4836,27 @@ highlight it was grouped over the block's picture and washed it pink. Not classi
 7-8 pt text sets 9-12% taller on Slides and wraps a word early; the SFSX small cuts lose their
 bold extended width.
 
+## TeX text faces other than CM (real-deck review, 2026-10-03)
+CM's calibration sized every TeX text face: Linux Libertine came out 7-9% wide in PT Serif,
+Bera and DejaVu Sans 13-17% narrow in Lato, cm-super's bold extended sans titles (SFSX1200,
+SFSX1440) 8-11% narrow. `calibration/text_advances.json` (tools/text_font_advances.py, from the
+T1 TFMs of the TeX tree: Libertine, Biolinum, Bera, DejaVu, Palatino, Utopia, Inconsolata; Charter
+not installed) gives such a face (`fonts.metrics_family`) its own factor: what its advances
+predict for the calibration sentences in the substitute (`FontMapper.text_ratios`), bold and
+italic half corrected against its regular as CM's are. SFSX's optical widths are
+`BOLD_SANS_DESIGN_WIDTH` (1.0 at 10 pt: CMSSBX and LM unchanged). A listing on a column grid
+carries its pitch (run `pitch`, em) and Roboto Mono is sized to it (`mono_pitch`). The pull
+loop reads such runs back as the deck would say them (`compare.read_back_size`). Live:
+beamer-derived-cat (Libertine) text_overlap 0.435 -> 0.579, lecture-phylogenetics (DejaVu, SFSX)
+0.718 -> 0.759, frisem (Bera Sans) 0.500 -> 0.586; on frisem a few slides score lower though their
+widths now match: Lato at 1.18x the size is taller than Bera. A wide Slides face (Verdana is
+Bera's proportions) would match both: to measure.
+Cyrillic (`tools/probe_cyrillic_fonts.py`, live): Slides sets Latin and Cyrillic at one line
+pitch, 1.1925 em, in every face tried (Lato, PT Sans, Roboto, Open Sans, Noto Sans, Arimo, Fira,
+Source Sans Pro, Plex, Ubuntu); every face's x-height is 9-15% above SFSS's 0.444. So the africa
+deck's taller Cyrillic paragraphs are not the fallback face: Lato stays (Source Sans Pro was
+3 points of x-height nearer, not worth a second look for one script).
+
 ## Panels on one box keep the PDF's order (real_slide-20250221, 2026-10-03)
 Panels are listed biggest first (a container under what it holds), but a #fafafa frame
 background painted 0.02 pt larger over a white one came out under it, and the white covered the

@@ -28,12 +28,14 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, Union
 
 from .classify import FRAME_COUNTER_RE
-from .emit import merge_blocks
-from .fonts import google_font
+from .emit import FontMapper, merge_blocks
+from .emit_model import run_of
+from .fonts import google_font, metrics_family
 from .deck_ir_types import TargetDeck, target_json
 from .ir_types import At, Box, Deck, Parse, RenderedDeck, box, deck_json, integer, number, one_of, pair, point, string
 from .json_types import Json, JsonArray, JsonObject, JsonShapeError, as_array, as_object, as_objects, as_str
@@ -241,10 +243,35 @@ class SlideView:
     shapes: tuple[ShapeView, ...]   # as emit writes them: a block's body reaching up under its title bar
 
 
+@lru_cache(maxsize=1)
+def _font_mapper() -> FontMapper:
+    return FontMapper()
+
+
+def read_back_size(r: JsonObject, size: float | None) -> float | None:
+    """The size a run's words come back with from the deck it converts to: `deck_ir` reads every
+    converted run back through Computer Modern's factors (it cannot tell which TeX face Slides' Lato
+    or PT Serif stands in for), but emit sizes a TeX text face other than CM by its own metrics
+    (`emit_metrics.TEXT_ADVANCES`: Linux Libertine 7% smaller than CM's factor, Bera Sans 16% larger)
+    and code on a column grid by its pitch. Such a run is compared as the deck would say it, so a
+    pull's loop neither sees a difference nobody made nor misses one; any other run keeps its size."""
+    font, family = r.get("font"), r.get("family")
+    if size is None or not isinstance(font, str) or google_font(font) or \
+            (metrics_family(font) is None and not (family == "mono" and r.get("pitch") is not None)):
+        return size
+    from .deck_ir import pdf_size
+    fonts = _font_mapper()
+    run = run_of(r)
+    slides_font, slides_size = fonts.size_of(run, 1.0)
+    return pdf_size(fonts, slides_font, slides_size, run.bold, run.italic, 1.0, None, run.text, run.smallcaps,
+                    run.script is not None)[0]
+
+
 def run_view(r: JsonObject, where: str) -> RunView:
     return RunView(text=run_text(r), font=_get(r, "font", string, where) or "", bold=bool(r.get("bold")),
                    italic=bool(r.get("italic")), underline=bool(r.get("underline")),
-                   color=(_get(r, "color", string, where) or "#000000").lower(), size=_get(r, "size", number, where),
+                   color=(_get(r, "color", string, where) or "#000000").lower(),
+                   size=read_back_size(r, _get(r, "size", number, where)),
                    mono=r.get("family") == "mono", script=bool(r.get("script")))
 
 

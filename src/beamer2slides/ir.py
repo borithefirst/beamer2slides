@@ -148,6 +148,9 @@ class Run(_RunKeys, total=False):
     hole_x0: float
     before: list[BeforeWord]
     next_x0: float | None
+    pitch: float
+    """Code set on a column grid in a proportional face (a listing's columns=fixed): the grid's
+    pitch per em of `size`, which emit sizes its Roboto Mono to (`emit_metrics.mono_pitch`)."""
 
 
 class Label(TypedDict):

@@ -7,12 +7,12 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from importlib import resources
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from .emit_model import BulletFace, JsonMap, SetBullet, SetRun, bullet_of, run_of
-from .fonts import font_info, google_font
+from .fonts import METRICS_FAMILIES, MetricsFamily, font_info, google_font, metrics_family
 from .gslides import pt_json as pt
-from .json_types import JsonObject
+from .json_types import Json, JsonObject, JsonShapeError, as_object
 
 
 # Found through the package, never through the checkout: an installed wheel, a zip import and
@@ -127,9 +127,26 @@ OPTICAL_WEIGHTS_READ = (OPTICAL_WEIGHT, 800)
 DRAWN_BOLD_WEIGHT = 700
 
 
+# EC's bold extended sans (cm-super's SFSX, SFSO: beamer's bold sans under T1) is the other way
+# round: wider per em above 10 pt, not narrower, and only a little wider below it. Width of the
+# calibration sentences per em relative to the 10 pt cut, from the ecsx*.tfm advances (10.95,
+# 14.4, 17.28 and 20.74 pt keyed 11, 14, 17, 21). Taken for CM Sans's regular widths, a 12 pt
+# SFSX1200 frame title came out 8% narrower than the PDF's, a 14.4 pt title page 11% (lecture-
+# phylogenetics, esi-dev1). CM has its bold extended sans at 10 pt only (CMSSBX10), as Latin Modern.
+BOLD_SANS_DESIGN_WIDTH = {5: 1.0883, 6: 1.042, 7: 1.0226, 8: 1.0321, 9: 0.9577, 10: 1.0, 11: 1.0017, 12: 1.0239,
+                          14: 1.046, 17: 1.0547, 21: 1.067}
+
+
 def optical_width(family: str, design: float) -> float:
     """How much wider per em than its 10 pt cut the size factor takes a run's optical size to be."""
     return min(OPTICAL_WIDTH_MAX, design_width(DESIGN_WIDTH.get(family, DESIGN_WIDTH["sans"]), design))
+
+
+def face_optical_width(family: str, bold: bool, design: float) -> float:
+    """`optical_width` of a face: a bold sans cut's are its own (BOLD_SANS_DESIGN_WIDTH)."""
+    if family == "sans" and bold:
+        return min(OPTICAL_WIDTH_MAX, design_width(BOLD_SANS_DESIGN_WIDTH, design))
+    return optical_width(family, design)
 
 
 def u16(text: str) -> int:
@@ -202,7 +219,10 @@ SHAPE_TITLE_REFERENCE = ("Itemize, nested and frame titles",)  # the title facto
 # run was set 1.3-1.7 times too large. Their width is neither the PDF's letters' nor a sentence's,
 # so they count on neither side, with the spaces around them (advance_widths).
 LEADER = re.compile(r"[   ]*\.(?:[   ]*\.)+[   ]*")
-STYLE_KEY = {(False, False): "regular", (True, False): "bold", (False, True): "italic", (True, True): "bold_italic"}
+FaceStyle = Literal["regular", "bold", "italic", "bold_italic"]
+FACE_STYLES: tuple[FaceStyle, ...] = ("regular", "bold", "italic", "bold_italic")
+STYLE_KEY: dict[tuple[bool, bool], FaceStyle] = {(False, False): "regular", (True, False): "bold",
+                                                 (False, True): "italic", (True, True): "bold_italic"}
 SLANTED = re.compile(r"CMB?X?SL\d|SFSL\d|SFBL\d|LMROMANSLANT")  # slanted roman: upright widths
 
 
@@ -226,6 +246,91 @@ class CmFace(TypedDict):
     kerns: dict[str, float]
     space: float
     extra_space: float
+
+
+def _em(value: Json, where: str) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    raise JsonShapeError(f"{where}: a number was expected")
+
+
+def _ems(value: Json, where: str) -> dict[str, float]:
+    return {k: _em(v, f"{where}.{k}") for k, v in as_object(value, where).items()}
+
+
+def parse_face(value: Json, where: str) -> CmFace:
+    """A CM_ADVANCES-shaped face record read from JSON."""
+    o = as_object(value, where)
+    return CmFace(advances=_ems(o["advances"], f"{where}.advances"), kerns=_ems(o["kerns"], f"{where}.kerns"),
+                  space=_em(o["space"], f"{where}.space"), extra_space=_em(o["extra_space"], f"{where}.extra_space"))
+
+
+def parse_text_advances(value: Json, where: str) -> dict[MetricsFamily, dict[FaceStyle, CmFace]]:
+    """calibration/text_advances.json: every family `fonts.metrics_family` names, with the styles
+    the TeX tree has for it (Bera Serif has no italic)."""
+    fonts = as_object(as_object(value, where)["fonts"], f"{where}.fonts")
+    out: dict[MetricsFamily, dict[FaceStyle, CmFace]] = {}
+    for family in METRICS_FAMILIES:
+        if family not in fonts:
+            raise JsonShapeError(f"{where}.fonts: no {family}")
+        faces = as_object(fonts[family], f"{where}.fonts.{family}")
+        out[family] = {style: parse_face(faces[style], f"{where}.fonts.{family}.{style}")
+                       for style in FACE_STYLES if style in faces}
+    return out
+
+
+_TEXT_ADVANCES_JSON: Json = json.loads((CALIBRATION_DIR / "text_advances.json").read_text(encoding="utf-8"))
+# The advances, kerns and spaces of TeX text faces other than Computer Modern (Linux Libertine,
+# Biolinum, Bera, DejaVu, Palatino, Utopia, Inconsolata), from the TFM files TeX set them with
+# (tools/text_font_advances.py). With Slides' advances (ADVANCES) they give such a face its own
+# size factor (FontMapper.size_of), as CM_ADVANCES predict CM's within 0.5% of the measured one.
+TEXT_ADVANCES = parse_text_advances(_TEXT_ADVANCES_JSON, "text_advances.json")
+
+
+def text_face(font: str) -> tuple[str, CmFace] | None:
+    """(key, TEXT_ADVANCES face) of a TeX text font that is not Computer Modern: the font's own
+    style, else its upright one, else its family's regular face; None for any other font."""
+    family = metrics_family(font)
+    if family is None:
+        return None
+    faces = TEXT_ADVANCES[family]
+    info = font_info(font)
+    for style in (STYLE_KEY[(info.bold, info.italic)], STYLE_KEY[(info.bold, False)], "regular"):
+        if style in faces:
+            return f"{family}/{style}", faces[style]
+    return None
+
+
+def text_face_of(run: SetRun) -> tuple[str, CmFace] | None:
+    """`text_face` of the font a run is set in."""
+    return text_face(run.font)
+
+
+def text_regular(font: str) -> tuple[str, CmFace] | None:
+    """(key, face) of the regular face of a font's TEXT_ADVANCES family, which its size factor is
+    made on (`FontMapper.text_ratios`)."""
+    family = metrics_family(font)
+    if family is None or "regular" not in TEXT_ADVANCES[family]:
+        return None
+    return f"{family}/regular", TEXT_ADVANCES[family]["regular"]
+
+
+def mono_pitch(run: SetRun, design: float) -> float:
+    """The advance (em of the run's size) a monospaced run's columns have in the PDF, which its
+    Roboto Mono (ROBOTO_MONO_ADVANCE_EM) is sized to: a listing's grid pitch when the PDF set code
+    on a column grid in a proportional face (`pitch`, classify's `span.grid`), a monospaced
+    TEXT_ADVANCES face's one advance (Inconsolata's 0.5 em), else CMTT's at its optical size."""
+    if run.pitch is not None and run.pitch > 0:
+        return run.pitch
+    face = text_face_of(run)
+    pitch = None if face is None else monospaced_pitch(face[1])
+    return pitch if pitch is not None else CMTT_ADVANCE_EM * design_width(DESIGN_WIDTH["mono"], design)
+
+
+def monospaced_pitch(face: CmFace) -> float | None:
+    """A monospaced face's one advance (em: Inconsolata's 0.5), None for a proportional one."""
+    widths = {face["advances"].get(ch) for ch in "imMW0"}
+    return None if len(widths) != 1 or None in widths else face["advances"]["m"]
 
 
 def _advance(table: Mapping[str, float], ch: str) -> float | None:
@@ -356,6 +461,11 @@ class FontMapper:
         italic are only half corrected (see __call__)."""
         if google_font(font) or family not in self.style:
             return 1.0
+        text = self.text_ratios(font, family, bold, italic)
+        if text is not None:  # a TeX text face of TEXT_ADVANCES: its own style against its regular
+            base, own = text
+            rel = own / base
+            return rel / (1 + (rel - 1) / 2)
         ratio = 1.0
         for key, on in (("bold", bold), ("italic", italic)):
             if on:
@@ -374,16 +484,32 @@ class FontMapper:
         info = font_info(run.font)
         family = FONT_FOR_FAMILY.get(run.family, "Lato")
         design = info.design_size or 10
+        text_ratios = None if run.family == "mono" or info.design_size is not None else \
+            self.text_ratios(run.font, run.family, run.bold, run.italic)
         if run.family == "mono":
-            factor = ROBOTO_MONO_ADVANCE_EM / (CMTT_ADVANCE_EM * design_width(DESIGN_WIDTH["mono"], design))
+            factor = ROBOTO_MONO_ADVANCE_EM / mono_pitch(run, design)
+        elif text_ratios is not None:
+            # A TeX text face other than Computer Modern (Libertine, Bera, DejaVu, Palatino...): its
+            # factor is what its own advances predict for the calibration sentences in the substitute,
+            # the prediction that is within 0.5% of the measured factors for CM. Its bold and italic
+            # are half corrected against its regular, as CM's are.
+            base, own = text_ratios
+            factor = base * (1 + (own / base - 1) / 2)
+            if not run.smallcaps:
+                factor *= self.shape_ratio_of(run, family, factor, design)
         else:
             text, title = self.factors.get(run.family, self.factors["sans"])
+            # A bold sans cut has widths of its own per optical size (BOLD_SANS_DESIGN_WIDTH: EC's
+            # SFSX); 1.0 at 10 pt, CM's and Latin Modern's only bold sans.
+            cut = face_optical_width(run.family, info.bold, design) / optical_width(run.family, design)
             if run.family != "serif" and 11.5 <= design < 14:
                 factor = title  # calibrated directly on CMSS12 titles
+                if cut != 1.0:
+                    factor /= cut
             else:
                 # Other optical sizes: CM's small cuts are wider per em (up to OPTICAL_WIDTH_MAX),
                 # its large ones narrower.
-                factor = text / optical_width(run.family, design)
+                factor = text / face_optical_width(run.family, info.bold, design)
             # Bold and italic substitutes run 4-8% narrower than CM's; correct half of that, so
             # widths come closer without emphasised words looking visibly larger.
             style = self.style.get(run.family, self.style["sans"])
@@ -409,41 +535,71 @@ class FontMapper:
         gets the whole ratio at the size `factor` gives it, when it comes out wider. Any other
         run of SHAPE_MIN_CHARS counted characters or more is judged against the calibration
         sentences in its own face and gets the ratio when it is off by more than SHAPE_TOL, unless
-        it shares its paragraph with other runs (`in_sentence`: sized like them)."""
+        it shares its paragraph with other runs (`in_sentence`: sized like them).
+
+        A Computer Modern run is judged in its CM_ADVANCES face at its optical size, any other TeX
+        text face of TEXT_ADVANCES in its own (`text_face_of`; no optical sizes)."""
         text = run.text
-        face = cm_face_of(run)
-        cm = CM_ADVANCES.get(face or "")
+        info = font_info(run.font)
+        name = cm_face_of(run)
+        known = (name, CM_ADVANCES[name]) if name is not None and name in CM_ADVANCES else \
+            None if info.design_size is not None else text_face_of(run)
         # (a table cell's run keeps the table's size: its column is made as wide as Slides sets
         # it (fit_columns), and a number set smaller rode high in its top-anchored cell)
-        if face is None or cm is None or not text.strip() or run.script or run.hole or run.cell or \
-                family not in ADVANCES:
+        if known is None or not text.strip() or run.script or run.hole or run.cell or family not in ADVANCES:
             return 1.0
+        key, face = known
         slides = ADVANCES[family][self.face_of(run)]
         number = "".join(text.split())
         if any(c in DIGITS for c in number) and all(c in NUMBER_CHARS for c in number):
+            widths = [face["advances"].get(c) for c in number]
+            if None in widths:
+                return 1.0
             s_em = sum(slides.get(c, UNMEASURED_ADVANCE_EM) for c in number)
-            p_em = sum(cm["advances"][c] for c in number)
-            return max(1.0, s_em / factor / (p_em * optical_width(run.family, design)))
+            p_em = sum(w for w in widths if w is not None)
+            cut = 1.0 if info.design_size is None else face_optical_width(run.family, info.bold, design)
+            return max(1.0, s_em / factor / (p_em * cut))
         if run.in_sentence:  # (a run among others keeps their size: in_sentence)
             return 1.0
-        s_em, p_em, counted, skipped = advance_widths(text, cm, slides)
+        s_em, p_em, counted, skipped = advance_widths(text, face, slides)
         if counted < SHAPE_MIN_CHARS or skipped > 0.1 * counted or p_em <= 0:
             return 1.0
-        title = run.family != "serif" and 11.5 <= design < 14  # sized by the title factor
-        ratio = s_em / p_em / self.reference_ratio(face, slides, title)
+        # sized by the title factor (CM's sans titles only)
+        title = info.design_size is not None and run.family != "serif" and 11.5 <= design < 14
+        ratio = s_em / p_em / self.reference_ratio_in(key, face, slides, title)
         return ratio if abs(ratio - 1) > SHAPE_TOL else 1.0
 
     def reference_ratio(self, face: str, slides: Mapping[str, float], title: bool) -> float:
-        """Slides em / PDF em of the calibration sentences in a face: where its size factor
-        puts the widths of ordinary text."""
-        key = (face, id(slides), title)  # `slides` is one of ADVANCES' tables, which live as long
-        if key not in self._reference:
+        """`reference_ratio_in` a CM_ADVANCES face, by its name."""
+        return self.reference_ratio_in(face, CM_ADVANCES[face], slides, title)
+
+    def reference_ratio_in(self, key: str, face: CmFace, slides: Mapping[str, float], title: bool) -> float:
+        """Slides em / PDF em of the calibration sentences in a face (`key` names it: a CM_ADVANCES
+        name, or 'family/style' of TEXT_ADVANCES): where its size factor puts the widths of ordinary
+        text."""
+        cached = (key, id(slides), title)  # `slides` is one of ADVANCES' tables, which live as long
+        if cached not in self._reference:
             s_em = p_em = 0.0
             for sentence in SHAPE_TITLE_REFERENCE if title else SHAPE_REFERENCE:
-                s, p, _, _ = advance_widths(sentence, CM_ADVANCES[face], slides)
+                s, p, _, _ = advance_widths(sentence, face, slides)
                 s_em, p_em = s_em + s, p_em + p
-            self._reference[key] = s_em / p_em
-        return self._reference[key]
+            self._reference[cached] = s_em / p_em
+        return self._reference[cached]
+
+    def text_ratios(self, font: str, family: str, bold: bool, italic: bool) -> tuple[float, float] | None:
+        """(regular, own) `reference_ratio_in` of a TeX text face other than Computer Modern
+        (TEXT_ADVANCES) set in `family`'s substitute: its regular face in the substitute's regular,
+        and its own face in the substitute's face Slides draws it in. None for a font of no such
+        family, or a substitute ADVANCES has not measured."""
+        substitute = FONT_FOR_FAMILY.get(family)
+        if substitute is None or substitute not in ADVANCES or family == "mono":
+            return None
+        own, regular = text_face(font), text_regular(font)
+        if own is None or regular is None:
+            return None
+        slides = ADVANCES[substitute]
+        return (self.reference_ratio_in(regular[0], regular[1], slides["regular"], False),
+                self.reference_ratio_in(own[0], own[1], slides[STYLE_KEY[(bold, italic)]], False))
 
 
 # A bullet dict (the tests, devtools.alignment, classify's reading of a page) reaches each bullet

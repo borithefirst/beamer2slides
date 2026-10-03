@@ -323,7 +323,7 @@ def mark_drift(m: Mark, scale: float, fonts: FontMapper) -> float:
     the mark (formula_shifts_of)."""
     run = SetRun(text=" ", font=m.font, family=m.family, size=m.size, bold=m.bold, italic=m.italic, smallcaps=False,
                  script=None, color=Color("#000000"), underline=False, strike=False, highlight=None, link=None,
-                 hole=1.0, hole_size=None, cell=False, in_sentence=False)
+                 hole=1.0, hole_size=None, cell=False, in_sentence=False, pitch=None)
     gap = Gap(width=1.0, x0=m.hole_x0, before=m.before, next_x0=None)
     probe = HoleSlide(
         texts=(HoleText(id="mark", paragraphs=(

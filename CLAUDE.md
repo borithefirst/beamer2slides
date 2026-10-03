@@ -71,7 +71,10 @@ decorations) is a picture, or baked into a per-slide background picture.
   15+ characters whose letters are unlike a sentence's (serif capitals, a line of w) is sized to
   its PDF width when more than 7% off: Slides advances against Computer Modern's
   (`calibration/cm_advances.json` from `tools/cm_advances.py`, `FontMapper.shape_ratio`; numbers
-  too). Small caps are a deliberate compromise at 1.13x (`SMALL_CAPS_WIDTH`).
+  too). Small caps are a deliberate compromise at 1.13x (`SMALL_CAPS_WIDTH`). TeX text faces
+  other than CM (Libertine, Bera, DejaVu, Palatino...) are sized by their own TFM advances
+  (`calibration/text_advances.json` from `tools/text_font_advances.py`, `fonts.metrics_family`,
+  `FontMapper.text_ratios`); code on a column grid by its `pitch`.
 - **Never destroy what a person did in the deck or the document.** A rebuild of an edited deck is
   refused (`guard.py`); sync is a three-way merge where the deck's edits win and conflicts are
   reported; a destructive write keeps a way back first. `--force-rebuild`, `--follow-labels`,

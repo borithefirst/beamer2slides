@@ -67,6 +67,9 @@ class SetRun:
     """A table cell's run: set at the table's size, never shaped (`FontMapper.shape_ratio`)."""
     in_sentence: bool
     """Shares its paragraph with other words (`emit_text.in_sentence`): sized like them."""
+    pitch: float | None
+    """Code the PDF set on a column grid in a proportional face: the grid's pitch per em of the
+    run's size, which its Roboto Mono advance is sized to (`emit_metrics.mono_pitch`)."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -253,13 +256,15 @@ def set_run(r: AnyRun) -> SetRun:
         case HoleRun():
             hole: float | None = r.hole
             strike = False
+            pitch: float | None = None
         case Run():
-            hole, strike = None, bool(r.strike)
+            hole, strike, pitch = None, bool(r.strike), r.pitch
         case _:
             assert_never(r)
     return SetRun(text=r.text, font=r.font, family=r.family, size=r.size, bold=r.bold, italic=r.italic,
                   smallcaps=r.smallcaps, script=r.script, color=r.color, underline=r.underline, strike=strike,
-                  highlight=r.highlight, link=r.link, hole=hole, hole_size=None, cell=False, in_sentence=False)
+                  highlight=r.highlight, link=r.link, hole=hole, hole_size=None, cell=False, in_sentence=False,
+                  pitch=pitch)
 
 
 def set_runs(runs: Sequence[AnyRun]) -> tuple[SetRun, ...]:
@@ -329,7 +334,7 @@ def number_run(n: Number) -> SetRun:
     """A ball's number as the run its box writes: never small caps."""
     return SetRun(text=n.text, font=n.font, family=n.family, size=n.size, bold=n.bold, italic=n.italic,
                   smallcaps=False, script=None, color=n.color, underline=False, strike=False, highlight=None,
-                  link=None, hole=None, hole_size=None, cell=False, in_sentence=False)
+                  link=None, hole=None, hole_size=None, cell=False, in_sentence=False, pitch=None)
 
 
 def number_box(n: Number) -> tuple[SetRun, tuple[float, float], float]:
@@ -459,7 +464,8 @@ def run_of(d: JsonMap) -> SetRun:
                   strike=_flag(d.get("strike")), highlight=None if not d.get("highlight") else
                   _color(d.get("highlight"), "highlight"), link=_opt_str(d.get("link"), "link"),
                   hole=_opt_num(d.get("hole"), "hole"), hole_size=_opt_num(d.get("hole_size"), "hole_size"),
-                  cell=_flag(d.get("cell")), in_sentence=_flag(d.get("in_sentence")))
+                  cell=_flag(d.get("cell")), in_sentence=_flag(d.get("in_sentence")),
+                  pitch=_opt_num(d.get("pitch"), "pitch"))
 
 
 def runs_of(runs: Json) -> tuple[SetRun, ...]:

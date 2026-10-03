@@ -3,6 +3,7 @@
 import re
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Literal
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -142,6 +143,45 @@ TEX_TT_RE = re.compile(r"(T1X|NEWTX|TX|PX)TT[A-Z]*\d*")
 # The libertine package's Type 1 names: LinLibertine / LinBiolinum, a variant (Display, Mono,
 # Initials, Keyboard, C...), T (Type 1) or O (OpenType), then B / Z (bold, semibold), I / O (slant).
 LIBERTINE_RE = re.compile(r"LIN(LIBERTINE|BIOLINUM)(DISPLAY|M|I|K|C)?([TO])([BZ])?([IO])?")
+# TeX text faces other than Computer Modern whose own metrics emit knows (calibration/text_advances.json,
+# tools/text_font_advances.py): their substitute is sized by them, not by CM's calibration, which
+# set Linux Libertine 7-9% too wide in PT Serif and Bera or DejaVu Sans 13-17% too narrow in Lato.
+MetricsFamily = Literal["libertine", "biolinum", "bera_sans", "bera_serif", "dejavu_sans", "dejavu_sans_condensed",
+                        "dejavu_serif", "dejavu_serif_condensed", "palatino", "utopia", "inconsolata"]
+METRICS_FAMILIES: tuple[MetricsFamily, ...] = (
+    "libertine", "biolinum", "bera_sans", "bera_serif", "dejavu_sans", "dejavu_sans_condensed", "dejavu_serif",
+    "dejavu_serif_condensed", "palatino", "utopia", "inconsolata")
+# By the start of the name's family part, lower case, letters and digits only; longer first. Bera is
+# Bitstream Vera (and DejaVu's Latin), Libertinus Linux Libertine's successor (the same advances),
+# P052 and TeX Gyre Pagella URW's Palatino, newpx's TeXGyrePagellaX Pagella with more glyphs.
+METRICS_PREFIXES: tuple[tuple[str, MetricsFamily], ...] = (
+    ("dejavusanscondensed", "dejavu_sans_condensed"), ("dejavuserifcondensed", "dejavu_serif_condensed"),
+    ("bitstreamverasans", "bera_sans"), ("bitstreamveraserif", "bera_serif"), ("linuxlibertine", "libertine"),
+    ("linuxbiolinum", "biolinum"), ("libertinusserif", "libertine"), ("libertinussans", "biolinum"),
+    ("texgyrepagella", "palatino"), ("inconsolatazi4", "inconsolata"), ("dejavusans", "dejavu_sans"),
+    ("dejavuserif", "dejavu_serif"), ("berasans", "bera_sans"), ("beraserif", "bera_serif"),
+    ("verasans", "bera_sans"), ("veraserif", "bera_serif"), ("urwpalladio", "palatino"),
+    ("texpalladio", "palatino"), ("palatino", "palatino"), ("p052", "palatino"), ("utopia", "utopia"),
+)
+
+
+@lru_cache(maxsize=None)
+def metrics_family(name: str) -> MetricsFamily | None:
+    """The TeX text family whose metrics emit knows (`METRICS_FAMILIES`) a PDF font is a face of,
+    e.g. 'ABCDEF+LinLibertineTB' -> 'libertine', 'BeraSans-Roman' -> 'bera_sans'; None for Computer
+    Modern and any other face. A family's monospaced cut (DejaVu Sans Mono, Libertine's LinLibertineM)
+    is not that family: it is set in Roboto Mono at its own size (google_font); nor is a math font
+    drawn to match it."""
+    base = name.split("+", 1)[-1]
+    key = re.sub(r"[^a-z0-9]", "", base.lower())
+    m = LIBERTINE_RE.fullmatch(re.sub(r"[^A-Z0-9]", "", base.upper()))
+    if m:  # the libertine package's Type 1 and OpenType names; Display is Libertine's too
+        return None if m.group(2) not in (None, "DISPLAY") else "libertine" if m.group(1) == "LIBERTINE" else "biolinum"
+    if "mono" in key or "math" in key:  # (TeXGyrePagellaMath's letters are no text face)
+        return None
+    return next((family for prefix, family in METRICS_PREFIXES if key.startswith(prefix)), None)
+
+
 # CJK faces by the start of their name (lower case, no spaces or hyphens) -> the Google Noto face
 # of their script and class. Behind a Latin substitute (Lato, PT Serif) Slides draws CJK from a
 # fallback face of its own, heavier than the PDF's (every Yu Gothic run of a luatexja deck looked

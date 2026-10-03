@@ -122,6 +122,8 @@ class Run(_RunStyle):
     """Words in one style."""
     strike: bool | None
     """None: absent (a fraction slash, a literal list number: nothing said, not struck)."""
+    pitch: float | None
+    """Code on a column grid in a proportional face: the grid's pitch per em of `size` (ir.Run)."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -897,7 +899,7 @@ def run(v: object, at: At) -> AnyRun:
     else:
         out = Run(text=text, font=font, family=family, size=size, bold=bold, italic=italic, smallcaps=smallcaps,
                   color=col, link=link, script=script, underline=underline, highlight=highlight,
-                  strike=f.optional("strike", boolean))
+                  strike=f.optional("strike", boolean), pitch=f.optional("pitch", number))
     f.close()
     return out
 
@@ -1493,6 +1495,7 @@ def run_json(r: AnyRun) -> JsonObject:
         case Run():
             _put(out, "strike", r.strike)
             out["highlight"] = r.highlight
+            _put(out, "pitch", r.pitch)
         case HoleRun():
             out.update(highlight=r.highlight, hole=r.hole, hole_x0=r.hole_x0, before=_before(r.before),
                        next_x0=r.next_x0)

@@ -358,7 +358,7 @@ def look(r: Run) -> tuple[object, ...]:
     """A run's style, every key but its text: two runs of one look are one run (`span_runs`,
     `PageClassifier.runs`). A decoration a run does not say is None."""
     return (r["font"], r["family"], r["size"], r["bold"], r["italic"], r["smallcaps"], r["color"], r["link"],
-            r["script"], r.get("underline"), r.get("strike"), r.get("highlight"))
+            r["script"], r.get("underline"), r.get("strike"), r.get("highlight"), r.get("pitch"))
 
 
 def span_runs(spans: list[Span]) -> list[Run]:
