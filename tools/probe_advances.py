@@ -12,9 +12,11 @@ Each row is "|  " + ch * N + "  |" in one font and style; the distance between t
 minus the same row without the character, is N advances. One slide per font and style.
 
 Usage: python tools/probe_advances.py   (writes src/beamer2slides/calibration/advances.json)
+       python tools/probe_advances.py cyrillic greek   (measures those sets only, merged into it)
 """
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +30,10 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "out" / "probe_advances"
 TABLE = ROOT / "src" / "beamer2slides" / "calibration" / "advances.json"
 CHARS = [chr(c) for c in range(32, 127)] + list("éèàüöäçñÉ–—’“”°µ€£")
+# Sets measured on request and merged into the table (a Russian deck's lines were all unmeasured:
+# no box could be sized from where Slides breaks them, africa-remote-sens).
+EXTRA = {"cyrillic": [chr(c) for c in range(0x410, 0x450)] + list("Ёё№«»"),
+         "greek": [chr(c) for c in range(0x391, 0x3AA) if c != 0x3A2] + [chr(c) for c in range(0x3B1, 0x3CA)]}
 STYLES = {"regular": (False, False), "bold": (True, False), "italic": (False, True), "bold_italic": (True, True)}
 FONTS = ["Lato", "PT Serif"]
 N = 8
@@ -37,20 +43,25 @@ PER_COLUMN = 23
 COLUMN_W = 143
 
 
-def main() -> None:
+def main(sets: list[str]) -> None:
+    if unknown := [s for s in sets if s not in EXTRA]:
+        raise SystemExit(f"no character set {', '.join(unknown)}: {', '.join(EXTRA)}")
+    chars = [c for s in sets for c in EXTRA[s]] if sets else CHARS
     slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe advances"}))
     pid = presentation_id(pres)
     slide = pres.get("slides", [])[0]
     first = object_id(slide)
     reqs: list[SlidesRequest] = [{"deleteObject": {"objectId": object_id(e)}} for e in slide.get("pageElements", [])]
-    jobs = [(font, style) for font in FONTS for style in STYLES]
+    per_page = 5 * PER_COLUMN - 1  # five columns a slide, the first row of each the reference
+    chunks = [chars[i:i + per_page] for i in range(0, len(chars), per_page)]
+    jobs = [(font, style, n) for font in FONTS for style in STYLES for n in range(len(chunks))]
     pages = [first] + [f"page_{i}" for i in range(1, len(jobs))]
     reqs += [{"createSlide": {"objectId": p}} for p in pages[1:]]
-    rows = [""] + CHARS  # the first row is the reference
-    boxes = {}
-    for j, ((font, style), page) in enumerate(zip(jobs, pages)):
+    boxes: dict[tuple[str, str, int], list[tuple[str, int, int]]] = {}
+    for j, ((font, style, n), page) in enumerate(zip(jobs, pages)):
         bold, italic = STYLES[style]
+        rows = [""] + chunks[n]  # the first row is the reference
         for i, ch in enumerate(rows):
             oid = f"adv_{j}_{i}"
             x, y = 4 + (i // PER_COLUMN) * COLUMN_W, 2 + (i % PER_COLUMN) * ROW
@@ -62,12 +73,14 @@ def main() -> None:
                                      "style": {"fontFamily": font, "fontSize": pt(SIZE), "bold": bold, "italic": italic,
                                                "foregroundColor": {"opaqueColor": {"rgbColor": {}}}}}},
             ])
-            boxes.setdefault((font, style), []).append((ch, x, y))
+            boxes.setdefault((font, style, n), []).append((ch, x, y))
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
 
     table: dict[str, dict[str, dict[str, float]]] = {}
-    for (font, style), page in zip(jobs, pages):
-        path = OUT / f"{font.replace(' ', '')}-{style}.png"
+    if sets:  # merged into the table as it is: what it already holds is not measured again
+        table = json.loads(TABLE.read_text(encoding="utf-8"))["fonts"]
+    for (font, style, n), page in zip(jobs, pages):
+        path = OUT / f"{font.replace(' ', '')}-{style}-{n}.png"
         save_thumbnail(slides, pid, page, path, None)
         img = np.asarray(Image.open(path).convert("RGB")).mean(axis=2)
         k = img.shape[1] / 720
@@ -84,11 +97,11 @@ def main() -> None:
                 right -= 1
             return (right - left) / k
 
-        rows_here = boxes[(font, style)]
+        rows_here = boxes[(font, style, n)]
         reference = bars(rows_here[0][1], rows_here[0][2])
-        table.setdefault(font, {})[style] = {ch: round((bars(x, y) - reference) / N / SIZE, 3)
-                                             for ch, x, y in rows_here[1:]}
-        print(font, style, {c: table[font][style][c] for c in "0,. aHm/"})
+        table.setdefault(font, {}).setdefault(style, {}).update(
+            {ch: round((bars(x, y) - reference) / N / SIZE, 3) for ch, x, y in rows_here[1:]})
+        print(font, style, n, {ch: table[font][style][ch] for ch, _, _ in rows_here[1:9]})
     TABLE.write_text(json.dumps({
         "source": "tools/probe_advances.py: advance widths (em) on Google Slides' renderer",
         "fonts": table}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
@@ -97,4 +110,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
