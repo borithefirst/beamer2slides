@@ -7,7 +7,7 @@ import io
 import json
 import os
 import re
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -289,13 +289,17 @@ def same_background(a: Mapping[str, object] | None, b: Mapping[str, object] | No
 ASPECT_AGREES = 0.01  # a live picture has its file's shape when the aspects are this close
 
 
-def local_signature(path: "Path | str", shape: tuple[float, float] | None) -> str | None:
-    """The signature of a picture this run has just put into the deck, from the file it uploaded,
-    so nothing has to be downloaded to record it. Google serves what it was given, re-encoded:
-    measured on two converted decks (probe of 2026-09-24), every one of 22 uploaded pictures signed
-    alike from its file and from its download. That holds while the live picture has the file's
-    shape - `shape` is the element's own size (a stretch is the transform's) or the page's for a
-    background - and a picture Google may have resampled to another is left to be read (None)."""
+@dataclass(frozen=True, kw_only=True)
+class SignedFile:
+    """A picture file's size in pixels and its `signature` (`signed_file`)."""
+    width: int
+    height: int
+    signature: str
+
+
+def signed_file(path: "Path | str") -> SignedFile | None:
+    """A picture file signed, before anything says which live picture shows it: None when it is
+    no picture."""
     from PIL import Image
     try:
         data = Path(path).read_bytes()
@@ -303,17 +307,41 @@ def local_signature(path: "Path | str", shape: tuple[float, float] | None) -> st
             fw, fh = img.size
     except (OSError, ValueError):
         return None
-    if not shape or shape[1] <= 0 or fh <= 0:
+    sig = signature(data)
+    return None if sig is None else SignedFile(width=fw, height=fh, signature=sig)
+
+
+def sign_files(paths: Iterable[Path]) -> dict[Path, SignedFile | None]:
+    """`signed_file` of each of `paths`: convert signs what it uploaded while it reads the deck
+    back (`snapshot_after_convert`; 2.5 s of decoding on an 86-slide deck)."""
+    return {p: signed_file(p) for p in dict.fromkeys(paths)}
+
+
+def shaped_signature(signed: SignedFile | None, shape: tuple[float, float] | None) -> str | None:
+    """A signed file's signature when the live picture has its shape (`local_signature`)."""
+    if signed is None or not shape or shape[1] <= 0 or signed.height <= 0:
         return None
-    a, b = fw / fh, shape[0] / shape[1]
+    a, b = signed.width / signed.height, shape[0] / shape[1]
     if abs(a - b) > ASPECT_AGREES * max(a, b):
         return None
-    return signature(data)
+    return signed.signature
 
 
-def upload_signatures(pres: Presentation, files: Mapping[str, "Path | str"]) -> dict[str, str]:
+def local_signature(path: "Path | str", shape: tuple[float, float] | None) -> str | None:
+    """The signature of a picture this run has just put into the deck, from the file it uploaded,
+    so nothing has to be downloaded to record it. Google serves what it was given, re-encoded:
+    measured on two converted decks (probe of 2026-09-24), every one of 22 uploaded pictures signed
+    alike from its file and from its download. That holds while the live picture has the file's
+    shape - `shape` is the element's own size (a stretch is the transform's) or the page's for a
+    background - and a picture Google may have resampled to another is left to be read (None)."""
+    return shaped_signature(signed_file(path), shape)
+
+
+def upload_signatures(pres: Presentation, files: Mapping[str, "Path | str"],
+                      signed: Mapping[Path, SignedFile | None]) -> dict[str, str]:
     """`local_signature` of each picture of `pres` whose file is known: `files` maps an image's
-    objectId, or a slide's for its background picture, to the file that was uploaded for it."""
+    objectId, or a slide's for its background picture, to the file that was uploaded for it;
+    `signed` holds files already signed (`sign_files`), the others are signed here."""
     raw = {object_id(e): e for s in pres.get("slides", [])
            for e in all_elements(s.get("pageElements", []), object_id(s))}
     page: tuple[float, float] | None = None
@@ -331,7 +359,8 @@ def upload_signatures(pres: Presentation, files: Mapping[str, "Path | str"]) -> 
             shape = (_unit(size.get("width")), _unit(size.get("height")))
         else:
             continue
-        sig = local_signature(path, shape)
+        file = Path(path)
+        sig = shaped_signature(signed[file] if file in signed else signed_file(file), shape)
         if sig:
             out[oid] = sig
     return out
@@ -395,6 +424,20 @@ def converted_files(deck: JsonObject, out: Path, written: Sequence[WrittenSlide]
         background = slide.get("background")
         if s.object_id and isinstance(background, str) and background and not slide.get("background_color"):
             files[s.object_id] = out / background
+    return files
+
+
+def uploaded_files(deck: JsonObject, out: Path) -> list[Path]:
+    """Every file `converted_files` may name, known before the deck is read (`sign_files`)."""
+    files: list[Path] = []
+    for slide in as_objects(deck.get("slides", []), "deck.slides"):
+        for el in as_objects(slide["elements"], "slide.elements"):
+            file = el.get("file")
+            if el.get("kind") == "image" and isinstance(file, str) and file:
+                files.append(out / file)
+        background = slide.get("background")
+        if isinstance(background, str) and background and not slide.get("background_color"):
+            files.append(out / background)
     return files
 
 
@@ -523,7 +566,7 @@ def _signatures(pres: Presentation, ids: Sequence[str], workers: int, ready: Map
     if ready is not None:
         return {oid: ready[oid] for oid in ids if oid in ready}
     asked = set(ids)
-    local = upload_signatures(pres, {oid: f for oid, f in files.items() if oid in asked}) if files else {}
+    local = upload_signatures(pres, {oid: f for oid, f in files.items() if oid in asked}, {}) if files else {}
     rest = [oid for oid in ids if oid not in local]
     if rest:
         if pictures is None:
@@ -1556,28 +1599,37 @@ def snapshot_after_convert(deck: JsonObject, out: Path, state: EmitState, pdf: "
     slides, drive = slides_service(None), drive_service(None)
     pid = state.presentation_id
     written = [written_of(s) for s in state.slides]
-    pool = ThreadPoolExecutor(2, thread_name_prefix="b2s-base")
+    pool = ThreadPoolExecutor(3, thread_name_prefix="b2s-base")
     # Where the base file goes needs nothing but the id, so it is looked up while the deck is
     # being read and tagged, on a thread with a client of its own (`save_drive`'s `info`).
     where_to_put_it = None
     if not shared_service("drive", "v3"):
         creds = credentials_for_threads()  # here: a worker thread inherits no context
         where_to_put_it = pool.submit(lambda: deck_info(drive_service(creds), pid))
-    pres = execute(slides.presentations().get(presentationId=pid))
     # Every picture was uploaded from a file here, so it is signed from that file
-    # (`upload_signatures`); only one Google may have reshaped is downloaded, while the tags are
-    # written: they hang off contentUrls, not off a Google client - only the fetcher, resolved
-    # here (`net`). What no download brought is exported afterwards, on this thread.
-    local = upload_signatures(pres, converted_files(deck, out, written, pres))
-    signing = pool.submit(picture_signatures, pres, PICTURE_WORKERS, fetcher_for_threads(), local, None)
+    # (`upload_signatures`), decoded while the deck is read; only one Google may have reshaped is
+    # downloaded, while the tags are written: they hang off contentUrls, not off a Google client -
+    # only the fetcher, resolved here (`net`). What no download brought is exported afterwards,
+    # on this thread.
+    files = pool.submit(sign_files, uploaded_files(deck, out))
+    fetch = fetcher_for_threads()
+
+    def sign(read: Presentation) -> tuple[dict[str, str], dict[str, str]]:
+        local = upload_signatures(read, converted_files(deck, out, written, read), files.result())
+        try:
+            return local, picture_signatures(read, PICTURE_WORKERS, fetch, local, None)
+        except Exception:  # noqa: BLE001 (left unsigned: exported below)
+            return local, {}
+
+    pres = execute(slides.presentations().get(presentationId=pid))
+    signing = pool.submit(sign, pres)
     pool.shutdown(wait=False)
     base = converted_base(deck, out, pres, written, state.scale, pdf, False, overlays, None)
     landed, revision = write_tags(slides, pid, tag_requests(base))
     if landed:
         pres = tagged(pres, landed, revision)  # what a second read would say, measured (`tagged`)
-    signatures = dict(local)
-    with contextlib.suppress(Exception):
-        signatures.update(signing.result())
+    local, downloaded = signing.result()
+    signatures = {**local, **downloaded}
     images, backgrounds = picture_urls(pres)
     unsigned = [i for i in {**images, **backgrounds} if i not in signatures]
     if unsigned:  # (their downloads failed already: straight to the export)

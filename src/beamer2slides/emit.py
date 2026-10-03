@@ -424,13 +424,17 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
         raise RuntimeError(f"the import brought {len(sources)} slides, expected {len(written_slides)}")
 
     # Phase 1: every source slide is copied under our object IDs (slide, title and subtitle
-    # placeholders, pictures, template shapes); the sources are deleted at the end.
+    # placeholders, pictures, template shapes), and the sources deleted.
     template_sizes: list[tuple[float, float]] = []
     reqs: list[SlidesRequest] = []
     for slide, source in zip(written_slides, sources):
         request, sizes = plan.copy_request(slide, source)
         template_sizes = template_sizes or sizes
         reqs.append(request)
+    # The sources go in the same batch: a layout write reaches every slide inheriting from it and
+    # Google charges for each, so the layout pass below costs less with half the slides (3.6 s
+    # against 4.7 s on an 86-slide deck, emit 25.9 s against 27.8 s, three interleaved pairs).
+    reqs += [{"deleteObject": {"objectId": as_str(s["objectId"], "an imported slide's objectId")}} for s in sources]
     batch(slides, pid, reqs)
 
     # A round trip to Google costs about a second whatever it carries, so what a conversion
@@ -572,8 +576,8 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
             if p:
                 p.shutdown()
     refused.sort()                   # several threads appended to it
-    batch(slides, pid, [{"deleteObject": {"objectId": oid}}
-                        for oid in [as_str(s["objectId"], "an imported slide's objectId") for s in sources] + scratch])
+    if scratch:
+        batch(slides, pid, [{"deleteObject": {"objectId": oid}} for oid in scratch])
     state = emit_state.EmitState(presentation_id=pid, url=f"https://docs.google.com/presentation/d/{pid}/edit",
                                  scale=scale, slides=tuple(slide_states), contained=contained, theme=theme_state,
                                  previous=None)

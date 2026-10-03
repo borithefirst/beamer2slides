@@ -4729,3 +4729,35 @@ bold footlines, the reference block, the segoe formula break and math_v2's integ
 control_c1's footline now regular and untracked (lighter than the PDF's medium), layout_v2 s9
 'non-destructiv' / 'e' (C's `hyphen_cut` sizing a box narrower than the word after the hyphen?).
 Gallery of all 377 (PDF | first conversion | r10): https://claude.ai/artifact/2M6725PLrnpty854vuLj2w
+
+## Conversion speed (2026-10-03)
+Measured with a timeline of every step and Google call (a wrapper over `HttpRequest.execute` and
+named steps; worker counts and switches set through the environment), A/B interleaved on
+`real_presentation-biore` (86 slides, a 13.6 MB .pptx) in one Drive slot. A whole conversion
+went 55-66 s -> 39.8 s:
+- local half 32 s -> about 17.6 s: `theme_decoration` compares in uint8 channel by channel
+  (`render.differs`) and only over the rows and columns where the first background shows
+  decoration (31 s -> 6 s on biore over four groupings, the same answer as before on every
+  converted folder, `scratchpad/speed/decor_same.py`); `uniform_color` looks at its 1-in-17 sample
+  first; `extension_font` is cached; debug overlays saved at compress_level 1. Background PNG bytes
+  stay as they are: sync finds base pictures by their hash. The theme plan went 5.3 s -> 1.2 s.
+- snapshot 7.7 s -> 5 s: convert's uploaded pictures are decoded and signed while the deck is read
+  back (`snapshot.sign_files`, `uploaded_files`; the aspect pairing after, `upload_signatures`).
+- emit: the imported source slides are deleted in the copy batch, not at the end. A layout write
+  is charged per inheriting slide, and the layout pass went 4.7 s -> 3.6 s (emit 27.8 s -> 25.9 s,
+  three interleaved pairs).
+- Tried and left: 8 content workers against 4 (slower: more batches in the air on one
+  presentation do not go faster).
+What is left, by size: the .pptx import (8 s, mostly the upload), the content batches (about 8 s),
+classify and render (about 5 s each), the base upload (2.7 s).
+
+## Triangle bullets through the .pptx (probe, 2026-10-03)
+No Slides preset has a filled ▶, so beamer's default triangle became ➢ (ARROW3D): the most frequent
+finding of the real-deck campaign (180 of about 550, 11 of 27 decks). A .pptx `a:buChar` ▶ (▸ at
+level 1; `buClr`, `buSzPct`, `buFont` Arial or Noto Sans Symbols, else the run's font) survives
+Drive's import and is drawn filled. It also survives insertText of a new paragraph (Enter-like),
+deleting all the text and inserting new paragraphs (each inherits it), an updateTextStyle over
+the whole range (which recolours the bullet too, as for API bullets) and duplicateObject of the box
+and of the slide. An empty bulleted paragraph loses its bullet at import, so a box shell must
+carry a character per paragraph. The way to a native ▶: bulleted text boxes come in through the
+.pptx as shells with their paragraphs' levels and glyphs, filled through the API (as tables are).

@@ -1,5 +1,6 @@
 """The page as classify sees it: rectangles, and the spans, lines and paragraphs of its text."""
 
+import functools
 import math
 import re
 from collections.abc import Iterable, Sequence
@@ -16,7 +17,9 @@ from .raw_types import PathItem, RawDrawing
 EXTENSION_FONT_RE = re.compile(r"^(CMEX|EUEX|ESINT|(NEW)?(N?TX|PX)EX)|MATHEXTENSION")
 
 
+@functools.lru_cache(maxsize=None)
 def extension_font(font: str) -> bool:
+    # (a deck has a few dozen font names, asked about 770,000 times on an 86-slide deck)
     return bool(EXTENSION_FONT_RE.search(re.sub(r"[^A-Z0-9]", "", font.split("+", 1)[-1].upper())))
 
 

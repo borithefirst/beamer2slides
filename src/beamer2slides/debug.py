@@ -73,7 +73,8 @@ class Canvas:
         self.draw.text((x * self.zoom, y * self.zoom), text, fill=self._c(color, 1.0), font=font, anchor="ls")
 
     def save(self, path: Path) -> None:
-        Image.alpha_composite(self.image.convert("RGBA"), self.overlay).convert("RGB").save(path)
+        # (fast compression: a picture for a person to look at, written by every classify)
+        Image.alpha_composite(self.image.convert("RGBA"), self.overlay).convert("RGB").save(path, compress_level=1)
 
 
 def _draw_element(page: Canvas, el: ir.Element) -> None:

@@ -835,33 +835,60 @@ def theme_decoration(images: Iterable[RGB], ground: Ints) -> tuple[RGBA | None, 
     `DECORATION_HOLES` of the page, it is what every slide keeps in its background etched into the
     theme (a page border read as a figure left every slide's words there), and is no decoration."""
     rest = iter(images)
-    first = next(rest)
-    ref = first.astype(np.int16)
-    mask = np.abs(ref - ground).max(axis=2) > DECORATION_TOLERANCE
-    start = mask.copy()
-    total = int(mask.sum())
-    if total < DECORATION_MIN * mask.size:
+    whole_first = next(rest)
+    full = differs(whole_first, np.broadcast_to(np.asarray(ground, dtype=np.uint8), whole_first.shape),
+                   DECORATION_TOLERANCE)
+    total = int(np.count_nonzero(full))
+    if total < DECORATION_MIN * full.size:
         return None, [False] * (1 + sum(1 for _ in rest)), False
+    # Everything below is about pixels the first background shows decoration on, so it is worked
+    # out on the rows and columns that hold some (a headline and a footline: a fifth of the page).
+    rows, cols = np.flatnonzero(full.any(axis=1)), np.flatnonzero(full.any(axis=0))
+
+    def sub(a: RGB) -> RGB:
+        a = a if len(rows) == a.shape[0] else a[rows]
+        return a if len(cols) == a.shape[1] else a[:, cols]
+
+    first = sub(whole_first)
+    colour = np.broadcast_to(np.asarray(ground, dtype=np.uint8), first.shape)
+    start = differs(first, colour, DECORATION_TOLERANCE)
+    mask = start.copy()
     inside = [True]
     shown = start.astype(np.int32)  # per pixel: how many of the backgrounds taking it show no ground there
-    for img in rest:
-        same = np.abs(img.astype(np.int16) - ref).max(axis=2) <= DECORATION_TOLERANCE if img.shape == ref.shape else None
-        ok = same is not None and (same & mask).sum() >= DECORATION_AGREE * mask.sum()
+    for whole in rest:
+        img = sub(whole) if whole.shape == whole_first.shape else None
+        same = None if img is None else ~differs(img, first, DECORATION_TOLERANCE)
+        ok = same is not None and np.count_nonzero(same & mask) >= DECORATION_AGREE * np.count_nonzero(mask)
         inside.append(bool(ok))
-        if ok:
+        if ok and img is not None and same is not None:
             mask &= same
-            shown += (np.abs(img.astype(np.int16) - ground).max(axis=2) > DECORATION_TOLERANCE).astype(np.int32)
-    if int((start & ~mask & (2 * shown > sum(inside))).sum()) > DECORATION_HOLES * mask.size:
+            shown += differs(img, colour, DECORATION_TOLERANCE)
+    if np.count_nonzero(start & ~mask & (2 * shown > sum(inside))) > DECORATION_HOLES * full.size:
         return None, [False] * len(inside), False
+    alpha = np.zeros(full.shape, dtype=np.uint8)
+    alpha[np.ix_(rows, cols)] = np.where(mask, 255, 0)
     # (binary alpha: over a background showing the same pixels, any soft edge would change them)
-    return np.dstack([first, np.where(mask, 255, 0).astype(np.uint8)]), inside, int(mask.sum()) == total
+    return np.dstack([whole_first, alpha]), inside, int(np.count_nonzero(mask)) == total
+
+
+def differs(a: RGB, b: RGB, tolerance: int) -> Mask:
+    """Per pixel, whether any channel of two pictures of one size is more than `tolerance` apart.
+    (In uint8, channel by channel: a whole page cast to int16 and reduced over its last axis took
+    4.5 s a call on an 86-slide deck, `theme_decoration` three calls a conversion.)"""
+    d = np.maximum(a, b) - np.minimum(a, b)
+    return (d[..., 0] > tolerance) | (d[..., 1] > tolerance) | (d[..., 2] > tolerance)
 
 
 def uniform_color(img: RGB, tolerance: int) -> str | None:
     """The single colour of a background with nothing left on it, else None. Such slides get
     a plain Slides background colour instead of a picture."""
-    ref = np.median(img[::17, ::17].reshape(-1, 3), axis=0)
-    if np.abs(img.astype(np.int16) - ref.astype(np.int16)).max() > tolerance:
+    sample = img[::17, ::17]
+    ref = np.median(sample.reshape(-1, 3), axis=0)
+    colour = ref.astype(np.uint8)
+    # (the sample first: a page that is not one colour mostly shows it there, without a pass over
+    # every pixel)
+    if differs(sample, np.broadcast_to(colour, sample.shape), tolerance).any() or \
+            differs(img, np.broadcast_to(colour, img.shape), tolerance).any():
         return None
     return "#" + "".join(f"{int(v):02x}" for v in ref)
 

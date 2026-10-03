@@ -203,8 +203,14 @@ def test_an_uploaded_picture_is_signed_from_its_file_while_the_deck_has_its_shap
     pres = Presentation(pageSize={"width": {"magnitude": 160 * EMU, "unit": "EMU"},
                                   "height": {"magnitude": 80 * EMU, "unit": "EMU"}},
                         slides=[page("S1", [image("a", size=(40, 20)), image("b", size=(40, 30)), shape("t")])])
-    got = snapshot.upload_signatures(pres, {"a": f, "b": f, "t": f, "S1": f})
+    got = snapshot.upload_signatures(pres, {"a": f, "b": f, "t": f, "S1": f}, {})
     assert set(got) == {"a", "S1"}
+    # a file signed before the deck was read (`sign_files`) is not read again
+    gone = tmp_path / "gone.png"
+    signed = snapshot.sign_files([f, f])
+    assert list(signed) == [f]
+    assert snapshot.upload_signatures(pres, {"a": gone, "b": f}, {gone: signed[f]}) == {"a": got["a"]}
+    assert snapshot.upload_signatures(pres, {"a": gone}, {gone: None}) == {}
 
 
 def test_convert_signs_what_it_uploaded_without_downloading_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
