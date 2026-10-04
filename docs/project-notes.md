@@ -4908,3 +4908,21 @@ spread its own wrapped lines.
   is a pixel's shift, the same picture by eye).
 - Sync: spacingMode is not in the snapshot's paragraph keys; a person's own collapsing list with a
   spaceAbove is laid out by text_layout as if kept (errs towards more room).
+
+## Dot leaders (real-deck review, real_defense-defense, 2026-10-04)
+Template slides of `\item\dotfill` placeholders came out as one paragraph wrapping a run of dots
+across the box, or dotted lines a third longer than the PDF's.
+- classify (`classify_lines.leader_item`, `is_leader`, `leader_line`, `ends_in_leader`): a line of
+  spaced dots is a leader; leader lines never join into one paragraph (`continues`), a bullet
+  glyph followed by a leader is an item (`classify_reasons.detect_bullet`), and a leader-only run
+  carries its PDF dot `pitch` (`leader_pitch`).
+- emit (`emit_metrics.LEADER_PITCH_EM`, `leader_factor_of`, `leader_steps_of`,
+  `leader_correction_of`, used by `size_of` and `emit_widths`): Slides' dot pitch per face and
+  style (PT Serif 0.442 / bold 0.496 / italic 0.433 / bold italic 0.489 em, Lato 0.405-0.418 em,
+  `tools/probe_leaders.py`) sets the dot count to the PDF's length. PT Serif kerns a period
+  against a space by -0.033 to -0.042 em on either side (`tools/probe_period_kerning.py`); Lato
+  kerns none.
+- compare.read_back_size mirrors runs with a pitch, so pull reads them as written.
+- Live: slides 8, 28 and 41 have one item per line and leaders ending within ~10 px of the PDF's;
+  mean text_overlap 0.657 -> 0.666 (slide 8 0.481 -> 0.467: the leaders' few px of overrun).
+  The dots are PT Serif's periods, heavier than CM's.

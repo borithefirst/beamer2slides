@@ -136,7 +136,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   per glyph, NFKC, script capitals as Unicode); OT1 accents compose (`compose_accents`), `\not`
   negates (`negate`). Every text range emit writes is UTF-16 (`emit.u16`: astral math letters). A
   run inside a sentence keeps its paragraph's size (`emit.in_sentence`); leader dots and ellipses
-  never set `shape_ratio`. A multi-line box is sized from where Slides breaks its lines
+  never set `shape_ratio`; a line of spaced dots is a leader (`classify_lines.leader_item`), never
+  joined to the next, its run's dot `pitch` met by Slides' measured one
+  (`emit_metrics.LEADER_PITCH_EM`, `tools/probe_leaders.py`). A multi-line box is sized from where Slides breaks its lines
   (`emit.slides_lines`, `box_lines` per paragraph), keeping `emit.LINE_MARGIN` (2.5 pt) past its
   widest line; an unmeasured paragraph never makes it narrower than the measured ones. A glyph the
   page edge cuts stays text (only samples on the page are judged). Justified prose (`is_justified`,

@@ -59,6 +59,7 @@ def slides_width_of(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> 
             return None
         if run.script:
             size *= SCRIPT_SIZE
+        total += fonts.leader_correction_of(run, family) * size  # (a leader's dots: their measured pitch)
         for ch in run.text:
             ch = " " if ch == " " else ch  # (a no-break space, a \colorbox's padding, is a space's width)
             if unicodedata.combining(ch):

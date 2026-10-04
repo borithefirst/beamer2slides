@@ -69,7 +69,8 @@ class SetRun:
     """Shares its paragraph with other words (`emit_text.in_sentence`): sized like them."""
     pitch: float | None
     """Code the PDF set on a column grid in a proportional face: the grid's pitch per em of the
-    run's size, which its Roboto Mono advance is sized to (`emit_metrics.mono_pitch`)."""
+    run's size, which its Roboto Mono advance is sized to (`emit_metrics.mono_pitch`); a dot
+    leader's distance from dot to dot, which its dots are spaced to (`FontMapper.leader_factor_of`)."""
 
 
 @dataclass(frozen=True, kw_only=True)

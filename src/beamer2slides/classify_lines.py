@@ -20,6 +20,49 @@ NUMBERING_RE = re.compile(r"^\(?(\d{1,2}(\.\d{1,2}){0,3}|[a-z]|[ivx]{1,4})[.)]?$
 GUTTER_PROSE_EM = 8.0  # a column's line beside a gutter is wider than this; ticks and table cells are not
 CODE_GAP_EM = 6.0  # monospaced words this far apart on a row are one code line, aligned by spaces
 DELIMITERS = set("|‖∣∥()[]{}⟨⟩⌊⌋⌈⌉")
+# A dot leader: dots set one pitch apart along a line (\dotfill, \cleaders\hbox to .5em{.}\hfill, a
+# form's blank to fill in). Extract reads the gap between two of its dots as a space (". . . .").
+LEADER_DOTS = r"\.(?:\s*\.){3,}"
+LEADER_RE = re.compile(LEADER_DOTS)
+LEADER_END_RE = re.compile(r"\.(?:\s+\.){3,}\s*$")  # (dots set apart: a word's "...." is no leader)
+# A list item drawn by hand as its bullet glyph and a leader, nothing between ("\textbullet
+# \dotline{300pt}", real_defense-defense 8): one span from PDFium, the glyph 0.03 em off the dots.
+LEADER_ITEM_RE = re.compile(r"\s*(?P<bullet>[•◦▪‣▸▶►●■□○★⋆])(?P<leader>\s*" + LEADER_DOTS + r")\s*")
+BULLET_ADVANCE_EM = 0.5  # the bullet's advance: CMSY's \bullet, and \textbullet as EC sets it (0.497 em)
+DOT_ADVANCE_EM = 0.278   # a Computer Modern period's: how far a leader's last dot reaches past its origin
+
+
+def is_leader(text: str) -> bool:
+    """A text that is nothing but a leader's dots (four or more)."""
+    return LEADER_RE.fullmatch(text.strip()) is not None
+
+
+def leader_line(line: Line) -> bool:
+    """A line whose words (after its bullet) are nothing but a leader: a row of dots to the end of
+    the measure, which TeX ended there."""
+    words = [s.text.strip() for s in line.content if s.text.strip()]
+    return bool(words) and is_leader(" ".join(words))
+
+
+def ends_in_leader(line: Line) -> bool:
+    """A line ending in a leader ("Name: . . . . ."): the leader's glue fills its row, so TeX broke
+    the line there by hand - nothing after it continues the line's paragraph."""
+    words = [s.text.strip() for s in line.content if s.text.strip()]
+    return LEADER_END_RE.search(" ".join(words)) is not None
+
+
+def leader_pitch(line: Line) -> float | None:
+    """The distance (em of the line's size) between one dot and the next of a line that is nothing
+    but a leader, from where its dots start and end; None for any other line (or a monospaced
+    one, whose `pitch` is its column grid's)."""
+    if not leader_line(line) or any(s.info.family == "mono" for s in line.content):
+        return None
+    dots = sum(s.text.count(".") for s in line.content)
+    size = line.size
+    if size <= 0:
+        return None
+    pitch = (line.x1 - line.x0 - DOT_ADVANCE_EM * size) / (dots - 1) / size
+    return round(pitch, 4) if pitch > 0 else None
 
 
 class LinesMixin(GraphicsMixin):
@@ -58,8 +101,24 @@ class LinesMixin(GraphicsMixin):
                 # column grid, set in a monospaced face as a monospaced listing is
                 span.grid = (columns[0], columns[1])
                 span.info = replace(span.info, family="mono")
-            out.append(span)
+            out += self.leader_item(span)
         return out
+
+    @staticmethod
+    def leader_item(span: Span) -> list[Span]:
+        """A span that is a bullet glyph and a leader with nothing between (LEADER_ITEM_RE): the
+        two, so the glyph is the item's bullet and the leader its words. Read as one word, the
+        glyph stayed literal and the item's leader lines ran on as one paragraph, which Slides
+        wrapped at its own width ('•. . . •. . .', real_defense-defense 8). Both keep the span's
+        id: the page's one span is both (`text_element` names it once)."""
+        m = LEADER_ITEM_RE.fullmatch(span.text)
+        if m is None or not span.horizontal:
+            return [span]
+        r = span.rect
+        cut = min(r.x0 + BULLET_ADVANCE_EM * span.size, r.x1)
+        bullet, leader = m.group("bullet"), m.group("leader").strip()
+        return [replace(span, text=bullet, rect=Rect(r.x0, r.y0, cut, r.y1), visual=None if span.visual is None else bullet),
+                replace(span, text=leader, rect=Rect(cut, r.y0, r.x1, r.y1), visual=None if span.visual is None else leader)]
 
     def build_lines(self, spans: list[Span]) -> list[Line]:
         n = len(spans)

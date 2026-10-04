@@ -15,7 +15,7 @@ from .classify_text import (
     line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, prose_spaces, raised_mark,
     reading_order, script_of, script_size, stretched, thin_span, with_accent, with_text,
 )
-from .classify_lines import LinesMixin
+from .classify_lines import LinesMixin, ends_in_leader, leader_line, leader_pitch
 from .fonts import serif_math_letters
 from .ir import Align, BeforeWord, Run, TextElement
 from .ir import Paragraph as ParagraphJson
@@ -157,6 +157,11 @@ class ParagraphsMixin(LinesMixin):
             return None
         if is_mono(line.content) or is_mono(last.content) or line.code_number or last.code_number:
             return None  # code (and its line numbers): every line is its own paragraph
+        if leader_line(line) or ends_in_leader(last):
+            # A leader's glue fills its row to the measure: TeX ended the row there, so a row of
+            # dots under it is another line, not a wrap (three \dotline rows ran on as one
+            # paragraph that Slides wrapped at its own width, real_defense-defense 8 and 28).
+            return None
         pitch = line.baseline - last.baseline
         if not 0 < pitch <= 1.45 * par.size:  # (Google themes use line spacing 1.15: 1.38 em)
             return None
@@ -520,9 +525,11 @@ class ParagraphsMixin(LinesMixin):
             "paragraphs": [paragraph(p, r, s) for p, r, s in zip(box, runs, starts)],
             "code": code,
             # (a symbol font's glyph is the box's only as a glyph bullet: ICON_BULLET_GLYPHS)
-            "spans": [s.id for p in box for l in p.lines for s in l.spans
-                      if (s.info.family != "icon" or (l.bullet is not None and l.bullet["kind"] == "glyph" and s in l.bullet_spans))
-                      and not s.drawn and not any(s in h for k in p.lines for h in k.holes)],
+            # (once each: a bullet and its leader are pieces of one span, `leader_item`)
+            "spans": list(dict.fromkeys(
+                s.id for p in box for l in p.lines for s in l.spans
+                if (s.info.family != "icon" or (l.bullet is not None and l.bullet["kind"] == "glyph" and s in l.bullet_spans))
+                and not s.drawn and not any(s in h for k in p.lines for h in k.holes))),
             # Fraction bars now written as text, underlines and highlight boxes now text
             # styles: they leave the background with the glyphs.
             "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions] +
@@ -761,6 +768,11 @@ class ParagraphsMixin(LinesMixin):
         if runs:
             runs[0]["text"] = indent + runs[0]["text"].lstrip()
             runs[-1]["text"] = runs[-1]["text"].rstrip()
+        dots = leader_pitch(par.first) if len(par.lines) == 1 and len(runs) == 1 else None
+        if dots is not None:
+            # A leader alone: how far apart the PDF set its dots, which emit spaces Slides' dots
+            # to (`FontMapper.leader_factor_of`), so the row is as long as the PDF's.
+            runs[0]["pitch"] = dots
         return runs
 
     @staticmethod

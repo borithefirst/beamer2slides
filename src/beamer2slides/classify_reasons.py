@@ -14,6 +14,7 @@ from .classify_text import (
     script_of, unmeasured_symbols,
 )
 from .classify_figures import FiguresMixin
+from .classify_lines import is_leader
 
 
 PRESET_GLYPHS = set("▶►▸‣•●★⋆")  # glyphs with a close Slides bullet preset (see emit.bullet_preset)
@@ -85,7 +86,9 @@ class ReasonsMixin(FiguresMixin):
                 # literal text, and a tab reaches the item text (hanging indent).
                 line.tab = nxt
                 return
-            if gap >= 0.25 * line.size and (token in BULLET_GLYPHS or ENUM_RE.match(token)) and not on_ball and not dash:
+            # (a bullet glyph opening a leader stands right against its dots: `leader_item`)
+            apart = gap >= 0.25 * line.size or token in BULLET_GLYPHS and is_leader(nxt.text)
+            if apart and (token in BULLET_GLYPHS or ENUM_RE.match(token)) and not on_ball and not dash:
                 if token in BULLET_GLYPHS:
                     line.bullet = {"kind": "glyph", "text": token, "color": first.color, "bbox": first.rect.as_list(),
                                    "label": label_of([first])}

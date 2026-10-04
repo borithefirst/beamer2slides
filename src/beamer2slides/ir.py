@@ -150,7 +150,9 @@ class Run(_RunKeys, total=False):
     next_x0: float | None
     pitch: float
     """Code set on a column grid in a proportional face (a listing's columns=fixed): the grid's
-    pitch per em of `size`, which emit sizes its Roboto Mono to (`emit_metrics.mono_pitch`)."""
+    pitch per em of `size`, which emit sizes its Roboto Mono to (`emit_metrics.mono_pitch`). A
+    paragraph that is a dot leader alone: how far apart its dots stand, per em of `size`
+    (`classify_lines.leader_pitch`), which emit spaces Slides' dots to (`FontMapper.leader_factor_of`)."""
 
 
 class Label(TypedDict):

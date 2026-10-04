@@ -219,6 +219,22 @@ SHAPE_TITLE_REFERENCE = ("Itemize, nested and frame titles",)  # the title facto
 # run was set 1.3-1.7 times too large. Their width is neither the PDF's letters' nor a sentence's,
 # so they count on neither side, with the spaces around them (advance_widths).
 LEADER = re.compile(r"[   ]*\.(?:[   ]*\.)+[   ]*")
+LEADER_ONLY = re.compile(r"\.(?:\s*\.){3,}")  # a run that is a leader alone (classify_lines.LEADER_RE)
+# Slides' distance from one dot to the next of ". . ." (em), measured on Google's renderer
+# (tools/probe_leaders.py, 25 dots at 20 pt; the hunt archives' thumbnails agreed:
+# real_defense-defense 8 and 41, 0.442; r3_textfx_v2 2, 0.405). ADVANCES' "." and " " add up to
+# 0.525-0.581 in PT Serif, so a leader sized by them came out 16% short: PT Serif kerns a period
+# against a space by -0.033 to -0.042 em on either side (". " and " .", every face;
+# tools/probe_period_kerning.py), twice per spaced dot, and its "." is 0.27-0.30 em, which rows of
+# one character (probe_advances) never see. Lato kerns none: its sums hold within 1%. In a sentence
+# the one kern after its period is 0.04 em, left out. Dots set otherwise apart are ADVANCES' sum.
+LEADER_PITCH_EM: dict[tuple[str, str], float] = {
+    ("PT Serif", "regular"): 0.442, ("PT Serif", "bold"): 0.4959,
+    ("PT Serif", "italic"): 0.4334, ("PT Serif", "bold_italic"): 0.4891,
+    ("Lato", "regular"): 0.405, ("Lato", "bold"): 0.4177,
+    ("Lato", "italic"): 0.4059, ("Lato", "bold_italic"): 0.4181,
+}
+SPACED_DOTS = re.compile(r"(?:\. )+")
 FaceStyle = Literal["regular", "bold", "italic", "bold_italic"]
 FACE_STYLES: tuple[FaceStyle, ...] = ("regular", "bold", "italic", "bold_italic")
 STYLE_KEY: dict[tuple[bool, bool], FaceStyle] = {(False, False): "regular", (True, False): "bold",
@@ -483,6 +499,9 @@ class FontMapper:
             return google[0], round(run.size * scale, 1)
         info = font_info(run.font)
         family = FONT_FOR_FAMILY.get(run.family, "Lato")
+        leader = self.leader_factor_of(run, family)
+        if leader is not None:
+            return family, round(run.size * scale / leader, 1)
         design = info.design_size or 10
         text_ratios = None if run.family == "mono" or info.design_size is not None else \
             self.text_ratios(run.font, run.family, run.bold, run.italic)
@@ -522,6 +541,41 @@ class FontMapper:
                 else:
                     factor *= self.shape_ratio_of(run, family, factor, design)
         return family, round(run.size * scale / factor, 1)
+
+    def leader_factor_of(self, run: SetRun, family: str) -> float | None:
+        """The size factor of a run that is nothing but a leader's dots, with the distance the PDF
+        set them apart (classify's `pitch` on such a run): Slides' distance from one dot to the next
+        in `family` over the PDF's, so that its dots stand as far apart as the PDF's and the row is
+        as long. Sized like words, a \\dotline of PT Serif dots came out 12% short
+        (real_defense-defense 41). None for any other run, a monospaced one (`pitch` is its column
+        grid's), or one among other words (`in_sentence`: sized like them)."""
+        steps = self.leader_steps_of(run, family)
+        return None if steps is None or run.pitch is None else steps[0] / steps[1] / run.pitch
+
+    def leader_steps_of(self, run: SetRun, family: str) -> tuple[float, int, float] | None:
+        """(Slides' em from a sized leader's first dot to its last, the steps between them, and
+        what ADVANCES add up to over the same characters) for a run `leader_factor_of` sizes;
+        None for any other."""
+        text = run.text.strip()
+        if run.pitch is None or run.pitch <= 0 or run.family == "mono" or run.in_sentence or run.script \
+                or run.hole is not None or run.cell or LEADER_ONLY.fullmatch(text) is None or family not in ADVANCES:
+            return None
+        face = self.face_of(run)
+        steps = text.count(".") - 1
+        between = text[:text.rindex(".")]  # first dot to last
+        slides = ADVANCES[family][face]
+        summed = sum(slides.get(c, UNMEASURED_ADVANCE_EM) for c in between)
+        measured = LEADER_PITCH_EM.get((family, face))
+        if measured is not None and SPACED_DOTS.fullmatch(between):
+            return measured * steps, steps, summed
+        return summed, steps, summed
+
+    def leader_correction_of(self, run: SetRun, family: str) -> float:
+        """How much narrower (em, negative) Slides sets a sized leader than its characters' ADVANCES
+        add up to (LEADER_PITCH_EM): a box measured by ADVANCES alone ran 19% past a PT Serif row,
+        off the slide (real_defense-defense 8). 0.0 for any other run."""
+        steps = self.leader_steps_of(run, family)
+        return 0.0 if steps is None else steps[0] - steps[2]
 
     def shape_ratio(self, run: JsonMap, family: str, factor: float, design: float) -> float:
         return self.shape_ratio_of(run_of(run), family, factor, design)

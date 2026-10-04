@@ -252,12 +252,13 @@ def read_back_size(r: JsonObject, size: float | None) -> float | None:
     """The size a run's words come back with from the deck it converts to: `deck_ir` reads every
     converted run back through Computer Modern's factors (it cannot tell which TeX face Slides' Lato
     or PT Serif stands in for), but emit sizes a TeX text face other than CM by its own metrics
-    (`emit_metrics.TEXT_ADVANCES`: Linux Libertine 7% smaller than CM's factor, Bera Sans 16% larger)
-    and code on a column grid by its pitch. Such a run is compared as the deck would say it, so a
-    pull's loop neither sees a difference nobody made nor misses one; any other run keeps its size."""
-    font, family = r.get("font"), r.get("family")
+    (`emit_metrics.TEXT_ADVANCES`: Linux Libertine 7% smaller than CM's factor, Bera Sans 16% larger),
+    code on a column grid and a dot leader by their pitch. Such a run is compared as the deck would
+    say it, so a pull's loop neither sees a difference nobody made nor misses one; any other run
+    keeps its size."""
+    font = r.get("font")
     if size is None or not isinstance(font, str) or google_font(font) or \
-            (metrics_family(font) is None and not (family == "mono" and r.get("pitch") is not None)):
+            (metrics_family(font) is None and r.get("pitch") is None):
         return size
     from .deck_ir import pdf_size
     fonts = _font_mapper()
