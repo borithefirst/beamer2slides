@@ -6,7 +6,10 @@
 *
 !/pyproject.toml
 !/README.md
+!/MANIFEST.in
 !/Dockerfile
+!/build_backend/
+!/typecheck/
 !/src/
 !/docs/
 !/examples/
