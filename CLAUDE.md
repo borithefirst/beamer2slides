@@ -196,7 +196,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   labels a plot title (`in_label_row`). A list's balls and a photo under a hole stay whole
   whatever box reaches them; a hole's picture on a photo is its glyphs on a clear ground
   (`render.on_picture_ground`); a crop leaves out glyphs another picture owns when one of the two
-  is a hole (`render.others_glyphs`); icons grow to their ink; a line crossing a picture's edge keeps its
+  is a hole (`render.others_glyphs`); icons grow to their ink, and every crop reaches the ink of the glyphs
+  it takes from the background (`render.reach_held_ink`, `holds`: italic overhangs, hanging pieces); a line crossing a picture's edge keeps its
   crossing rows in the background (`picture_crossings`). A figure whose 3+ strokes end on words
   beyond its box stands on its caption: a plain picture, no overlay (`classify_figures.stands_on`);
   a diagram's segments inside a filled node are drawn after the nodes (`on_filled_node`); a smaller

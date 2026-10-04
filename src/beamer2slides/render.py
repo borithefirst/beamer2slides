@@ -649,6 +649,17 @@ INK_REACH = 3.0     # em beyond its box that a formula glyph's ink is looked for
 INK_PAD = 0.75      # pt around the ink found, for anti-aliasing
 
 
+def formula_objects(eraser: Eraser, members: list[RawSpan]) -> list[int]:
+    """The text objects (ids) holding only these spans' glyphs, those `grow_to_ink` measures."""
+    rects = [s["bbox"] for s in members]
+
+    def mine(ch: Char) -> bool:
+        return any(r[0] - 0.1 <= (ch.box[0] + ch.box[2]) / 2 <= r[2] + 0.1 and
+                   r[1] - 0.1 <= (ch.box[1] + ch.box[3]) / 2 <= r[3] + 0.1 for r in rects)
+
+    return [key for key, chars in eraser.chars.items() if chars and all(map(mine, chars))]
+
+
 def grow_to_ink(eraser: Eraser, bbox: list[float], members: list[RawSpan]) -> list[float]:
     """A formula picture's box grown to the ink of its own glyphs. Glyph boxes are font boxes
     (ascender to descender), not ink: a display \\sum or \\int from CMEX hangs from its origin
@@ -656,15 +667,7 @@ def grow_to_ink(eraser: Eraser, bbox: list[float], members: list[RawSpan]) -> li
     cut the sign to a chevron while its switched-off glyph left the background too. The ink is
     what the text objects holding only the formula's glyphs paint: the page rendered around the
     box with and without them."""
-    if not members:
-        return bbox
-    rects = [s["bbox"] for s in members]
-
-    def mine(ch: Char) -> bool:
-        return any(r[0] - 0.1 <= (ch.box[0] + ch.box[2]) / 2 <= r[2] + 0.1 and
-                   r[1] - 0.1 <= (ch.box[1] + ch.box[3]) / 2 <= r[3] + 0.1 for r in rects)
-
-    own = [key for key, chars in eraser.chars.items() if chars and all(map(mine, chars))]
+    own = formula_objects(eraser, members)
     if not own:
         return bbox
     reach = INK_REACH * max(s["size"] for s in members)
@@ -677,15 +680,104 @@ def grow_to_ink(eraser: Eraser, bbox: list[float], members: list[RawSpan]) -> li
     bare = eraser.render(INK_ZOOM, area, False, own).astype(np.int16)
     if drawn.shape != bare.shape:
         return bbox
-    ink = np.abs(drawn - bare).max(axis=2) > 24
-    if not ink.any():
+    box = _ink_bounds(np.abs(drawn - bare).max(axis=2) > 24, area)
+    if box is None:
         return bbox
-    ys, xs = np.nonzero(ink)
-    ox, oy = np.floor(area[0] * INK_ZOOM + 0.001), np.floor(area[1] * INK_ZOOM + 0.001)
-    box = ((xs.min() + ox) / INK_ZOOM - INK_PAD, (ys.min() + oy) / INK_ZOOM - INK_PAD,
-           (xs.max() + 1 + ox) / INK_ZOOM + INK_PAD, (ys.max() + 1 + oy) / INK_ZOOM + INK_PAD)
+    box = _grow(box, INK_PAD)
     return [round(float(v), 2) for v in (min(bbox[0], box[0]), min(bbox[1], box[1]),
                                   max(bbox[2], box[2]), max(bbox[3], box[3]))]
+
+
+def _ink_bounds(ink: Mask, area: Box) -> Box | None:
+    """The page box of the ink found in a render of `area` at INK_ZOOM, None without any."""
+    if not ink.any():
+        return None
+    ys, xs = np.nonzero(ink)
+    ox, oy = np.floor(area[0] * INK_ZOOM + 0.001), np.floor(area[1] * INK_ZOOM + 0.001)
+    return (float(xs.min() + ox) / INK_ZOOM, float(ys.min() + oy) / INK_ZOOM,
+            float(xs.max() + 1 + ox) / INK_ZOOM, float(ys.max() + 1 + oy) / INK_ZOOM)
+
+
+def _past(bbox: list[float], ink: Box) -> list[float]:
+    """`bbox` grown, on each side the ink runs past, to INK_PAD beyond the ink."""
+    return [round(v, 2) for v in (min(bbox[0], ink[0] - INK_PAD) if ink[0] < bbox[0] else bbox[0],
+                                  min(bbox[1], ink[1] - INK_PAD) if ink[1] < bbox[1] else bbox[1],
+                                  max(bbox[2], ink[2] + INK_PAD) if ink[2] > bbox[2] else bbox[2],
+                                  max(bbox[3], ink[3] + INK_PAD) if ink[3] > bbox[3] else bbox[3])]
+
+
+def holds(box: Sequence[float], held: GlyphTest) -> GlyphTest:
+    """The glyphs the background loses to a picture with this box: those whose centre the box
+    holds, and those `held` (the picture's own spans' glyphs) that the box reaches."""
+
+    def test(ch: Char) -> bool:
+        if not _intersects(ch.box, box):
+            return False
+        cx, cy = (ch.box[0] + ch.box[2]) / 2, (ch.box[1] + ch.box[3]) / 2
+        return (box[0] <= cx <= box[2] and box[1] <= cy <= box[3]) or held(ch)
+
+    return test
+
+
+INK_ROUNDS = 3  # times a picture's box is grown to the ink of the glyphs it takes (a grown box takes more)
+
+
+def reach_held_ink(eraser: Eraser, bbox: list[float], held: GlyphTest, reached: Collection[int]) -> list[float]:
+    """A picture's box grown to the ink of every glyph the background loses to it (`holds`).
+    Glyph boxes run from origin to advance, not ink: an italic label's tail or overhang lies
+    outside its box, and a crop of the box cut the glyph the background no longer showed (the
+    `q` beside a tikz-cd arrow, real_beamer-monodromy s11). A text object whose glyphs all go
+    is measured whole (the page with and without it); a glyph that leaves an object partly goes
+    from the background within GLYPH_MARGIN of its box (`Eraser.remove_chars`), so only its ink
+    there is reached. The text objects in `reached` (ids: a formula's own, which `grow_to_ink`
+    has just measured) the box already holds the ink of."""
+    measured: list[Char] = []
+    for _ in range(INK_ROUNDS):
+        taken = holds(bbox, held)
+        chars = [ch for chs in eraser.chars.values() for ch in chs if taken(ch)]
+        if not chars or chars == measured:
+            return bbox  # (the box grown takes no other glyph: their ink is reached)
+        measured = chars
+        whole = {key for key, chs in eraser.chars.items() if chs and all(map(taken, chs))}
+        alone = [ch for ch in chars if ch.obj in whole and ch.obj not in reached]
+        partly = [ch for ch in chars if ch.obj not in whole]
+        grown = bbox
+        if alone:
+            reach = INK_REACH * max(ch.size for ch in alone)
+            grown = _past_ink(eraser, grown, [_grow(ch.box, reach) for ch in alone], sorted({ch.obj for ch in alone}), False)
+        if partly:
+            grown = _past_ink(eraser, grown, [_grow(ch.box, GLYPH_MARGIN * ch.size) for ch in partly],
+                              sorted({ch.obj for ch in partly}), True)
+        if grown == bbox:
+            return bbox
+        bbox = grown
+    return bbox
+
+
+def _past_ink(eraser: Eraser, bbox: list[float], reaches: list[Box], objects: list[int], within: bool) -> list[float]:
+    """`bbox` grown to the ink `objects` (text object ids) paint within the bounds of `reaches`
+    (within the `reaches` themselves when `within`) where it runs past the box."""
+    page = eraser.page
+    area = (max(0.0, min(r[0] for r in reaches)), max(0.0, min(r[1] for r in reaches)),
+            min(page.width, max(r[2] for r in reaches)), min(page.height, max(r[3] for r in reaches)))
+    if area[2] <= area[0] or area[3] <= area[1] or _inside(area, bbox):
+        return bbox  # (no ink of theirs can lie past the box)
+    drawn = eraser.render(INK_ZOOM, area, False, ()).astype(np.int16)
+    bare = eraser.render(INK_ZOOM, area, False, objects).astype(np.int16)
+    if bare.shape != drawn.shape:
+        return bbox
+    ink = np.abs(drawn - bare).max(axis=2) > 24
+    if within:
+        near = np.zeros_like(ink)
+        ox, oy = np.floor(area[0] * INK_ZOOM + 0.001), np.floor(area[1] * INK_ZOOM + 0.001)
+        h, w = near.shape
+        for g in reaches:
+            a0, b0 = max(0, int(np.floor(g[0] * INK_ZOOM - ox))), max(0, int(np.floor(g[1] * INK_ZOOM - oy)))
+            a1, b1 = min(w, int(np.ceil(g[2] * INK_ZOOM - ox))), min(h, int(np.ceil(g[3] * INK_ZOOM - oy)))
+            near[b0:b1, a0:a1] = True
+        ink &= near
+    found = _ink_bounds(ink, area)
+    return bbox if found is None else _past(bbox, found)
 
 
 def crop_region(pdf: Path, page: int, bbox: list[float], path: Path, zoom: float) -> None:
@@ -876,10 +968,14 @@ def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_sha
                 if own is None:
                     # (an icon glyph too: FontAwesome's advance box under xelatex is half its
                     # warning triangle, and the crop of the box cut the '!' off)
+                    members = [spans[sid] for sid in _ids(fig, "spans") if sid in spans]
+                    reached: list[int] = []
                     if fig.get("role") == "math" or (fig.get("role") == "icon" and fig.get("spans")):
-                        grown = grow_to_ink(eraser, _numbers(fig["bbox"], "bbox"),
-                                            [spans[sid] for sid in _ids(fig, "spans") if sid in spans])
-                        fig["bbox"] = _json_numbers(grown)
+                        fig["bbox"] = _json_numbers(grow_to_ink(eraser, _numbers(fig["bbox"], "bbox"), members))
+                        reached = formula_objects(eraser, members)
+                    # (whatever glyph the background loses to the picture, the crop shows whole)
+                    fig["bbox"] = _json_numbers(reach_held_ink(eraser, _numbers(fig["bbox"], "bbox"),
+                                                               owned_by(members), frozenset(reached)))
                     box = _numbers(fig["bbox"], "bbox")
                     w, h = crop_figure(eraser, box, raw_pages[index]["images"], path, crop_ground(fig, box, furniture),
                                        bullet_objects + others.get(fid, []), writer)
@@ -895,13 +991,10 @@ def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_sha
             # background while the crop showed only the rule. (What a grazed glyph has inside the
             # box the picture shows over it, in place.)
             held = owned_by([spans[sid] for fig in figures for sid in _ids(fig, "spans") if sid in spans])
-
-            def centre(ch: Char) -> tuple[float, float]:
-                return (ch.box[0] + ch.box[2]) / 2, (ch.box[1] + ch.box[3]) / 2
+            taken = [holds(b, held) for b in boxes]
 
             def in_figure(ch: Char) -> bool:
-                return any(_intersects(ch.box, b) for b in boxes) and (
-                    any(b[0] <= centre(ch)[0] <= b[2] and b[1] <= centre(ch)[1] <= b[3] for b in boxes) or held(ch))
+                return any(test(ch) for test in taken)
 
             eraser.remove_chars(in_figure)
             for fig, b in zip(figures, boxes):

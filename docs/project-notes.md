@@ -5240,3 +5240,13 @@ class on a fresh conversion before working on it.
   the frame also takes 'Леменкова П. А.' into its picture on 4 of 48 slides, which keeps that
   name out of the deck's furniture everywhere. The regular-looking footline face is the
   documented optical-weight compromise (600, drawn Regular).
+- **A crop reaches the ink of every glyph it takes** (track N, real_beamer-monodromy s11). Glyph
+  boxes run from origin to advance, not ink, and the background drops a glyph whose centre a
+  picture's box holds, or one of the picture's own glyphs the box reaches; only math and icon
+  crops were grown to ink, so a slanted label's overhang (the q beside a tikz-cd arrow), a
+  hanging brace top or a word under a thin strike rule was in neither the background nor the
+  crop. `render.reach_held_ink` grows each crop on the sides where that ink runs past the box:
+  whole text objects by rendering with and without them, a glyph that leaves its object only
+  partly within `GLYPH_MARGIN` of its box, up to `INK_ROUNDS` 3, skipping objects `grow_to_ink`
+  measured; `holds` is the erasure's own test. 89 decks: 7 of 1,137 boxes grew, all real cuts
+  (linear-attention's 'softmax' under a 2 pt strike rule showed as a 2 pt strip); ~0.05 s a deck.
