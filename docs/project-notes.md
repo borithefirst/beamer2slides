@@ -5211,3 +5211,32 @@ class on a fresh conversion before working on it.
   and more than half an em down is a new line (`DROPPED_LINE`: 'THE' over 'END' read 'THEEND').
   Open: p10's panel f1 is still an overlay (its caption split between labels and text); the ∗
   is not a superscript run; 'iterations' missing on slide 15.
+- **Local speed, part 2** (track K; five real decks, interleaved best of 3): extract 6.0 -> 1.85 s
+  on zds (defense 3.4 -> 1.8, biore 1.7 -> 0.8, linear-attention 1.3 -> 0.6), classify 2.3 ->
+  1.2 s on zds (defense 3.1 -> 2.0, biore 0.75 -> 0.39); output byte-identical (raw.json,
+  deck.json, rendered.json, `emit.plan_offline`, every PNG, upload.pptx but for its timestamps).
+  `notes._note_header` reads a page's words only when a band could be the default template's
+  (`_header_in`); before, every page ran `shown_spans` and built a `Visibility`. Notes and
+  extract read one open PDF (`extract.Reading`: one Document, so PDFium's text pages, object
+  walks and path traces are made once, each page's `page_chars` read once and shared, a Char
+  never changed once read); `classify_pdf` and `checks.convert_pages` hold it across
+  `notes.prepare_read` and `extract_read`. `Visibility` flattens a fill's path only when a glyph
+  sample falls in its box (`_polygons`). `Line.main` (393k calls, 6.9 s profiled) is remembered
+  against the line's spans by identity and each span's size, baseline, text and font, all
+  `_find_main` reads. Left: the rehearsal's `slide_parts` depends on Google's answers (template
+  ids, measured moves), so build_deck cannot reuse it; `plan_theme_of`'s background re-reads
+  would hold 9 MB per background; sync, adopt_sync, inverse and deck_tools still open the PDF
+  twice (`Reading` + `prepare_read`/`extract_read`).
+- **Layout words under a figure's crop** (track O, real_africa-remote-sens-30 s2, 13, 43, 47): a
+  frame drawn down to the page foot, cropped opaque, hid the footline words `promote_theme_text`
+  had moved onto the layouts (Slides stacks a layout under every slide element, and the crop had
+  those glyphs switched off): 'Институт Геог|рафии' was cut at the frame's edge.
+  `render.crop_ground` makes a figure whose box meets an `on_layout` glyph band `in_place`, and
+  `clear_in_place` clears, with binary alpha, only the pixels where the figure paints nothing
+  and the opaque crop shows the background's own ground (`_ground_objects`), so it is right over
+  any ground, a block's shading drawn over the figure included. 4 crops of 7,113 in 578 PDFs
+  change; the rest stay byte-identical. A synced deck keeps its old crop
+  (`snapshot.same_picture_file` reads the two as one picture); a rebuild gets the new one. Left:
+  the frame also takes 'Леменкова П. А.' into its picture on 4 of 48 slides, which keeps that
+  name out of the deck's furniture everywhere. The regular-looking footline face is the
+  documented optical-weight compromise (600, drawn Regular).

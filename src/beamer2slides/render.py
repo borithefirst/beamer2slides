@@ -19,6 +19,7 @@ from collections.abc import Callable, Collection, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from PIL import Image
@@ -27,6 +28,7 @@ from .arrays import Floats, Ints, Mask, Pixels, RGB, RGBA
 from .json_types import Json, JsonArray, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
 from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, PdfError
 from .raw_types import RawDoc, RawImage, RawPage, RawSpan
+from .typing_compat import assert_never
 
 BACKGROUND_WIDTH_PX = 2000
 FIGURE_PX_PER_PT = 8.0     # ~ 4 px per Slides point on a 4:3 deck: sharp on high-DPI screens
@@ -459,8 +461,14 @@ def save_bytes(data: bytes, path: Path) -> None:
     path.write_bytes(data)
 
 
+CropGround = Literal["opaque", "anchored", "in_place"]
+"""How a figure's crop takes the page under it: `opaque` painted in; `anchored` transparent for
+a picture Slides moves with its words (`clear_ground`); `in_place` transparent for one that stays
+over the slide's own background but covers words the layout carries (`clear_in_place`)."""
+
+
 def crop_figure(eraser: Eraser, bbox: Sequence[float], raw_images: list[RawImage], path: Path,
-                transparent: bool, hide: Sequence[int], writer: PngWriter) -> tuple[int, int]:
+                ground: CropGround, hide: Sequence[int], writer: PngWriter) -> tuple[int, int]:
     """The picture of a figure region on the page as erased so far, at a resolution for its
     size, handed to `writer`; its (width, height) in pixels."""
     x0, y0, x1, y1 = bbox
@@ -473,26 +481,68 @@ def crop_figure(eraser: Eraser, bbox: Sequence[float], raw_images: list[RawImage
             zoom = max(zoom, im["px"][0] / (ix1 - ix0))
     zoom = min(zoom, FIGURE_MAX_PX / max(width, height))
     img = eraser.render(zoom, _box(bbox), False, hide)
-    if transparent:
+    if ground == "anchored":
         img = clear_ground(eraser, bbox, zoom, img, hide)
+    elif ground == "in_place":
+        img = clear_in_place(eraser, bbox, zoom, img, hide)
+    elif ground != "opaque":
+        assert_never(ground)
     writer.save(img, path)
     return img.shape[1], img.shape[0]
+
+
+def crop_ground(fig: JsonObject, bbox: Sequence[float], furniture: Sequence[Box]) -> CropGround:
+    """How `fig`'s crop takes its ground: transparent when anchored to words, or when its box
+    reaches over header or footer words the layouts carry (`furniture`: the bands of the slide's
+    `on_layout` glyphs, `promote_theme_text`). Those words lie on the layout, under every slide
+    element, so an opaque crop hid them where the PDF draws them over the figure's ground: a frame
+    running down to the page foot cut 'Институт Геог|рафии' off at its edge
+    (real_africa-remote-sens-30 s2)."""
+    if fig.get("anchor"):
+        return "anchored"
+    return "in_place" if any(_intersects(bbox, b) for b in furniture) else "opaque"
 
 
 GROUND_FLAT = 6        # levels: the page under a picture counts as one colour
 GROUND_MATCH = 16      # levels: the transparent crop laid on that colour shows the opaque crop
 
 
+def _ground_objects(eraser: Eraser, bbox: Sequence[float]) -> list[int]:
+    """What stays in the background under a figure's box: paths reaching out of the box as
+    render_backgrounds leaves them, images and shadings not inside it."""
+    bounds = eraser.bounds
+    return [key for key, po in eraser.objects.items() if key not in eraser.removed and (
+        (po.type == OBJ_PATH and not _inside(bounds[key], _grow(bbox, 5))) or
+        (po.type in (OBJ_IMAGE, OBJ_SHADING) and not _inside(bounds[key], _grow(bbox, 0.5))))]
+
+
+def clear_in_place(eraser: Eraser, bbox: Sequence[float], zoom: float, opaque: RGB, hide: Sequence[int]) -> Pixels:
+    """A figure that keeps its place over the slide's own background, see-through where it paints
+    nothing (`crop_ground`'s `in_place`), so the layout's words show there. The background holds
+    the page under the figure (`_ground_objects`, in any colours: the title bar's edge, a block's
+    shadow), so a pixel is clear only where the figure's own objects leave it empty and the opaque
+    crop shows that ground alone; every other pixel is the opaque crop's (binary alpha: a ground
+    drawn over the figure, a block's shading over its body, stays as the page shows it)."""
+    ground = _ground_objects(eraser, bbox)
+    rgba = eraser.render(zoom, _box(bbox), True, ground + list(hide))
+    drawn = [key for key in eraser.objects if key not in eraser.removed and key not in set(ground)]
+    under = eraser.render(zoom, _box(bbox), False, drawn + list(hide))
+    if rgba.shape[:2] != opaque.shape[:2] or under.shape[:2] != opaque.shape[:2]:
+        return opaque
+    clear = (rgba[..., 3] == 0) & \
+        (np.abs(opaque[..., :3].astype(int) - under[..., :3].astype(int)).max(axis=2) <= GROUND_FLAT)
+    if int(np.count_nonzero(clear)) < 20:
+        return opaque
+    return np.dstack([opaque[..., :3], np.where(clear, 0, 255).astype(np.uint8)])
+
+
 def clear_ground(eraser: Eraser, bbox: Sequence[float], zoom: float, opaque: RGB, hide: Sequence[int]) -> Pixels:
     """A picture anchored to text (inline formula, icon, number ball) on a transparent ground, so it
     shows the slide under it when the background colour changes or it is moved onto a shape.
-    What stays in the background (paths reaching out of the box as render_backgrounds leaves them,
-    images and shadings not inside it) is left out. Kept only where the page under the picture is
-    flat and the result laid on that colour shows the opaque crop; else the opaque crop."""
-    bounds = eraser.bounds
-    ground = [key for key, po in eraser.objects.items() if key not in eraser.removed and (
-        (po.type == OBJ_PATH and not _inside(bounds[key], _grow(bbox, 5))) or
-        (po.type in (OBJ_IMAGE, OBJ_SHADING) and not _inside(bounds[key], _grow(bbox, 0.5))))]
+    What stays in the background (`_ground_objects`) is left out. Kept only where the page under
+    the picture is flat and the result laid on that colour shows the opaque crop; else the opaque
+    crop."""
+    ground = _ground_objects(eraser, bbox)
     rgba = eraser.render(zoom, _box(bbox), True, ground + list(hide))
     if rgba.shape[:2] != opaque.shape[:2]:
         return opaque
@@ -811,6 +861,7 @@ def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_sha
                           and any(_inside(eraser.bounds[key], b) for b in bullet_boxes)]
 
         others = others_glyphs(eraser, figures, spans)
+        furniture = [_span_band(spans[sid]) for sid in _ids(slide, "on_layout") if sid in spans]
         # Graphics drawn over text first: the other crops must not show them.
         for fig in sorted(figures, key=lambda f: not f.get("overlay")):
             fid = as_str(fig["id"], "id")
@@ -829,8 +880,9 @@ def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_sha
                         grown = grow_to_ink(eraser, _numbers(fig["bbox"], "bbox"),
                                             [spans[sid] for sid in _ids(fig, "spans") if sid in spans])
                         fig["bbox"] = _json_numbers(grown)
-                    w, h = crop_figure(eraser, _numbers(fig["bbox"], "bbox"), raw_pages[index]["images"], path,
-                                       bool(fig.get("anchor")), bullet_objects + others.get(fid, []), writer)
+                    box = _numbers(fig["bbox"], "bbox")
+                    w, h = crop_figure(eraser, box, raw_pages[index]["images"], path, crop_ground(fig, box, furniture),
+                                       bullet_objects + others.get(fid, []), writer)
                     fig["px"] = [w, h]
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
         # Native tables leave the background the same way pictures do (text and rules), without a crop.

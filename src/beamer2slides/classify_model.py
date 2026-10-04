@@ -202,6 +202,15 @@ def ir_bullet(b: LineBullet | None) -> ir.Bullet | None:
     return b
 
 
+@dataclass(frozen=True, kw_only=True)
+class _MainMemo:
+    """What `Line.main` last answered and what it read: the line's spans in their order (compared
+    one by one by identity: a Span has no `__eq__`) and each one's size, baseline, text and font."""
+    spans: list[Span]
+    keys: list[tuple[float, float, str, str]]
+    main: Span
+
+
 @dataclass(eq=False, kw_only=True)
 class Line:
     spans: list[Span]
@@ -267,6 +276,7 @@ class Line:
         self.holes = [sorted(h, key=lambda s: s.rect.x0) for h in holes]
 
     def __post_init__(self) -> None:
+        self._main_memo: _MainMemo | None = None
         self.spans.sort(key=lambda s: s.rect.x0)
         # An accent reaching left of its letter follows the letter (it becomes a combining mark).
         for i in range(len(self.spans) - 1):
@@ -281,6 +291,19 @@ class Line:
 
     @property
     def main(self) -> Span:
+        """The span the line's size and baseline are read from (`_find_main`). Asked by every
+        `size` and `baseline` (393,000 times on a 107-slide deck), it is worked out again only when
+        what it reads changed: the line's spans (passes add, remove and reorder them) or one of
+        their sizes, baselines, texts or fonts."""
+        keys = [(s.size, s.baseline, s.text, s.font) for s in self.spans]
+        memo = self._main_memo
+        if memo is not None and memo.spans == self.spans and memo.keys == keys:
+            return memo.main
+        main = self._find_main()
+        self._main_memo = _MainMemo(spans=list(self.spans), keys=keys, main=main)
+        return main
+
+    def _find_main(self) -> Span:
         top = max(s.size for s in self.spans)
         big = [s for s in self.spans if s.size >= 0.9 * top]
         # (not a big-operator or brace glyph: it sits off the baseline)

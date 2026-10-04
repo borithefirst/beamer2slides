@@ -26,10 +26,9 @@ from typing import TYPE_CHECKING, TypeVar
 
 from .classify import classify
 from .debug import render_debug
-from .extract import extract, select_overlays
+from .extract import Reading, extract, extract_read, select_overlays
 from .ir import deck_json
-from .notes import Prepared, notes_from_source, source_beside
-from .notes import prepare as prepare_notes
+from .notes import Prepared, notes_from_source, prepare_read, source_beside
 from .paths import out_root
 from .raw_types import RawDoc
 from .typing_compat import assert_never
@@ -62,12 +61,14 @@ def check_labels(deck: "Mapping[str, Json]", mode: str) -> None:
 PACKAGE_HINT = "`python -m beamer2slides notes-package` writes it"
 
 
-def notes_of(pdf: Path, out: Path, tex: Path | None) -> Prepared:
+def notes_of(reading: Reading, out: Path, tex: Path | None) -> Prepared:
     """The PDF's speaker notes (docs/speaker-notes.md): its note pages, or, when it has none and
     the person named its source (`--tex`), the source compiled once more with its notes shown,
     paired page by page. Without TeX the deck is converted without notes; a source that does not
-    compile or is not this PDF's refuses. A source is never compiled unless named."""
-    prepared = prepare_notes(pdf, out)
+    compile or is not this PDF's refuses. A source is never compiled unless named. (`reading`:
+    the PDF, open for extract to read on.)"""
+    pdf = reading.pdf
+    prepared = prepare_read(reading, out)
     if prepared.pdf != out / "slides.pdf" and (out / "slides.pdf").exists():
         (out / "slides.pdf").unlink()  # stale from an earlier run of a PDF that had note pages
     if prepared.mode:
@@ -106,9 +107,11 @@ def cmd_classify(pdf: Path, out: Path, overlays: str, check: str) -> "tuple[Path
 def classify_pdf(pdf: Path, out: Path, overlays: str, check: str,
                  tex: Path | None) -> "tuple[Path, RawDoc, JsonObject]":
     out.mkdir(parents=True, exist_ok=True)
-    prepared = notes_of(pdf, out, tex)
+    with Reading(pdf) as reading:
+        prepared = notes_of(reading, out, tex)
+        # the PDF as given, unless note pages were taken out of it: read on from the notes' pass
+        raw = extract_read(reading, prepared.labels) if prepared.pdf == pdf else extract(prepared.pdf, prepared.labels)
     pdf = prepared.pdf
-    raw = extract(pdf, prepared.labels)
     for page in raw["pages"]:
         page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, overlays)

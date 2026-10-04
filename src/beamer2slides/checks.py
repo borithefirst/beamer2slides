@@ -43,14 +43,14 @@ from . import render
 from .classify import classify
 from .ir import deck_json
 from .emit import BULLET_SHAPES, SLIDE_W, FontMapper, fit_holes, merge_blocks, slide_holes
-from .extract import extract, select_overlays
+from .extract import Reading, extract, extract_read, select_overlays
 from .ir_types import (At, Box, DiagramElement, FallbackImage, Fields, HoleRun, NumberBullet, Paragraph,
                        RenderedDrawnBullet, RenderedElement, RenderedGlyphBullet, RenderedImage, RenderedImageBullet,
                        RenderedMarkedShape, RenderedSlide, RenderedText, Run, ShapeBullet, ShapeElement, TableElement,
                        ThemeText, box, element_json, integer, number, parse_deck, parse_rendered_element,
                        parse_rendered_slide, point, run, slide_json, string, tuple_of)
 from .json_types import Json, JsonObject, as_int, as_objects
-from .notes import prepare
+from .notes import prepare_read
 from .pdf import Document
 from .raw_types import RawDoc
 from .typing_compat import assert_never
@@ -160,8 +160,11 @@ def convert_pages(pdf: Path, overlays: str) -> Rendered:
     """`convert_locally` keeping the overlay steps `overlays` says (`extract.select_overlays`)."""
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
-        prepared = prepare(pdf, out)  # (without note pages)
-        raw: RawDoc = select_overlays(extract(prepared.pdf, prepared.labels), overlays)
+        with Reading(pdf) as reading:
+            prepared = prepare_read(reading, out)  # (without note pages)
+            read = extract_read(reading, prepared.labels) if prepared.pdf == pdf else \
+                extract(prepared.pdf, prepared.labels)
+        raw: RawDoc = select_overlays(read, overlays)
         deck = deck_json(classify(raw))
         saved: dict[Path, Pixels] = {}
 

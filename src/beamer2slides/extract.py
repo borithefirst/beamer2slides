@@ -11,7 +11,7 @@ from typing import Literal, Protocol
 
 from . import bidi, type3
 from .fonts import font_info
-from .pdf import NO_OBJECT, OBJ_IMAGE, Char, Document, Page, char_box
+from .pdf import NO_OBJECT, OBJ_IMAGE, Char, Document, Page, PdfDocument, char_box
 from .pdf.api import Drawing, Link
 from .raw_types import (
     DrawingType, PathItem, RawColor, RawDoc, RawDrawing, RawImage, RawLink, RawMark, RawPage, RawSpan,
@@ -109,6 +109,7 @@ def _label(label: str | None, index: int) -> str:
 
 
 SMALL_CAPS_WIDTH = 0.03  # relative advance difference that marks an alternate glyph
+SCALED_SPREAD = 0.01  # letters whose advances all differ from the font's by one factor, within this
 
 
 def _small_caps(page: Page, chars: list[Char]) -> bool:
@@ -122,9 +123,17 @@ def _small_caps(page: Page, chars: list[Char]) -> bool:
     if len(lower) < 2:
         return False
     alternate = 0
+    ratios: dict[str, float] = {}
     for ch, default in zip(lower, page.glyph_widths([(ch.font_id, ch.c, ch.size) for ch in lower])):
         if default and abs(ch.advance - default) > SMALL_CAPS_WIDTH * max(default, 0.01):
             alternate += 1
+        if default:
+            ratios[ch.c] = ch.advance / max(default, 0.01)
+    # Every letter off its default advance by one factor is text scaled across (an included
+    # figure stretched wider than tall: 'Likelihood' at 0.95, a legend at 1.162), its glyphs the
+    # font's own. An alternate glyph's advance differs letter by letter.
+    if len(ratios) >= 2 and max(ratios.values()) <= (1 + SCALED_SPREAD) * min(ratios.values()):
+        return False
     return alternate >= 2 and alternate >= 0.7 * len(lower)
 
 
@@ -137,6 +146,7 @@ NEW_LINE_GAP = 1.0
 BACK_GAP = -0.6
 SAME_BASELINE = 0.05
 NEW_BASELINE = 0.8
+DROPPED_LINE = 0.5  # ems down, with the pen moved back: a new line (see `spans`)
 # In a monospaced face a space is a whole advance (0.525 em in CMTT), and listings' default
 # columns=fixed spreads each token's glyphs over a basewidth grid wider than that advance: the
 # pen moves between two tokens with no space between them ("self" ",", "llama" "-") reach 0.2-0.42
@@ -831,11 +841,14 @@ def _in(box: Box, x: float, y: float) -> bool:
 class _Cover:
     """Something opaque painted over what came before it: its object id, its box in page space,
     and what of the box it paints - all of it, the polygons of a filled path (under its fill
-    rule), or an image's pixels where nothing is see-through (`Visibility._image_opaque`)."""
+    rule), or an image's pixels where nothing is see-through (`Visibility._image_opaque`). A path's
+    `items` are flattened into polygons only when a glyph is asked about inside its box
+    (`Visibility._polygons`): most fills cover no letter, and flattening every one was a third of
+    reading the page's words."""
     obj: int
     box: Box
     paints: Literal["box", "path", "image"]
-    polys: list[Polygon]
+    items: Sequence[Sequence[object]]
     even_odd: bool
 
 
@@ -871,13 +884,13 @@ class Visibility:
             items = d["items"]
             box_only = len(items) == 1 and items[0][0] == "re"
             self.covers.append(_Cover(obj=d["object"], box=d["rect"], paints="box" if box_only else "path",
-                                      polys=[] if box_only else _flatten(items),
-                                      even_odd=d.get("even_odd", False)))
+                                      items=[] if box_only else items, even_odd=d.get("even_odd", False)))
         kinds = {po.id: po.type for po in objects}
         for info in page.images():
             if kinds.get(info["object"]) == OBJ_IMAGE:  # its box is what its clips let show
-                self.covers.append(_Cover(obj=info["object"], box=info["bbox"], paints="image", polys=[],
+                self.covers.append(_Cover(obj=info["object"], box=info["bbox"], paints="image", items=[],
                                           even_odd=False))
+        self._polys: dict[int, list[Polygon]] = {}  # cover index -> its path flattened (`_polygons`)
         self.grid: dict[tuple[int, int], list[int]] = {}
         for k, cover in enumerate(self.covers):
             x0, y0, x1, y1 = cover.box
@@ -901,6 +914,12 @@ class Visibility:
             self._opaque[obj] = im is not None and not (im.transparent or im.blended or im.clipped)
         return self._opaque[obj]
 
+    def _polygons(self, k: int) -> list[Polygon]:
+        """The k-th cover's path as polygons (`_flatten`), worked out the first time it is asked."""
+        if k not in self._polys:
+            self._polys[k] = _flatten(self.covers[k].items)
+        return self._polys[k]
+
     def _covered(self, obj: int, x: float, y: float) -> bool:
         for k in self.grid.get((math.floor(x / GRID), math.floor(y / GRID)), ()):
             cover = self.covers[k]
@@ -912,7 +931,7 @@ class Visibility:
             elif cover.paints == "box":
                 return True
             elif cover.paints == "path":
-                if _winding(cover.polys, x, y, cover.even_odd):
+                if _winding(self._polygons(k), x, y, cover.even_odd):
                     return True
             else:
                 assert_never(cover.paints)
@@ -1111,7 +1130,11 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
             gap = ((ch.origin[0] - px) * ux + (ch.origin[1] - py) * uy) / size
             offset = abs((ch.origin[0] - px) * uy - (ch.origin[1] - py) * ux) / size
             style = (ch.font, round(ch.size, 3), ch.color, ch.alpha) != (prev.font, round(prev.size, 3), prev.color, prev.alpha)
-            new_line = ch.dir != prev.dir or offset > NEW_BASELINE or gap > NEW_LINE_GAP or gap < BACK_GAP
+            # A glyph back and down by half an em is the next line (\\ with a negative skip stacking
+            # 'THE' over 'END' 0.75 em apart): joined, the span read 'THEEND' on one baseline. An
+            # accent goes back and up, a TeX under-accent's dot or bar a quarter em down at most.
+            dropped = gap < 0 and (ch.origin[1] - py) * ux - (ch.origin[0] - px) * uy > DROPPED_LINE * size
+            new_line = ch.dir != prev.dir or offset > NEW_BASELINE or gap > NEW_LINE_GAP or gap < BACK_GAP or dropped
             # (on a tight line a word space is read against the tracking: TIGHT_JOIN)
             join = tight[k] + TIGHT_JOIN if k in tight else JOIN_GAP
             if new_line or gap >= WORD_GAP:
@@ -1201,6 +1224,37 @@ def page_chars(page: Page) -> tuple[list[Char], set[int]]:
     return bidi.visual_chars(type3.decode(chars, found) if found else chars), set(found)
 
 
+class Reading:
+    """A PDF opened once for the passes that read its pages one after the other (`notes.prepare_read`
+    finding the speaker notes, then `extract_read`): one Document, so PDFium's text pages, object
+    walks and path traces are made once, and each page's characters (`page_chars`) are read once.
+    Nothing changes a Char once read (`dataclasses.replace` makes another), so passes share them;
+    each answer is a list of its own. PDFium is not thread-safe: a Reading stays on the thread
+    that opened it."""
+
+    def __init__(self, pdf: Path) -> None:
+        self.pdf = pdf
+        self.doc: PdfDocument = Document(pdf)
+        self._chars: dict[int, tuple[list[Char], set[int]]] = {}
+
+    def page_chars(self, page: Page) -> tuple[list[Char], set[int]]:
+        """`page_chars` of `page`, a page of this Reading's document."""
+        if page.index not in self._chars:
+            self._chars[page.index] = page_chars(page)
+        chars, decoded = self._chars[page.index]
+        return list(chars), set(decoded)
+
+    def close(self) -> None:
+        self._chars.clear()
+        self.doc.close()
+
+    def __enter__(self) -> "Reading":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
 # U+2010 HYPHEN (Calibri's, fontspec's): the Google substitutes have no glyph for it, and Slides
 # drew it from a fallback font, wide and with room around it. U+2011 NON-BREAKING HYPHEN is what
 # xdvipdfmx's ToUnicode gives fontspec's Cambria and Palatino Linotype for the '-' the source
@@ -1269,10 +1323,15 @@ def _link(link: Link) -> RawLink:
 
 
 def extract_page(page: Page, label: str) -> RawPage:
+    return _extract_page(page, label, page_chars(page))
+
+
+def _extract_page(page: Page, label: str, read: tuple[list[Char], set[int]]) -> RawPage:
+    """`extract_page` with the page's `page_chars` read (`Reading.page_chars`)."""
     n = page.index
     out_spans: list[RawSpan] = []
     visibility = Visibility(page)
-    chars, decoded = page_chars(page)
+    chars, decoded = read
     marks = page_marks(page)
 
     def span_json(s: PageSpan, sid: str) -> RawSpan:
@@ -1401,18 +1460,23 @@ def frame_labels(dests: list[tuple[str, int]]) -> dict[int, str]:
 def extract(pdf: Path, labels: list[str] | None) -> RawDoc:
     """raw.json of `pdf`. `labels`, when given, replace the PDF's page labels (notes.prepare deletes
     pages, and PDFium can't rewrite the label tree)."""
-    doc = Document(pdf)
-    try:
-        meta = doc.metadata
-        frames = frame_labels(doc.named_dests())
-        pages = [extract_page(page, _label(labels[page.index] if labels else doc.label(page.index), page.index))
-                 for page in doc]
-        for page in pages:
-            page["frame_label"] = frames.get(page["index"])
-        return {
-            "version": 1,
-            "source": {"pdf": str(pdf), "producer": meta["producer"], "pages": len(doc), "title": meta["title"]},
-            "pages": pages,
-        }
-    finally:
-        doc.close()
+    with Reading(pdf) as reading:
+        return extract_read(reading, labels)
+
+
+def extract_read(reading: Reading, labels: list[str] | None) -> RawDoc:
+    """`extract` of the PDF `reading` holds open (a pass before it, `notes.prepare_read`, read the
+    same pages)."""
+    doc = reading.doc
+    meta = doc.metadata
+    frames = frame_labels(doc.named_dests())
+    pages = [_extract_page(page, _label(labels[page.index] if labels else doc.label(page.index), page.index),
+                           reading.page_chars(page))
+             for page in doc]
+    for page in pages:
+        page["frame_label"] = frames.get(page["index"])
+    return {
+        "version": 1,
+        "source": {"pdf": str(reading.pdf), "producer": meta["producer"], "pages": len(doc), "title": meta["title"]},
+        "pages": pages,
+    }

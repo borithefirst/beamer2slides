@@ -264,3 +264,27 @@ def test_a_quad_before_a_graphic_in_the_words_stays_wide() -> None:
 
     assert texts_around(18.6)[0] == "Questions? \u2003"   # a word space and a quad (1.33 em)
     assert texts_around(4.6)[0] == "Questions? "          # a word space
+
+
+
+def test_a_word_stacked_under_the_last_starts_a_line() -> None:
+    # third-year-talk p19: 'THE' \\[-x] 'END', the pen 0.42 em back and 0.75 em down (under
+    # NEW_BASELINE, short of BACK_GAP): one span read 'THEEND' and 'END' stayed in the background
+    the, end = glyphs([("THE", 0)], font="Helvetica-Bold", size=SIZE), glyphs([("END", 0)], font="Helvetica-Bold", size=SIZE)
+    shift = (the[-1].origin[0] + the[-1].advance - SIZE * 0.42 - end[0].origin[0], 0.75 * SIZE)
+    end = [dataclasses.replace(ch, origin=(ch.origin[0] + shift[0], ch.origin[1] + shift[1]), obj=3 + i,
+                               box=char_box(ch.origin[0] + shift[0], ch.origin[1] + shift[1], 1.0, 0.0,
+                                            ch.advance, SIZE, 0.8, -0.2))
+           for i, ch in enumerate(end)]
+    assert texts(the + end, {}) == ["THE", "END"]  # (before: ["THEEND"])
+
+
+def test_text_scaled_across_is_no_small_caps() -> None:
+    # third-year-talk p5/p10/p14: words of an included figure stretched 0.95x/1.162x/1.285x: every
+    # letter off the font's advance by one factor, and Slides wrote LIKELIHOOD
+    word = glyphs([("likelihood", 0)], font="Helvetica", size=SIZE)
+    widths = {c: 0.5 * SIZE / 0.95 for c in "likelihood"}
+    assert not extract._small_caps(Page(word, widths), word)
+    # true small caps: each letter's own advance, not one factor
+    sc = {c: 0.5 * SIZE * f for c, f in zip("likehod", (1.4, 1.5, 1.3, 1.2, 1.25, 1.12, 1.33))}
+    assert extract._small_caps(Page(word, sc), word)

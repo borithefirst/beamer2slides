@@ -201,6 +201,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   beyond its box stands on its caption: a plain picture, no overlay (`classify_figures.stands_on`);
   a diagram's segments inside a filled node are drawn after the nodes (`on_filled_node`); a smaller
   glyph raised 0.3 em over its words is a footnote mark, no label (`classify_reasons.footnote_mark`).
+  A figure crop over words the layout carries (`on_layout`) is see-through where it paints
+  nothing (`render.crop_ground` `in_place`, `clear_in_place`): the footline shows through it.
 - `table`: text framed by rules (or rule-less `plain_tables`), with borders, merges, fills. Column
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
   and the table does not grow over its caption; classify cuts a spanning chunk at word gaps when it
@@ -694,6 +696,9 @@ markers.
 - PNGs (backgrounds, crops, debug) are encoded on `render.PngWriter` threads (`PNG_WRITERS`, 0 =
   in place; same bytes, PDFium on the main thread): a picture handed to it is never changed after,
   and a writer looks up `render.save_png` when it runs. `cluster_rects` sweeps by left edge.
+  `extract.Reading` opens a PDF once for notes then extract (`notes.prepare_read`, `extract_read`;
+  each page's chars read once and shared, a Char never changed once read); `Line.main` is
+  remembered, checked against its spans and their size, baseline, text and font.
 - `fidelity` reuses saved thumbnails unless the deck was emitted again (or `--refresh`).
 - **Drive's .pptx export embeds the deck's fonts**: a deck with a Noto Sans SC run took 115 s (TC
   77 s, 6.7 MB; JP/KR ~45 s; Serif CJK faces are not embedded), past the library's 60 s. Every

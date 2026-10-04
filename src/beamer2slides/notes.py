@@ -24,19 +24,21 @@ A PDF compiled without its notes gets them from its source: `notes_from_source` 
 
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 import unicodedata
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import Literal
 
 from .classify_text import BULLET_GLYPHS, ENUM_RE, RAISED_MARKS, compose_accents, math_text
-from .extract import JOIN_GAP, PageSpan, _label, page_chars, page_marks, readable, shown_spans
+from .extract import JOIN_GAP, PageSpan, Reading, _label, page_chars, page_marks, readable, shown_spans
 from .fonts import font_info
-from .pdf import Char, Document, Page, PdfDocument
+from .pdf import Char, Document, Drawing, Page, PdfDocument
 
 Box = tuple[float, float, float, float]
 NotesMode = Literal["note pages", "second screen", "carried"]
@@ -59,9 +61,17 @@ COMPRESSED_BAND = (0.10, 0.15)
 
 def _note_header(page: Page, spans: list[PageSpan], area: Box) -> float | None:
     """Bottom of the note page header band inside `area`, or None if this is no note page."""
+    return _header_in(page.drawings(), lambda: spans, area)
+
+
+def _header_in(drawings: list[Drawing], read_spans: Callable[[], list[PageSpan]], area: Box) -> float | None:
+    """`_note_header` over the page's `drawings`. The words (`read_spans`, the page's
+    `shown_spans`) are read only when a band could be the default template's: most pages have
+    none, and reading a page's words was most of what finding its notes cost."""
     x0, y0, x1, y1 = area
     width, height = x1 - x0, y1 - y0
-    for d in page.drawings():
+    read: list[list[PageSpan]] = []
+    for d in drawings:
         r = d["rect"]
         if d.get("fill") is None or abs(r[0] - x0) > 1 or abs(r[2] - x1) > 1 or r[1] > y0 + 1:
             continue
@@ -69,25 +79,27 @@ def _note_header(page: Page, spans: list[PageSpan], area: Box) -> float | None:
         if COMPRESSED_BAND[0] < band <= COMPRESSED_BAND[1]:
             # (a narrow band with small words at its right end is also a theme's headline: only
             # the thumbnail's own canvas says it is the compressed note page)
-            if _thumbnail_canvas(page, area, r[3], 0.125):
+            if _thumbnail_canvas(drawings, area, r[3], 0.125):
                 return r[3]
             continue
         if not HEADER_BAND[0] < band < HEADER_BAND[1]:
             continue
         header = (x0 + 0.6 * width, y0, x1, r[3])
-        inside = _spans_in(spans, area)
+        if not read:
+            read.append(read_spans())
+        inside = _spans_in(read[0], area)
         # Text size of the note itself: the frame thumbnail can hold more words than a short note.
         body = [s for s in inside if not _contains(header, s.bbox)] or inside
         sizes = sorted(s.size for s in body)
         if not sizes:
             return None
         tiny = [s for s in inside if s.size < 0.45 * sizes[len(sizes) // 2] and _contains(header, s.bbox)]
-        if len(tiny) >= 1 or _thumbnail_canvas(page, area, r[3], 0.25):  # the frame thumbnail
+        if len(tiny) >= 1 or _thumbnail_canvas(drawings, area, r[3], 0.25):  # the frame thumbnail
             return r[3]
     return None
 
 
-def _thumbnail_canvas(page: Page, area: Box, header_bottom: float, scale: float) -> bool:
+def _thumbnail_canvas(drawings: list[Drawing], area: Box, header_bottom: float, scale: float) -> bool:
     """The note template's frame thumbnail painted empty: `\\insertslideintonotes{0.25}` fills a
     quarter-size canvas at the header's right end (`compressed`: an eighth) and draws the frame's
     own box into it - which holds nothing when a frame's content is placed at shipout (textpos'
@@ -95,7 +107,7 @@ def _thumbnail_canvas(page: Page, area: Box, header_bottom: float, scale: float)
     canvas says so."""
     x0, y0, x1, y1 = area
     w, h = scale * (x1 - x0), scale * (y1 - y0)
-    for d in page.drawings():
+    for d in drawings:
         r = d["rect"]
         if d.get("fill") is not None and abs(r[2] - r[0] - w) <= 1 and abs(r[3] - r[1] - h) <= 1 and \
                 r[2] >= x1 - 0.1 * w and r[1] >= y0 - 1 and r[3] <= header_bottom + 1:
@@ -483,11 +495,14 @@ class Prepared:
 
 
 def prepare(pdf: Path, out: Path) -> Prepared:
-    doc = Document(pdf)
-    try:
-        return _prepare(doc, pdf, out)
-    finally:
-        doc.close()
+    with Reading(pdf) as reading:
+        return prepare_read(reading, out)
+
+
+def prepare_read(reading: Reading, out: Path) -> Prepared:
+    """`prepare` of the PDF `reading` holds open: when its `pdf` is the one read (no note pages),
+    `extract.extract_read` reads it on from where this left it."""
+    return _prepare(reading, reading.pdf, out)
 
 
 def _frame_view(shown: list[PageSpan], page: Page, area: Box) -> tuple[str, list[str]]:
@@ -569,9 +584,10 @@ def plain_notes(candidates: list[int], labels: list[str]) -> list[int]:
     return notes
 
 
-def _bare(page: Page) -> bool:
-    """Words and nothing drawn (the plain note template), and no adopt marks."""
-    return not page.drawings() and not page.images() and bool(page.chars()) and not page_marks(page)
+def _bare(page: Page, drawings: list[Drawing]) -> bool:
+    """Words and nothing drawn (the plain note template: `drawings`, the page's, are none), and no
+    adopt marks."""
+    return not drawings and not page.images() and bool(page.chars()) and not page_marks(page)
 
 
 def _second_screen(doc: PdfDocument, spans: dict[int, list[PageSpan]]) -> dict[int, float] | None:
@@ -586,7 +602,8 @@ def _second_screen(doc: PdfDocument, spans: dict[int, list[PageSpan]]) -> dict[i
     return headers if len(headers) >= 0.5 * len(doc) else None
 
 
-def _prepare(doc: PdfDocument, pdf: Path, out: Path) -> Prepared:
+def _prepare(reading: Reading, pdf: Path, out: Path) -> Prepared:
+    doc = reading.doc
     everything = list(range(len(doc)))
     if not len(doc):
         return Prepared(pdf=pdf, notes={}, mode=None, labels=None, kept=everything)
@@ -624,16 +641,17 @@ def _prepare(doc: PdfDocument, pdf: Path, out: Path) -> Prepared:
         # end (drawing-workshop 28 and 50) read as the note template
         if not page.index or page_marks(page):
             continue
-        header = _note_header(page, shown_spans(page), page.rect)
+        drawings = page.drawings()
+        header = _header_in(drawings, functools.partial(shown_spans, page), page.rect)
         if header is not None:
             headers[page.index] = header
-        elif _bare(page):
+        elif _bare(page, drawings):
             bare.append(page.index)
     if not headers:
         headers = {k: 0.0 for k in plain_notes(bare, [_label(doc.label(k), k) if doc.label(k) else ""
                                                       for k in everything])}
     if not headers:
-        return _carried(doc, pdf, given)
+        return _carried(reading, pdf, given)
     keep = [k for k in everything if k not in headers]
     for k, header in headers.items():
         page = doc[k]
@@ -650,12 +668,13 @@ def _prepare(doc: PdfDocument, pdf: Path, out: Path) -> Prepared:
     return Prepared(pdf=path, notes=carried(found, labels, views), mode="note pages", labels=labels, kept=keep)
 
 
-def _carried(doc: PdfDocument, pdf: Path, labels: list[str]) -> Prepared:
+def _carried(reading: Reading, pdf: Path, labels: list[str]) -> Prepared:
     """The notes b2snotes.sty carries beside the pages, or none: the PDF is the slides as it is
     (extract never reads beyond a page's edges)."""
+    doc = reading.doc
     found: dict[int, str] = {}
     for page in doc:
-        notes = carried_notes(page)
+        notes = carried_blocks(reading.page_chars(page)[0], page.width, uri_links(page))  # carried_notes
         if notes.before and page.index:
             # a \note after a frame: beamer's note page would follow that frame's own
             found[page.index - 1] = (found.get(page.index - 1, "") + "\n" + notes.before).strip()
