@@ -1005,8 +1005,14 @@ def test_the_pure_renderer_survives_substituted_text_torture_seeds():
 def test_a_generic_face_keeps_its_blend_between_documents():
     """The multiple master face is PDFium's for the whole process, and so is its blend: a glyph
     drawn at one /Widths width leaves the face there, and a later document's font without /Widths
-    measures its advances at that blend. The pure reader's face does the same."""
+    measures its advances at that blend. The pure reader's face does the same.
+
+    Each step is taken by both readers before the next, so the test leaves them in one blend: it
+    once ran each reader's steps in turn, a `resync` between them, and handed later tests in the
+    worker PDFium at the reset blend and the pure reader at /Wide's (truetype `directory` seed 1242,
+    a refused sfnt whose generic substitute is measured at the blend, came out apart)."""
     from beamer2slides.devtools.render_torture_subst import FontSpec, pdf_bytes, resync
+    from beamer2slides.pdf.api import PdfBackend
     from beamer2slides.pdf.pdfium_backend import PdfiumBackend
     from beamer2slides.pdf.pure.backend import PureBackend
     _needs_foxit()
@@ -1019,21 +1025,41 @@ def test_a_generic_face_keeps_its_blend_between_documents():
                              b"<< /Type /FontDescriptor /FontName /Bare /Flags 32 >>"], codes=[77], two_byte=False)
     first = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (M) Tj ET", [wide])
     second = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (MMMM) Tj ET", [bare])
-    bounds = []
-    for backend in (PdfiumBackend, PureBackend):
-        resync()
-        doc = backend().open(second)
-        before = doc[0].object_bounds()
-        doc.close()
-        doc = backend().open(first)
-        doc[0].render(1, clip=None, transparent=False)
-        doc.close()
-        doc = backend().open(second)
-        bounds.append((before, doc[0].object_bounds()))
-        doc.close()
+    readers: list[PdfBackend] = [PdfiumBackend(), PureBackend()]
+
+    def measured(reader: PdfBackend) -> list[Box]:
+        doc = reader.open(second)
+        try:
+            return doc[0].object_bounds()
+        finally:
+            doc.close()
+
+    def drawn(reader: PdfBackend) -> None:
+        doc = reader.open(first)
+        try:
+            doc[0].render(1, clip=None, transparent=False)
+        finally:
+            doc.close()
+
+    resync()
+    before = [measured(reader) for reader in readers]
+    for reader in readers:
+        drawn(reader)
+    after = [measured(reader) for reader in readers]
+    bounds = list(zip(before, after))
     assert bounds[0] == bounds[1]
     if sys.platform != "darwin":                         # macOS CI: unmoved in PDFium too
         assert bounds[0][0] != bounds[0][1]              # the blend moved the advances
+
+
+def test_the_generic_blend_test_leaves_both_readers_alike():
+    """The order an xdist worker once ran: the blend test, then a refused sfnt (truetype seed 1242,
+    `directory`) substituted by FoxitSansMM and measured at the blend, compared with no `resync`
+    between them."""
+    from beamer2slides.devtools.truetype_torture import case, first_diff
+    test_a_generic_face_keeps_its_blend_between_documents()
+    content, fonts, _ = case(1242, True, False)
+    assert first_diff(content, fonts) is None
 
 
 def test_a_system_face_does_not_carry_its_charmap_into_the_next_document():
@@ -1814,8 +1840,14 @@ def test_made_up_truetype_fonts_extract_as_pdfium_does():
     3126: a glyf font needs loca even with no glyf; 13299 and 15678: FT_Get_Name_Index stops at the
     face's glyph count, not maxp's). With `os2` an OS/2 table and a 0 0 0 0 FontBBox show
     sfnt_load_face's ascender in the char boxes (121, 133: an OS/2 saying version 0xFFFF is missing; 693: an ascent equal to the descent divided by 0 in
-    api.font_metrics, for both backends)."""
+    api.font_metrics, for both backends). A refused sfnt's generic substitute measures codes at
+    the process's blend (test_a_generic_face_keeps_its_blend_between_documents), so the readers
+    start from one (`resync`), as the substitution tests do."""
     from beamer2slides.devtools.truetype_torture import case, first_diff
+    from beamer2slides.pdf.pure import foxit
+    if foxit.available():
+        from beamer2slides.devtools.render_torture_subst import resync
+        resync()
     apart = []
     seeds = [(s, False) for s in [26, 42, 1611, 5456, 5529, 6002, 6625, 10006, 10074, 10116, 10559, 10725,
                                   11231, 11369, 11490, 11719, 11965, *range(60)]]
