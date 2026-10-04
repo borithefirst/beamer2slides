@@ -260,6 +260,60 @@ def test_a_turned_page_renders_where_its_geometry_says(backend: PdfBackend, rota
         doc.close()
 
 
+# A 0.1 pt stroke, a 3 pt one, and a 0.4 pt one in a form drawn at half size (0.2 pt on the page).
+HAIRLINES = b"0 0 0 RG 0.1 w 10 30 m 190 30 l S 3 w 10 60 m 190 60 l S /X0 Do"
+HAIRLINE_FORM = (b"/BBox [0 0 400 300] /Matrix [0.5 0 0 0.5 0 0]", b"0 0 0 RG 0.4 w 20 200 m 380 200 l S")
+
+
+def _dark_rows(img: np.ndarray, y: float, zoom: float) -> int:
+    """How many pixels of the column at x = 100 pt are dark within 4 pt of page y `y`."""
+    column = img[int((y - 4) * zoom):int((y + 4) * zoom), int(100 * zoom), 1]
+    return int((column < 128).sum())
+
+
+def test_a_hairline_widens_thin_strokes_in_renders_only(backend: PdfBackend) -> None:
+    """A picture rendered at 8 px/pt and shown at a slide's size averaged its one-pixel hairlines
+    to a pale, broken grey (real_thesis-defense-defense's network maps, a phylogenetic tree):
+    `set_hairline` draws each stroke at least that wide in `render`, page space (a form's scale
+    counted), and nothing else sees it - drawings, bounds, and a render after it is set back."""
+    from beamer2slides.devtools.render_torture import MEDIA, pdf_bytes
+    from PIL import Image
+    doc = backend.open(pdf_bytes([HAIRLINES], [HAIRLINE_FORM], MEDIA, b"", b""))
+    try:
+        page = doc[0]
+        drawings, bounds = page.drawings(), page.object_bounds()
+        assert sorted(round(d.get("width", 0.0), 3) for d in drawings) == [0.1, 0.2, 3.0]
+        try:
+            plain = page.render(8.0, clip=None, transparent=False)
+        except PdfError:
+            assert not api.renders(backend)
+            return
+        page.set_hairline(1.0)
+        wide = page.render(8.0, clip=None, transparent=False)
+        assert page.drawings() == drawings and page.object_bounds() == bounds
+        # (page y: 150 - 30, 150 - 60, 150 - 100)
+        before = [_dark_rows(plain, y, 8.0) for y in (120, 90, 50)]
+        after = [_dark_rows(wide, y, 8.0) for y in (120, 90, 50)]
+        assert before[0] <= 2 and before[2] <= 2 and after[1] == before[1] == 24, (before, after)
+        assert after[0] in (8, 9) and after[2] in (8, 9), after
+        if backend.name != "pdfium":
+            ref = pdf.resolve("pdfium").open(pdf_bytes([HAIRLINES], [HAIRLINE_FORM], MEDIA, b"", b""))
+            try:
+                ref[0].set_hairline(1.0)
+                assert np.array_equal(wide, ref[0].render(8.0, clip=None, transparent=False))
+            finally:
+                ref.close()
+        # shown at the hairline's scale, the picture has the ink a render at that scale draws
+        coarse = page.render(1.0, clip=None, transparent=False)
+        shown = np.asarray(Image.fromarray(wide).resize((coarse.shape[1], coarse.shape[0]), Image.Resampling.BOX))
+        ink = [float((255 - img[..., 1].astype(float)).sum()) for img in (coarse, shown)]
+        assert ink[1] == pytest.approx(ink[0], rel=0.05)
+        page.set_hairline(0.0)
+        assert np.array_equal(page.render(8.0, clip=None, transparent=False), plain)
+    finally:
+        doc.close()
+
+
 @built
 def test_bytes_open_like_the_file_and_save_writes_new_files(backend: PdfBackend, tmp_path: Path) -> None:
     doc = backend.open(BASIC)

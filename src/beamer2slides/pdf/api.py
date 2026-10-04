@@ -251,6 +251,13 @@ class PdfPage(Protocol):
         """Switch objects off (or on again) for `render`, `drawings` and `images`. Nothing is
         rewritten: the page is the same once they are on again."""
 
+    def set_hairline(self, width: float) -> None:
+        """From now on `render` draws every stroked path at least `width` points wide (page
+        space); 0 draws each as the PDF says. A viewer draws no stroke thinner than one of its
+        pixels: a picture rendered finer and shown smaller averages a thinner one away (pale,
+        broken lines). Only `render` sees it: `drawings` and `object_bounds` keep the PDF's
+        widths, and nothing is rewritten."""
+
     def chars(self) -> list[Char]:
         """The characters drawn on the page, in content order (a big operator's limits and
         accents in the order the content stream draws them, not reading order)."""

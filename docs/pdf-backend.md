@@ -51,8 +51,15 @@ out turned in a bitmap of the unturned size, so crops missed their elements). Th
   -> bytes` (a new file with some pages, some cut to an area: `notes.py` writes slides.pdf with it),
   `close()`;
 - page: `index`, `width`, `height`, `rect`, `objects()`, `object_bounds()`, `set_active(ids, on)`,
-  `chars()`, `glyph_widths(requests)`, `drawings()`, `images()`, `embedded_image(id)`, `links()`,
-  `render(zoom, clip, transparent)`.
+  `set_hairline(width)`, `chars()`, `glyph_widths(requests)`, `drawings()`, `images()`,
+  `embedded_image(id)`, `links()`, `render(zoom, clip, transparent)`.
+
+`set_hairline(width)` makes `render` draw every stroked path at least `width` pt wide (page space,
+a form's scale counted); 0 turns it off. PDFium sets the thin paths' widths for the render and back
+(`FPDFPageObj_SetStrokeWidth`, no content regenerated), pure the parsed objects' `line_width`
+(byte-identical). `render.hairline` sets it to one pixel of the slide 1600 px wide on every page
+that makes pictures for Slides: a viewer draws no stroke under one of its pixels, but an 8 px/pt
+crop shown at slide size averaged 1-px hairlines to a pale, broken grey.
 
 `api.py` documents each one exactly; the conventions the pipeline was tuned on (character boxes
 from the font's ascent and descent, `re`/`qu` path items, curves bounded by their extremes,

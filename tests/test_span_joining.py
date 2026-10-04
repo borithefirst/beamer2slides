@@ -67,6 +67,9 @@ class Page:
     def set_active(self, objects: Sequence[int], active: bool) -> None:
         unasked("set_active")
 
+    def set_hairline(self, width: float) -> None:
+        unasked("set_hairline")
+
     def chars(self) -> list[Char]:
         return self._chars
 

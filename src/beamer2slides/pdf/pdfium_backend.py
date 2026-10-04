@@ -225,6 +225,8 @@ class Page:
         # a path's geometry, read once: switching objects off changes what is drawn, not where
         self._segment_cache: dict[int, list[Segment]] = {}
         self._traced: dict[tuple[int, bool], tuple[list[DrawingItem], Box] | None] = {}
+        self._hairline = 0.0    # pt: the thinnest stroke `render` draws (set_hairline)
+        self._strokes: list[tuple[ObjHandle, float, float]] | None = None
 
     @property
     def rect(self) -> Box:
@@ -274,6 +276,39 @@ class Page:
     def set_active(self, objects: Sequence[int], active: bool) -> None:
         for obj in objects:
             R.FPDFPageObj_SetIsActive(self._handle(obj), active)
+
+    def set_hairline(self, width: float) -> None:
+        self._hairline = width
+
+    def _stroked_paths(self) -> list[tuple[ObjHandle, float, float]]:
+        """Each stroked path's handle, its stroke width as PDFium keeps it (content space) and
+        the scale its matrix draws that width at (page space): read once."""
+        if self._strokes is None:
+            out: list[tuple[ObjHandle, float, float]] = []
+            fillmode, stroke = ctypes.c_int(), ctypes.c_int()
+            width = ctypes.c_float()
+            for po in self.objects():
+                handle = self._handles[po.id]
+                if po.type != OBJ_PATH or not R.FPDFPath_GetDrawMode(handle, fillmode, stroke) or not stroke.value:
+                    continue
+                a, b, c, d, _, _ = po.matrix
+                scale = math.sqrt(abs(a * d - b * c))
+                if scale > 0 and R.FPDFPageObj_GetStrokeWidth(handle, width):
+                    out.append((handle, width.value, scale))
+            self._strokes = out
+        return self._strokes
+
+    def _widened(self) -> list[tuple[ObjHandle, float]]:
+        """The strokes drawn thinner than the hairline, set to it for a render: (handle, its own
+        width) to set back."""
+        if self._hairline <= 0:
+            return []
+        out: list[tuple[ObjHandle, float]] = []
+        for handle, own, scale in self._stroked_paths():
+            if own * scale < self._hairline:
+                R.FPDFPageObj_SetStrokeWidth(handle, ctypes.c_float(self._hairline / scale))
+                out.append((handle, own))
+        return out
 
     # ------------------------------------------------------------------ text
 
@@ -635,6 +670,7 @@ class Page:
     def render(self, zoom: float, clip: Box | None, transparent: bool) -> Pixels:
         ix0, iy0, w, h = pixel_bounds(zoom, clip if clip is not None else self.rect)
         bitmap = R.FPDFBitmap_Create(w, h, 1 if transparent else 0)
+        widened = self._widened()  # (the path objects draw with their graph state: no content regenerated)
         try:
             R.FPDFBitmap_FillRect(bitmap, 0, 0, w, h, 0x00000000 if transparent else 0xFFFFFFFF)
             # /Rotate turns PDFium's display matrix, not our page space: undo it (api.render_matrix)
@@ -650,6 +686,8 @@ class Page:
             bgrx = data.reshape(h, stride)[:, :w * 4].reshape(h, w, 4)
             return _swapped(bgrx, 4 if transparent else 3)
         finally:
+            for handle, own in widened:
+                R.FPDFPageObj_SetStrokeWidth(handle, ctypes.c_float(own))
             R.FPDFBitmap_Destroy(bitmap)
 
 

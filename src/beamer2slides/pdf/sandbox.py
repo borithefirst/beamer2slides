@@ -40,10 +40,10 @@ ENV_CMD = "B2S_PDF_SANDBOX_CMD"
 ENV_TIMEOUT = "B2S_PDF_SANDBOX_TIMEOUT"
 
 DocOp = Literal["metadata", "label", "named_dests", "save", "close", "page"]
-PageOp = Literal["objects", "object_bounds", "set_active", "chars", "glyph_widths", "drawings", "images",
-                 "embedded_image", "links", "render"]
+PageOp = Literal["objects", "object_bounds", "set_active", "set_hairline", "chars", "glyph_widths", "drawings",
+                 "images", "embedded_image", "links", "render"]
 DOC_OPS = {"metadata", "label", "named_dests", "save", "close", "page"}
-PAGE_OPS = {"objects", "object_bounds", "set_active", "chars", "glyph_widths", "drawings", "images",
+PAGE_OPS = {"objects", "object_bounds", "set_active", "set_hairline", "chars", "glyph_widths", "drawings", "images",
             "embedded_image", "links", "render"}
 
 T = TypeVar("T")
@@ -236,6 +236,9 @@ class SandboxPage:
 
     def set_active(self, objects: Sequence[int], active: bool) -> None:
         self._call("set_active", [list(objects), active], _nothing)
+
+    def set_hairline(self, width: float) -> None:
+        self._call("set_hairline", [float(width)], _nothing)
 
     def chars(self) -> list[Char]:
         return self._call("chars", [], _chars)
@@ -509,6 +512,10 @@ class Worker:
                 objects, active = args
                 p.set_active([as_int(o, "set_active's object") for o in as_list(objects, "set_active")],
                              as_bool(active, "set_active's switch"))
+                return None
+            case "set_hairline":
+                (width,) = args
+                p.set_hairline(as_float(width, "set_hairline's width"))
                 return None
             case "chars":
                 _no_args(op, args)

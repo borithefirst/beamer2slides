@@ -34,6 +34,11 @@ BACKGROUND_WIDTH_PX = 2000
 FIGURE_PX_PER_PT = 8.0     # ~ 4 px per Slides point on a 4:3 deck: sharp on high-DPI screens
 SMALL_FIGURE_PX_PER_PT = 12.0  # inline formulas and other small pictures: crisper text
 FIGURE_MAX_PX = 3000
+# A PDF viewer draws no stroke thinner than one of its pixels; a picture rendered at 8 px/pt and
+# shown at a slide's size has its 1-px hairlines averaged to a pale, broken grey (Slides' 1600-px
+# thumbnail: the same ink as a box filter, 40% short of the PDF's on network maps and trees). So
+# every picture for Slides draws each stroke at least one pixel of the slide shown this wide.
+HAIRLINE_SLIDE_PX = 1600
 GLYPH_MARGIN = 0.15        # em around a removed glyph's box that its ink may reach (accents, italics)
 PAGE_GROUND = 0.95         # share of the page an image or shading covers to be its ground (classify's too)
 RAISED_SLACK = 0.5         # pt a glyph raised off its span's baseline may reach past the span's box
@@ -784,9 +789,17 @@ def crop_region(pdf: Path, page: int, bbox: list[float], path: Path, zoom: float
     """A picture of a page region (emit's stand-in for an element the Slides API refused)."""
     doc = Document(pdf)
     try:
+        doc[page].set_hairline(hairline(doc[page]))
         save_png(doc[page].render(zoom, _box(bbox), transparent=False), path)
     finally:
         doc.close()
+
+
+def hairline(page: Page) -> float:
+    """The thinnest stroke (pt) a picture of `page` for Slides draws (`HAIRLINE_SLIDE_PX`): one
+    pixel of the slide shown that wide. Renders at that scale or coarser draw as before (a
+    viewer's one-pixel minimum is already as wide)."""
+    return page.width / HAIRLINE_SLIDE_PX
 
 
 SHAPE_SAMPLE_ZOOM = 2.0
@@ -913,6 +926,7 @@ def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_sha
     paths: list[Path] = []
     for slide in as_objects(deck["slides"], "deck.slides"):
         index = as_int(slide["page"], "slide.page")
+        doc[index].set_hairline(hairline(doc[index]))  # (`original`, read for its fills, draws as the PDF)
         eraser = Eraser(doc[index])
         pictured_shapes(slide, raw_pages[index], kept_shapes)
         texts = [e for e in _elements(slide) if e["kind"] == "text"]

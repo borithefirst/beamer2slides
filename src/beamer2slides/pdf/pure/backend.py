@@ -124,6 +124,7 @@ class Page:
         self._font_info: dict[int, FontInfo] = {}   # id(Font) -> (font_id, name, ascent, descent)
         # CPDF_PageImageCache lives as long as the page: a JPEG decoded smaller stays so
         self._image_cache: ImageCache = {}
+        self._hairline = 0.0    # pt: the thinnest stroke `render` draws (set_hairline)
 
     @property
     def rect(self) -> Box:
@@ -179,6 +180,27 @@ class Page:
     def set_active(self, objects: Sequence[int], active: bool) -> None:
         for obj in objects:
             self._obj(obj).active = active
+
+    def set_hairline(self, width: float) -> None:
+        self._hairline = width
+
+    def _widened(self) -> list[tuple[PObj, float]]:
+        """pdfium_backend's: the strokes drawn thinner than the hairline set to it for a render,
+        each with its own width to set back."""
+        if self._hairline <= 0:
+            return []
+        pobjs = self._parse()
+        out: list[tuple[PObj, float]] = []
+        for po in self.objects():
+            o = pobjs[po.id]
+            if po.type != OBJ_PATH or not o.stroked:
+                continue
+            a, b, c, d, _, _ = po.matrix
+            scale = math.sqrt(abs(a * d - b * c))
+            if scale > 0 and o.line_width * scale < self._hairline:
+                out.append((o, o.line_width))
+                o.line_width = float32(self._hairline / scale)  # (PDFium's FPDFPageObj_SetStrokeWidth: a float)
+        return out
 
     # ------------------------------------------------------------------ text
 
@@ -541,7 +563,12 @@ class Page:
         page_group = isinstance(group, dict) and str(pdf.resolve(group.get("S"))) == "Transparency"
         ctx = Context(pdf, pdf.resolve(self.dict.get("Resources")), self.doc._font_cache, page_group)
         ctx.images = self._image_cache
-        bgra = render_page(self._parse(), self.box, self.rotation, fs, w, h, transparent, ctx)
+        widened = self._widened()
+        try:
+            bgra = render_page(self._parse(), self.box, self.rotation, fs, w, h, transparent, ctx)
+        finally:
+            for o, own in widened:
+                o.line_width = own
         if transparent:
             return bgra[..., [2, 1, 0, 3]].copy()
         return bgra[..., 2::-1].copy()

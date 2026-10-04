@@ -40,6 +40,9 @@ class CharsPage:
     def set_active(self, objects: Sequence[int], active: bool) -> None:
         pass
 
+    def set_hairline(self, width: float) -> None:
+        pass
+
     def chars(self) -> list[Char]:
         return self._chars
 
