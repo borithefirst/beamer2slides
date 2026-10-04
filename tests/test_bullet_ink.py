@@ -8,8 +8,9 @@ import pytest
 from beamer2slides import emit
 from beamer2slides.arrays import RGB
 from beamer2slides.emit import BULLET_SHAPES, FontMapper, bullet_level, bullet_shape, bullet_size, text_box_requests
+from beamer2slides.emit_widths import WORD_JOINER
 from beamer2slides.ir import ImageBullet, Label, NumberBullet
-from beamer2slides.json_types import JsonObject
+from beamer2slides.json_types import JsonArray, JsonObject
 from beamer2slides.pdf.api import Box, PdfDocument, PdfPage
 from beamer2slides.google_types import slides_json
 
@@ -118,6 +119,26 @@ def test_a_bullet_is_no_larger_than_its_items_text() -> None:
              if "updateTextStyle" in r and "foregroundColor" in jobj(r, "updateTextStyle", "style")
              and jstr(r, "updateTextStyle", "fields").startswith("fontFamily,fontSize,foregroundColor")]
     assert len(whole) == 2 and whole[0] == whole[1]
+
+
+def test_a_one_letter_item_keeps_its_bullets_colour() -> None:
+    """real_presentation-biore s81: the item 'R' of a teal list had a black bullet. Its run's one
+    style request covered the whole paragraph and so restyled the bullet; a WORD_JOINER after the
+    letter lets it be styled in two parts like any other (tools/probe_short_bullet.py)."""
+    ball: JsonObject = {"kind": "image", "image": "p7i1", "text": "", "bbox": [22.0, 107.0, 28.0, 113.0],
+                        "color": "#1d8db0"}
+    items: JsonArray = [
+        {"align": "left", "level": 0, "size": 10.91, "text_x0": 35.0, "tab_x0": None, "wrap_limit": None,
+         "bullet": {**ball, "bbox": [22.0, 107.0 + 16 * i, 28.0, 113.0 + 16 * i]},
+         "lines": [{"baseline": 112.0 + 16 * i, "x0": 35.0, "x1": 45.0}], "runs": [run_of(t, BODY, REGULAR)]}
+        for i, t in enumerate(["Python", "R"])]
+    el: JsonObject = {"id": "t", "kind": "text", "role": "body", "paragraphs": items}
+    reqs = [slides_json(r) for r in text_box_requests(el, "s", "b", SCALE, FontMapper())]
+    assert [jstr(r, "insertText", "text") for r in reqs if "insertText" in r] == ["Python\nR" + WORD_JOINER]
+    made = max(i for i, r in enumerate(reqs) if "createParagraphBullets" in r)
+    ranges = [(jnum(r, "updateTextStyle", "textRange", "startIndex"), jnum(r, "updateTextStyle", "textRange", "endIndex"))
+              for r in reqs[made:] if "updateTextStyle" in r]
+    assert (7, 9) not in ranges and (7, 8) in ranges and (8, 9) in ranges
 
 
 def edge_page() -> tuple[RGB, RGB]:

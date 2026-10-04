@@ -5012,3 +5012,54 @@ to (real_linear-attention-a s35/s38: a `k_t^⊤` 23 pt right of its gap, one aft
   others LINE_MARGIN, and two math lines Slides set 2-3 pt wider than measured wrapped. A
   paragraph joining short of the widest line ends at its own edge (`paragraph_ends`, indentEnd);
   the box's room is to the others' next words, or to the PDF's edge when none has one.
+
+## Campaign of 2026-10-04 (real-deck ledger, parallel fixers)
+The real-deck ledger (`out/realdecks/verified_ledger.json`) was written before the 10-03 fixes;
+several classes in it (blackboard bold under txsym, \mapsto pieces, esi's listing tail, defense's
+algorithm table, africa's longtable, most of talks' listings) were already fixed on main. Recheck a
+class on a fresh conversion before working on it.
+- A one-character list item ('R', biore s81; rxjs s14's 'A' and 'd') had a black bullet in a
+  teal list: its run's style is one request over the whole paragraph, which restyles the bullet,
+  and a request cannot be cut inside one character. `tools/probe_short_bullet.py` (live): a
+  request taking the newline too, or split by fields, restyles it as well; a WORD_JOINER after the
+  letter lets the run be styled in two parts and keeps the bullet's colour
+  (`emit_text.kept_bullet`; every reader already drops the joiner).
+- A one-line list item whose line, bullet included, happened to be centred on the page was read
+  as centred (`single_line_align`): its siblings at its x stood more than 4 em off, past
+  sub-items, and the box was written CENTER with its bullet against its words (linear-attention
+  s59). A bulleted line now finds bulleted siblings at its x anywhere on the page; it joins its
+  list's box. Corpus: that one slide changed.
+- Tables (track C): `TableRows.runs_on_below` - a lone phrase under a blank first cell, one
+  `\baselineskip` below, continues the cell above only when its first word would not have fitted
+  there and it runs on (the line above ends on a hyphen or is full to a justified edge, or the
+  line starts lower case). A tabular's rows stand `\baselineskip` apart as a p{} cell's lines do,
+  so pnuc s6's `ll` list of designs had become one cell, "Traditional no use No use episodes".
+  Rule-less plain tables need each row's cells on one baseline (`one_baseline`,
+  `ROW_BASELINE_SLACK` 0.5 pt): dstalk s17's two centred contact columns, 2.2 pt apart line for
+  line, were a plain table. Corpus: those two pages. Left: defense s35's right-hand table of
+  justified p{} cells stretched over an em reads as more columns.
+- Word spaces (track A). (1) PDFium gives a ligature one char whose advance is its loose box;
+  in an italic face that reaches the ink of its overhanging last letter (LinBiolinum Italic ft
+  0.769 em against f + t 0.62; LMSans-Oblique ff +0.16; fi/ffi +0.06), so the space after
+  \emph{left} measured 0.141 em, under JOIN_GAP: 'leftaction' (monodromy s15).
+  `extract._ligature_overhang` gives such a ligature its letters' summed widths
+  (LIGATURE_OVERHANG 0.02 em); over the corpus every letter after one inside its word stands
+  -0.04..0 em from that sum. (2) A journal figure caption (pnuc s17, DejaVu Sans 4.2 pt) is
+  tracked tight: glyphs 0.056 em into each other, word gaps 0.10-0.17 em ('Hazardratios
+  (HRs)forrespiratory'). `extract.tight_tracking` reads a line whose text-font gap median is at
+  most TIGHT (-0.03 em, over 8+ gaps) as tracked, and a space there is at tracking + TIGHT_JOIN
+  (0.13 em), a stretch of 4+ gaps using its own tracking. Every other stretch of 8+ gaps in the
+  corpus and built decks has its median within 0.01 em of 0; the scan changed those two elements
+  only. zds's minted comments and rxjs's '=>' were already right (code columns, 10-03).
+- Footline not repeated whole (track B). `classify.furniture` knows a footline only when it repeats
+  whole on half the frames; on a page read alone africa's 5 pt footline still joined the 8 pt list
+  above (`joins_box` allows 2.6 em of the larger size; it was 2.1 em under), and where the
+  author's overfull block ran over it, the two rows' words interleaved within the 0.5 em row test
+  ('ИнститутавтоматизированногоГеографии'). Rows of words of different sizes printed over each other
+  (`overprinted_rows`: one size per row, size ratio <= 0.9, baselines within half the larger em, a
+  2+-letter non-math word covering another, `prints_over`) never join in `build_lines`; a
+  paragraph <= 0.85 the size of a box's last one, in the bottom `FURNITURE_BAND` (now in
+  classify_paragraphs), joins no box when more than 1.5 em under it or printed over other words
+  (`printed_over`). With furniture on it also freed the frame number an overfull line covered (5
+  africa slides: 'закономерности7', a 'С' and a 'р.' lost into a picture). Corpus: 5 slides, all
+  africa; no built deck changed. Left (page alone only): same-size captions on or near the footline.

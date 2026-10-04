@@ -364,7 +364,7 @@ class TablesMixin(PageState):
 
             def ok(r: tuple[list[Line], list[list[Span]]]) -> bool:
                 return len(r[1]) == k >= 2 and all(len("".join(s.text for s in c).strip()) <= 30 for c in r[1]) \
-                    and abs(r[0][0].size - size) <= 0.5
+                    and abs(r[0][0].size - size) <= 0.5 and one_baseline(r[1])
             while j + 1 < len(split) and ok(split[i]) and ok(split[j + 1]) and \
                     split[j + 1][0][0].baseline - split[j][0][0].baseline <= 2.0 * size:
                 j += 1
@@ -412,6 +412,22 @@ class TablesMixin(PageState):
                 "merges": [], "rules": [], "borders": [], "spans": [s.id for s in spans],
             })
         return tables
+
+
+ROW_BASELINE_SLACK = 0.5
+"""How far apart (pt) the cells of a rule-less table's row may stand: TeX sets a tabular row's
+cells on one baseline."""
+
+
+def one_baseline(cells: list[list[Span]]) -> bool:
+    """The cells of a row stand on one baseline (each cell's by its largest words, not its
+    scripts), as a tabular sets them. Side-by-side columns (beamer's columns, two minipages)
+    are centred on their own and their lines rarely line up: real_dstalk-datascience-ta slide
+    17's two centred contact columns, 2.2 pt apart line for line, were a plain table whose
+    columns emit re-fitted off their centres, while each column's name above stayed a text box
+    of its own."""
+    bases = [statistics.fmean(s.baseline for s in c if s.size >= 0.9 * max(x.size for x in c)) for c in cells]
+    return max(bases) - min(bases) <= ROW_BASELINE_SLACK
 
 
 LISTING_NUMBER = re.compile(r"\d{1,3}:")
@@ -517,6 +533,31 @@ class TableRows:
         """Where the longest line starting at x0 ends: a justified cell's full lines."""
         return max((p[-1].rect.x1 for row in self.rows for p in [self.phrase(row, x0)] if p), default=x0)
 
+    def runs_on_below(self, first: list[Span], line: list[Span]) -> bool:
+        """line, alone in its row under first, is first's cell wrapping (a p{} cell's next line)
+        and not a row of its own whose other cells are blank: an `l` column listing several
+        entries beside one label (real_pnuc-intro-pnuc slide 6: "Traditional no use" and "No use
+        episodes" under "No-use" were joined into one cell, which Slides then wrapped by itself).
+        The pitch says nothing (a tabular's rows stand \\baselineskip apart, as a p{} cell's lines
+        do), so the words must. line's first word must not fit on first's line within the column
+        (the widest line starting where first does: a p{} column is no narrower), and line must
+        run on: first ends on a hyphen, or line starts in lower case, or first is full - it ends
+        where another line of the column ends, a justified cell's edge. A wrap this cannot tell
+        stays a row per line, which looks as the PDF does."""
+        x0, end = first[0].rect.x0, first[-1].rect.x1
+        if self.words(first).endswith("-"):
+            return True
+        head = line[0]
+        word = (head.text.split() or [""])[0]
+        width = head.rect.w * len(word) / max(len(head.text), 1)
+        right = self.right_end(x0)
+        if end + width + 0.5 * self.size < right:
+            return False  # its first word would have fit on the line above
+        if self.words(line)[:1].islower():
+            return True
+        ends = [p[-1].rect.x1 for row in self.rows for p in [self.phrase(row, x0)] if p]
+        return end >= right - 0.5 and sum(abs(e - end) <= 0.5 for e in ends) >= 2
+
     def find_wrapped(self) -> None:
         """A cell set in a paragraph column (p{3cm}) wraps: its next lines are rows of their own
         holding nothing but words in that column, starting where the cell starts, and its lines
@@ -550,7 +591,7 @@ class TableRows:
                     continue
             else:
                 firsts = [phrase(rows[i], parts[0][0].rect.x0)]
-                if not firsts[0]:
+                if not firsts[0] or not self.runs_on_below(firsts[0], parts[0]):
                     continue
             cells: list[list[float]] = []
             for p, first in zip(parts, firsts):

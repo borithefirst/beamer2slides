@@ -172,6 +172,18 @@ TRACK_LETTERS = 4     # tracked gaps between letters a stretch needs at least
 # and no line breaks inside its words - and a word gap of a no-break space and a space (the PDF's
 # is the tracking plus a space). Tighter tracking (microtype's small caps, 0.11 em) stays joined.
 TRACK_SPACED = 0.14
+# Tight tracking: text set with negative letterspacing moves its word gaps down by as much. A
+# journal article's figure caption placed as a picture (real_pnuc s17, DejaVu Sans at 4.2 pt) has
+# every glyph 0.056 em into the one before and word gaps of 0.10 - 0.17 em, under JOIN_GAP: the
+# words ran together ('Hazardratios (HRs)forrespiratory'). On such a line a gap is read against
+# its stretch's tracking (`tight_tracking`): its letters stood up to 0.11 em past it (an en dash
+# before a letter), its word spaces 0.15 em and more. Over the corpus and the built decks every
+# other stretch of TIGHT_GAPS glyph gaps or more has its median within 0.01 em of touching
+# (kerns are pairs, not lines).
+TIGHT = -0.03       # em: a line whose median glyph gap is this far below touching is tracked tight
+TIGHT_GAPS = 8      # gaps in text fonts a line needs for its median to say so
+TIGHT_OWN = 4       # gaps a stretch of one font on such a line needs to say its own tracking
+TIGHT_JOIN = 0.13   # em past the tracking: a word space on a tight line
 LETTER_SPACE = " "
 
 
@@ -254,6 +266,40 @@ def narrow_spaces(chars: list[Char]) -> set[int]:
         if all(g2 is None or g2 < TOUCHING for g2 in (before, after)) \
                 and loose[segment[k]] <= max(2, 0.1 * total[segment[k]]):
             out.add(k)
+    return out
+
+
+def tight_tracking(chars: list[Char]) -> dict[int, float]:
+    """Character index -> the tracking (em, below TIGHT) of the tight line it stands on, for the
+    gap before it (TIGHT_JOIN). A line - the stretches of text fonts at one baseline, each one
+    font on one line (`_gaps`) - is tight when the median of its TIGHT_GAPS or more glyph gaps is
+    TIGHT or less; a stretch of TIGHT_OWN gaps or more says its own tracking (a bold label's
+    differs), a shorter one takes its line's. Math and monospaced glyphs are left alone."""
+    gaps = _gaps(chars)
+    stretches: list[list[int]] = []  # indices of glyphs whose gap before them is known
+    for k, g in enumerate(gaps):
+        if g is None:
+            stretches.append([])
+        elif stretches:
+            stretches[-1].append(k)
+    lines: dict[tuple[tuple[float, float], float], list[list[int]]] = {}
+    for stretch in stretches:
+        if not stretch or font_info(chars[stretch[0]].font).family not in ("sans", "serif"):
+            continue
+        ch = chars[stretch[0]]
+        ux, uy = ch.dir
+        across = round((ch.origin[1] * ux - ch.origin[0] * uy) / max(ch.size, 0.01) * 10)  # tenths of an em
+        lines.setdefault((ch.dir, across), []).append(stretch)
+    out: dict[int, float] = {}
+    for found in lines.values():
+        line = sorted(g for s in found for k in s if (g := gaps[k]) is not None)
+        if len(line) < TIGHT_GAPS or line[len(line) // 2] > TIGHT:
+            continue
+        for stretch in found:
+            own = sorted(g for k in stretch if (g := gaps[k]) is not None)
+            track = own[len(own) // 2] if len(own) >= TIGHT_OWN else line[len(line) // 2]
+            if track <= TIGHT:
+                out.update((k, track) for k in stretch)
     return out
 
 
@@ -575,6 +621,38 @@ def _accent_overhang(page: Page, chars: list[Char]) -> list[Char]:
     for k, width in zip(todo, page.glyph_widths([(chars[k].font_id, chars[k].c, chars[k].size) for k in todo])):
         ch = chars[k]
         if width and 0.5 * ch.advance < width < ch.advance - 0.02 * ch.size:
+            out[k] = dataclasses.replace(ch, advance=width, exact_advance=False, box=char_box(
+                ch.origin[0], ch.origin[1], ch.dir[0], ch.dir[1], width, ch.size, ch.ascent, ch.descent))
+    return out
+
+
+# A ligature's advance is PDFium's loose box (`pdf.Char`: one glyph for several characters), which
+# in an italic face reaches to the ink of its overhanging last letter: 0.06 - 0.07 em past the
+# glyph's advance for fi and ffi, 0.15 - 0.16 for LMSans-Oblique's ff and LinBiolinum Italic's ft
+# (the next letter of its word stood that far into it). The word space after \emph{left} then
+# measured 0.14 em, under JOIN_GAP ('leftaction', real_beamer-monodromy s15). The sum of its
+# letters' widths is the advance within 0.04 em (over the corpus and the built decks every
+# letter after an italic ligature in its word stood -0.04 to 0 em from that sum: no space).
+LIGATURE_OVERHANG = 0.02  # em: a loose box this much past its letters' widths reaches the ink
+
+
+def _ligature_overhang(page: Page, chars: list[Char]) -> list[Char]:
+    """An italic ligature whose loose box reaches LIGATURE_OVERHANG or more past the widths of
+    its letters is as wide as they are (`_accent_overhang` for an accent's overhang)."""
+    todo = [(k, letters) for k, ch in enumerate(chars) if not ch.synthetic and ch.exact_advance and ch.dir[0] > 0.999
+            and len(letters := unicodedata.normalize("NFKC", ch.c)) >= 2 and letters.isalpha()
+            and font_info(ch.font).italic]
+    if not todo:
+        return chars
+    widths = page.glyph_widths([(chars[k].font_id, c, chars[k].size) for k, letters in todo for c in letters])
+    out = list(chars)
+    at = 0
+    for k, letters in todo:
+        mine, at = widths[at:at + len(letters)], at + len(letters)
+        ch = chars[k]
+        known = [w for w in mine if w]
+        width = sum(known)
+        if len(known) == len(letters) and 0.5 * ch.advance < width <= ch.advance - LIGATURE_OVERHANG * ch.size:
             out[k] = dataclasses.replace(ch, advance=width, exact_advance=False, box=char_box(
                 ch.origin[0], ch.origin[1], ch.dir[0], ch.dir[1], width, ch.size, ch.ascent, ch.descent))
     return out
@@ -955,9 +1033,9 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
     shown = [ch for ch in chars
              if not (ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1)
              and visibility.hidden(ch) == hidden]
-    shown = _italic_corrections(_accent_overhang(page, shown))
+    shown = _italic_corrections(_ligature_overhang(page, _accent_overhang(page, shown)))
     tracks: dict[int, float] = {}
-    tracked, narrow = tracked_gaps(shown, tracks), narrow_spaces(shown)
+    tracked, narrow, tight = tracked_gaps(shown, tracks), narrow_spaces(shown), tight_tracking(shown)
     grid = column_grid(shown)
 
     def letter_space(at: Char, width: float) -> Char:
@@ -1034,9 +1112,11 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
             offset = abs((ch.origin[0] - px) * uy - (ch.origin[1] - py) * ux) / size
             style = (ch.font, round(ch.size, 3), ch.color, ch.alpha) != (prev.font, round(prev.size, 3), prev.color, prev.alpha)
             new_line = ch.dir != prev.dir or offset > NEW_BASELINE or gap > NEW_LINE_GAP or gap < BACK_GAP
+            # (on a tight line a word space is read against the tracking: TIGHT_JOIN)
+            join = tight[k] + TIGHT_JOIN if k in tight else JOIN_GAP
             if new_line or gap >= WORD_GAP:
                 flush()
-            elif gap >= JOIN_GAP and offset < SAME_BASELINE and prev.c != " " and ch.c != " " \
+            elif gap >= join and offset < SAME_BASELINE and prev.c != " " and ch.c != " " \
                     and not (_mono(prev.font) and _mono(ch.font) and gap * size < MONO_JOIN_GAP * prev.advance):
                 if style:
                     flush()

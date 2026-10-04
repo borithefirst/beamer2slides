@@ -117,8 +117,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   Text the PDF hides (off the page, outside its clip, under a later opaque fill or image, alpha 0:
   5 of 9 samples) is dropped at extract (`extract.Visibility`, `PageObject.clip`, raw `hidden_text`).
   Side-by-side text is split only with evidence (`gutter`: `GUTTER_PROSE_EM` plus an edge aligned
-  on another line; `column_edge`); a lone line starting where its neighbours start is left-aligned
-  (`single_line_align`), a lone line flush with a right-aligned paragraph beside it right-aligned;
+  on another line; `column_edge`); rows of words of different sizes printed over each other are
+  separate lines (`overprinted_rows`), and smaller words at the page foot well under or printed
+  over a box join no box (`joins_box`, `printed_over`); a lone line starting where its neighbours
+  (a bulleted one's: its siblings anywhere) start is left-aligned (`single_line_align`), a lone line flush with a right-aligned paragraph beside it right-aligned;
   lines broken by hand never join (`hand_broken`); classify records where wrapped lines start
   (`line_starts`: the whole first span, a space only where the page leaves one, a line opening on
   a hole at that hole) so emit measures a paragraph without TeX widths; CJK breaks anywhere and joins with no space (`classify.cjk`). Font names
@@ -129,7 +131,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   deck_ir reads it (and wave 4's 800) back as a small cut, not bold; CM math
   letters stay serif among sans words, `serif_math_letters`);
   extract finds narrow spaces, letterspacing (`tracked_gaps`; tracked by `TRACK_SPACED` 0.14 em or
-  more, a no-break space between letters) and accent overhang; a Type 3 font of only codes above
+  more, a no-break space between letters), accent and italic-ligature overhang (`_ligature_overhang`)
+  and tight tracking (`tight_tracking`: spaces against the tracking); a Type 3 font of only codes above
   0x7F tries TS1/T2A before T1; U+2010/U+2011 are read as `-` (`extract.HYPHENS`, faces lack them);
   Slides breaks after a hyphen, so line sizing takes the next word only to it (`hyphen_cut`,
   `emit.first_break`), and before an opening bracket after a Greek letter, π / [γ]
@@ -188,7 +191,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
   and the table does not grow over its caption; classify cuts a spanning chunk at word gaps when it
   lines up with the other rows. Rules wider than half the page with rows of cells between them are
-  a table's, not theme decoration (`table_hairlines`). A wrapped `p{}` cell is one cell of several
+  a table's, not theme decoration (`table_hairlines`). A plain table's row stands on one baseline
+  (`one_baseline`); a lone line under a blank first cell continues the cell only when it runs on
+  (`TableRows.runs_on_below`). A wrapped `p{}` cell is one cell of several
   lines (`row_lines`, `wrapped`), its column wide enough for each PDF line (`emit.wrapped_width`).
   A table wider than the page shrinks to fit, never below 0.75x (`emit.TABLE_MARGIN`). Cells shaded
   edge to edge are a table (`fill_grid`), and a node a rule splits is no diagram node
@@ -628,7 +633,8 @@ markers.
   `tools/probe_list_spacing.py`): emit puts each list gap there, not in lineSpacing.
 - **Bullet styling is creation order**: style the paragraph like the bullet, create the bullets,
   then style the text in two or more requests (one request over a whole paragraph restyles its
-  bullet), or bullets come out 18 pt default.
+  bullet), or bullets come out 18 pt default. A one-character item gets a WORD_JOINER so it can
+  be (`emit_text.kept_bullet`, `tools/probe_short_bullet.py`).
 - **An item added with Enter gets a bullet in its text's colour**: splitting a bulleted paragraph
   keeps the bullet's font and size and drops its colour (rgb or theme, API-made or .pptx-imported),
   and a list's `nestingLevel.bulletStyle` stays Arial 14 black whatever is written. No converter-side

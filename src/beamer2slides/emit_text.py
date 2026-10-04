@@ -24,7 +24,7 @@ from .emit_model import (
     json_number, number_box, number_box_of, run_of, set_text, text_of,
 )
 from .emit_widths import (
-    LINE_SEPARATOR, SCRIPT_SIZE, SMALL_CAPS_SIZE, guessed_chars, held_starts, joined_runs, paragraph_dict, runs_between,
+    LINE_SEPARATOR, SCRIPT_SIZE, SMALL_CAPS_SIZE, WORD_JOINER, guessed_chars, held_starts, joined_runs, paragraph_dict, runs_between,
     set_runs_of, slides_lines_of, slides_width_of,
 )
 from .fonts import cjk_font, font_info, google_font
@@ -326,7 +326,18 @@ def held_paragraph(p: SetParagraph, scale: float, fonts: FontMapper) -> SetParag
     classify recorded moved to that text (`held_starts`)."""
     ir = in_sentence_of(p.runs)
     held = joined_runs(hole_runs_of(ir, scale, fonts))
-    return replace(p, runs=tuple(held), line_starts=held_starts(ir, held, p.line_starts))
+    return replace(p, runs=kept_bullet(held, p.bullet is not None), line_starts=held_starts(ir, held, p.line_starts))
+
+
+def kept_bullet(runs: Sequence[SetRun], bulleted: bool) -> tuple[SetRun, ...]:
+    """The runs of a list item of one character ('R', real_presentation-biore s81) with a
+    WORD_JOINER after it: its run's style is written in two parts like any other's, as one request
+    over a whole paragraph restyles its bullet too (black on a teal list), and a style request
+    cannot be cut inside one character (tools/probe_short_bullet.py). Readers drop the joiner."""
+    if not bulleted or len("".join(r.text for r in runs)) != 1:
+        return tuple(runs)
+    last = max(i for i, r in enumerate(runs) if r.text)
+    return tuple(replace(r, text=r.text + WORD_JOINER) if i == last else r for i, r in enumerate(runs))
 
 
 LineSizes = Sequence[Sequence[float] | float]

@@ -26,6 +26,7 @@ from . import ir
 from .classify_model import HOLE_PAD, Line, Rect, Span, new_line, new_paragraph, union_all
 from .classify_model import Paragraph, box_outline, new_span, upright_ellipse  # noqa: F401 (callers take these from here)
 from .classify_graphics import without_page_frame
+from .classify_paragraphs import FURNITURE_BAND
 from .classify_reasons import ReasonsMixin
 from .classify_text import body_size, math_text
 from .classify_text import (  # noqa: F401 (callers take these from here)
@@ -399,7 +400,6 @@ def mark_big_headings(slides: list[ir.Slide], body: float) -> None:
             texts[i]["role"] = "title"
 
 
-FURNITURE_BAND = 0.13  # of the page's height: the header or footer band furniture is drawn in
 FurnitureKey = tuple[str, int, float]
 """A run of band words (`furniture`): its words, its top (rounded) and its size."""
 

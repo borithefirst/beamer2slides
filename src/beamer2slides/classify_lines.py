@@ -67,6 +67,19 @@ def leader_pitch(line: Line) -> float | None:
     return round(pitch, 4) if pitch > 0 else None
 
 
+def overprint_word(s: Span) -> bool:
+    """A word that tells a row printed over another (`prints_over`): two letters or more, not math."""
+    return s.horizontal and sum(c.isalnum() for c in s.text) >= 2 and s.info.family not in ("math", "icon")
+
+
+def prints_over(a: Span, b: Span) -> bool:
+    """Whether two words cover each other: across a quarter of the narrower and a point, and in
+    height. Words of one line of one size do only as a word drawn twice (a poor man's bold); an
+    accent, a ligature's piece or a script is no word."""
+    over = min(a.rect.x1, b.rect.x1) - max(a.rect.x0, b.rect.x0)
+    return over > max(1.0, 0.25 * min(a.rect.w, b.rect.w)) and min(a.rect.y1, b.rect.y1) > max(a.rect.y0, b.rect.y0)
+
+
 class LinesMixin(GraphicsMixin):
     """PageClassifier's lines (after its graphics: words on different panels or artwork are
     different lines)."""
@@ -122,6 +135,43 @@ class LinesMixin(GraphicsMixin):
         return [replace(span, text=bullet, rect=Rect(r.x0, r.y0, cut, r.y1), visual=None if span.visual is None else bullet),
                 replace(span, text=leader, rect=Rect(cut, r.y0, r.x1, r.y1), visual=None if span.visual is None else leader)]
 
+    @staticmethod
+    def overprinted_rows(spans: list[Span]) -> list[int | None]:
+        """Per span, the row of words it is one of where two rows of different sizes are printed
+        over each other (a word of one across a word of the other), else None. An overfull block
+        running down over a custom footline (real_africa-remote-sens-30, read a page at a time,
+        where `classify.furniture` cannot tell the footline): its 6 pt words and the 5 pt
+        footline's stood a point apart and were read as one line, 'Институтавтоматизированного
+        Географии', and the paragraph it ended grew as wide as both. A row is spans of one size
+        (0.05 pt) on one baseline (0.3 pt); two rows overprint when one is no more than 0.9 the
+        other's size, their baselines are within half the larger em, and a word of one
+        (`overprint_word`) covers a word of the other (`prints_over`). Scripts stacked over each
+        other are of one size; \\overset's label stands a whole line higher."""
+        rows: list[list[int]] = []
+        for i in sorted((i for i, s in enumerate(spans) if s.horizontal and s.text.strip()),
+                        key=lambda i: (round(spans[i].size, 1), spans[i].baseline)):
+            s = spans[i]
+            if rows and abs(spans[rows[-1][-1]].size - s.size) <= 0.05 and s.baseline - spans[rows[-1][-1]].baseline <= 0.3:
+                rows[-1].append(i)
+            else:
+                rows.append([i])
+
+        def words(row: list[int]) -> list[Span]:
+            return [spans[i] for i in row if overprint_word(spans[i])]
+        out: list[int | None] = [None] * len(spans)
+        for m, r1 in enumerate(rows):
+            for k in range(m + 1, len(rows)):
+                r2 = rows[k]
+                small, large = (r1, r2) if spans[r1[0]].size < spans[r2[0]].size else (r2, r1)
+                a, b = spans[small[0]], spans[large[0]]
+                if a.size > 0.9 * b.size or abs(a.baseline - b.baseline) > 0.5 * b.size:
+                    continue
+                if any(prints_over(x, y) for x in words(small) for y in words(large)):
+                    for n, row in ((m, r1), (k, r2)):
+                        for i in row:
+                            out[i] = n
+        return out
+
     def build_lines(self, spans: list[Span]) -> list[Line]:
         n = len(spans)
         parent = list(range(n))
@@ -148,6 +198,9 @@ class LinesMixin(GraphicsMixin):
         # And the deck's furniture (a footline's words) is no line of the page's words: an overfull
         # block running down over the footline set its words between the footline's.
         furniture = [s.id in self.furniture for s in spans]
+        # Nor is a row of words of another size printed over a row's (overprinted_rows): the same
+        # overfull block over a footline the deck does not repeat whole.
+        row = self.overprinted_rows(spans)
 
         def one_grid(a: Span, b: Span) -> bool:
             """Spans on one listing's column grid (extract.column_grid): one pitch, whole columns apart."""
@@ -160,7 +213,7 @@ class LinesMixin(GraphicsMixin):
             pi = panel[i]
             for j in range(i + 1, n):
                 b = spans[j]
-                if furniture[i] != furniture[j]:
+                if furniture[i] != furniture[j] or row[i] is not None and row[j] is not None and row[i] != row[j]:
                     continue
                 big = max(a.size, b.size)
                 if big > 2.5 * min(a.size, b.size):

@@ -16,13 +16,14 @@ from .classify_text import (
     reading_order, script_in_script, script_of, script_size, stretched, thick_spaces, thin_span, with_accent,
     with_text,
 )
-from .classify_lines import LinesMixin, ends_in_leader, leader_line, leader_pitch
+from .classify_lines import LinesMixin, ends_in_leader, leader_line, leader_pitch, overprint_word, prints_over
 from .fonts import serif_math_letters
 from .ir import Align, BeforeWord, Run, TextElement
 from .ir import Paragraph as ParagraphJson
 
 
 EM_SPACE = chr(0x2003)
+FURNITURE_BAND = 0.13  # of the page's height: the header or footer band furniture is drawn in
 TRAILING_PUNCT = re.compile(r"(?<=\w)[,.;:!?)\]]+\s*$")
 BOX_PAD = " "   # a padded \colorbox's \fboxsep, highlighted (a no-break space: the box never breaks)
 
@@ -293,9 +294,12 @@ class ParagraphsMixin(LinesMixin):
             # centred label: a Verbatim's in its frame.)
             return "left"
         # (a neighbour as long, or centred itself, says nothing: stacked centred lines of a
-        # title page, equation numbers; nor does a formula's limit under it)
+        # title page, equation numbers; nor does a formula's limit under it. An item's siblings
+        # may stand further off, past sub-items: real_linear-attention-a s59's one-line item was
+        # centred with its bullet, which then touched its words)
         near = [l for p in neighbours if p.first is not line and abs(p.size - line.size) <= 1 for l in p.lines
-                if abs(l.baseline - line.baseline) <= 4 * line.size and abs(l.x0 - line.x0) <= 1
+                if (abs(l.baseline - line.baseline) <= 4 * line.size or line.bullet is not None and l.bullet is not None)
+                and abs(l.x0 - line.x0) <= 1
                 and abs(l.x1 - line.x1) > 1 and abs(l.rect.cx - self.W / 2) > 2]
         if near:
             return "left"
@@ -409,6 +413,16 @@ class ParagraphsMixin(LinesMixin):
             return not any(b.rect.intersects(between) for b in blockers)
         if not 0 < gap <= 2.6 * max(par.size, last.size):
             return False
+        if par.size <= 0.85 * last.size and par.rect.y0 >= (1 - FURNITURE_BAND) * self.H \
+                and (gap > 1.5 * last.size or self.printed_over(par)):
+            # Smaller words at the foot of the page, set well apart under the box's last line or
+            # printed over other words: a footline's (or a footnote's), no paragraph of the
+            # column above. The 2.6 em of the list's own size let a custom footline join it
+            # (real_africa-remote-sens-30 read a page at a time, with no deck furniture: 5 pt
+            # words 2.1 em under 8 pt items), and the box rode down with the list's reflow, its
+            # last paragraph cut by the page's edge; where the author's overfull list ran down
+            # over the footline, it was a paragraph between two of the list's.
+            return False
         def grid_code(p: Paragraph) -> bool:
             """(a listing on a column grid in a proportional face, as Bera Sans's 1.45 em lines)"""
             return any(s.grid is not None for s in p.spans) and any(s.grid is not None for s in last.spans)
@@ -437,6 +451,12 @@ class ParagraphsMixin(LinesMixin):
                 return False
         between = Rect(box_rect.x0, last.last.baseline + 0.1, box_rect.x1, par.first.baseline - par.size)
         return not any(b.rect.intersects(between) for b in blockers)
+
+    def printed_over(self, par: Paragraph) -> bool:
+        """Whether a word of the paragraph covers a word of a line not its own (`prints_over`)."""
+        mine = [s for s in par.spans if overprint_word(s)]
+        return any(prints_over(a, b) for line in self.all_lines if all(line is not l for l in par.lines)
+                   for b in line.spans if overprint_word(b) for a in mine)
 
     def build_boxes(self, paragraphs: list[Paragraph]) -> list[list[Paragraph]]:
         native = [p for p in paragraphs if p.reason is None]
