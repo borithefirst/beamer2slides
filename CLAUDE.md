@@ -394,7 +394,8 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
 
 ## Sync, pull, labels, adopt (docs/sync.md, docs/labels.md; history in docs/project-notes.md "Usage")
 - **Sync** merges a new PDF into an edited deck, three ways: base = what convert wrote
-  (`<out>/sync/base.json`, Drive-first via `appProperties.b2sBase`, the folder copy a cache).
+  (`<out>/sync/base.json`, Drive-first via `appProperties.b2sBase`, stored gzip and read in either form,
+  `snapshot.stored_base`/`read_stored_base`; the folder copy a cache).
   Modules: `identity.py` (slide/element keys), `snapshot.py` (read-back, base), `merge.py` (pure
   planning), `sync.py` (writes with `requiredRevisionId`, re-plans on a mismatch; pictures via a
   staging deck deleted after use). Objects carry `b2s:<slide>/<element>` alt-text titles (never
@@ -607,8 +608,9 @@ markers.
   spot: retire it.**
 
 ## Tests
-- **Offline suite: `python -m pytest -q -n 12 --dist loadgroup`** (~2.5 min, ~2,800 tests, no
-  Google). `tests/conftest.py` explains the split. Re-run a named failure alone before believing it
+- **Offline suite: `python -m pytest -q -n 12 --dist loadgroup`** (~75 s on an idle
+  machine, ~4,500 tests, no Google; unset `PYTHONDONTWRITEBYTECODE` first). `tests/conftest.py`
+  explains the split. Re-run a named failure alone before believing it
   while something else loads the CPU.
 - Offline highlights: `test_emit_requests.py` replays what emit would send (`emit.plan_offline`);
   `test_invariants.py` (`checks.py`: stray_ink, stray_labels, lost_ink, structure, junk_text over all

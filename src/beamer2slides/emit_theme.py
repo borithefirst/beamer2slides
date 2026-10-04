@@ -333,7 +333,14 @@ def write_layout_texts(slides: SlidesService, pid: str, texts: Sequence[JsonMap]
     it is edited once for the whole deck. Previous runs' layout texts are replaced."""
     pres = as_json(execute(slides.presentations().get(
         presentationId=pid, fields="layouts(objectId,layoutProperties,pageElements(objectId))")), "the layouts")
-    layouts = as_objects(pres.get("layouts", []), "layouts")  # all of them: slides added later in Slides get the footer too
+    write_layout_texts_on(slides, pid, pres, texts, scale, fonts)
+
+
+def write_layout_texts_on(slides: SlidesService, pid: str, pages: JsonMap, texts: Sequence[JsonMap], scale: float,
+                          fonts: FontMapper) -> None:
+    """`write_layout_texts` with the layouts already read: `pages` is a `presentations.get` answer
+    holding them (at least `layouts(objectId,pageElements(objectId))`)."""
+    layouts = as_objects(pages.get("layouts", []), "layouts")  # all of them: slides added later in Slides get the footer too
     # All old ones first: object IDs are unique across the whole presentation.
     reqs: list[SlidesRequest] = []
     for layout in layouts:
@@ -550,13 +557,21 @@ def style_layout_placeholders(slides: SlidesService, pid: str, deck: JsonMap, sc
     """Title and body placeholders of every layout take the deck's own look (font, size,
     colour, title position), so slides added later in Slides match the converted ones.
     `ground(bbox)`: the master background's colour under a PDF box, to keep text readable there."""
-    spec = layout_style_spec_of(deck, scale, fonts, dy, ground)
     page_fields = "objectId,pageElements(objectId,size,transform,shape(placeholder/type,text/textElements))"
     pres = as_json(execute(slides.presentations().get(presentationId=pid, fields=f"masters({page_fields}),layouts({page_fields})")),
                    "the masters and layouts")
+    style_layout_placeholders_on(slides, pid, pres, deck, scale, fonts, dy, ground)
+
+
+def style_layout_placeholders_on(slides: SlidesService, pid: str, pages: JsonMap, deck: JsonMap, scale: float,
+                                 fonts: FontMapper, dy: float, ground: Ground) -> None:
+    """`style_layout_placeholders` with the master and layout pages already read: `pages` is a
+    `presentations.get` answer holding them (at least their placeholders' objectId, size,
+    transform, placeholder type and text elements). Nothing but placeholders is read off them."""
+    spec = layout_style_spec_of(deck, scale, fonts, dy, ground)
     reqs: list[SlidesRequest] = []
     # The master too: layout placeholders inherit whatever style they don't set themselves.
-    for page in as_objects(pres.get("masters", []), "masters") + as_objects(pres.get("layouts", []), "layouts"):
+    for page in as_objects(pages.get("masters", []), "masters") + as_objects(pages.get("layouts", []), "layouts"):
         for pe in as_objects(page.get("pageElements", []), "pageElements"):
             kind = _placeholder_kind(pe)
             entry = None if kind is None else spec.get(kind)
@@ -570,7 +585,7 @@ def style_layout_placeholders(slides: SlidesService, pid: str, deck: JsonMap, sc
 
 
 def write_layouts(client: Callable[[], SlidesService], pid: str, deck: JsonMap, scale: float, fonts: FontMapper,
-                  ground: Ground) -> None:
+                  ground: Ground, imported: JsonMap) -> None:
     """The whole of the layout and master work, as one job: what a deck's own look gives a slide
     somebody adds later in Slides. It reads and writes layout and master pages only, which is
     what lets it run on a thread of its own (`client()` gives that thread its own Slides client,
@@ -586,10 +601,20 @@ def write_layouts(client: Callable[[], SlidesService], pid: str, deck: JsonMap, 
     the texts beside the placeholders rather than after them: 5.24 s against 3.96 s (18.6 s of
     conversion against 16.4 s). `tools/probe_batch_parallelism.py`'s finding - that several
     `batchUpdate`s may be in flight on one presentation and nothing is lost - is about slide
-    content and does not carry here. Nor is there anything to win by reading less: merging the
-    two passes' reads into one saves a round trip inside the pass and nothing at all outside it
-    (17.17 s against 16.93 s over four interleaved pairs, which the arms split two each), because
-    what is left of the pass hides behind phase 1, the placeholder read and `measure_places`."""
+    content and does not carry here.
+
+    It makes no read of its own: `imported` is the import's own `presentations.get`
+    (`import_presentation`, every field), and what the pass reads of it - the layouts' ids and
+    element ids, and the master and layout placeholders' ids, sizes, transforms, types and text -
+    is what its two reads of their own used to bring back, because nothing between the two
+    touches a master or a layout: phase 1 duplicates slides and deletes slides (each copy on its
+    source's layout, so no layout ever loses its last slide), and the texts' batch only creates
+    and deletes `LAYOUT_TEXT_PREFIX` text boxes, which are no placeholders and are skipped by the
+    placeholder pass (`tests/test_emit_timeline.py` holds the requests equal to the two-read
+    pass's). Merging the two reads was once measured as worth nothing (17.17 s against 16.93 s,
+    four pairs split two each), when the pass hid behind phase 1, the placeholder read and
+    `measure_places`; on the 48-slide `ambiguous.pdf` it no longer did - its two reads (0.60 s
+    and 0.78 s) put the pass 1.15 s past `measure_places`, on the critical path to the content."""
     slides = client()
-    write_layout_texts(slides, pid, objects_of(deck.get("layout_texts", []), "layout_texts"), scale, fonts)
-    style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY, ground)
+    write_layout_texts_on(slides, pid, imported, objects_of(deck.get("layout_texts", []), "layout_texts"), scale, fonts)
+    style_layout_placeholders_on(slides, pid, imported, deck, scale, fonts, PPTX_TITLE_DY, ground)

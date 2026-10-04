@@ -8,6 +8,7 @@ without saying so. No Google calls: the Drive client is faked.
 
 from __future__ import annotations
 
+import gzip
 import json
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -19,7 +20,7 @@ from googleapiclient.errors import HttpError
 from beamer2slides import snapshot
 from beamer2slides.google_types import (AffineTransform, BatchUpdateResponse, DriveFile, Files, Page, PageElement,
                                         Presentation, Request, Size, SlidesRequest, all_elements, as_json, object_id)
-from beamer2slides.json_types import JsonObject
+from beamer2slides.json_types import Json, JsonObject
 from beamer2slides.typing_compat import override
 
 from .fake_google import Answer, Fetcher, Later, NoDrive, NoFiles, NoPresentations, NoSlides
@@ -239,8 +240,77 @@ def test_saving_updates_the_file_the_deck_points_at(tmp_path: Path) -> None:
     drive = drive_with_base(base(PID, 1), PID)
     fid = snapshot.save_drive(drive, base(PID, 2), None, None)
     assert (fid, drive.created) == ("base-0", [])
-    assert json.loads(drive.blobs["base-0"])["generation"] == 2
+    assert json.loads(gzip.decompress(drive.blobs["base-0"]))["generation"] == 2
     assert loaded(snapshot.load_base(PID, None, drive, None, None))[1]["generation"] == 2
+
+
+# ------------------------------------------------- the two forms a Drive base comes in
+#
+# Until 2026-10-04 the base went up as plain JSON; since, gzip-compressed (`snapshot.stored_base`:
+# the 48-slide ambiguous deck's 689 kB of JSON is 54 kB, the last upload of a conversion). A deck
+# converted before keeps its plain file until its next store, so every read takes both.
+
+
+def big_base(generation: int) -> JsonObject:
+    """A base with enough in it for compression to show (its slides repeat, as a deck's do)."""
+    slides: list[Json] = [{"objectId": f"b2s_s{i:03}", "elements": [{"key": f"t{j}", "text": "the same words " * 8}
+                                                                     for j in range(6)]} for i in range(40)]
+    return {**base(PID, generation), "slides": slides, "words": "é→∑ beyond ASCII"}
+
+
+def test_a_plain_json_base_from_before_is_read() -> None:
+    drive = drive_with_base(big_base(3), PID)                     # (the old form: plain UTF-8 JSON)
+    _, got = loaded(snapshot.load_base(PID, None, drive, None, None))
+    assert got == big_base(3)
+
+
+def test_a_gzip_base_is_read() -> None:
+    drive = FakeDrive({PID: {snapshot.BASE_PROPERTY: "base-0"}}, {"base-0": snapshot.stored_base(big_base(4))}, False)
+    _, got = loaded(snapshot.load_base(PID, None, drive, None, None))
+    assert got == big_base(4)
+
+
+def test_what_goes_up_is_gzip_of_the_same_json_and_far_smaller() -> None:
+    drive = drive_with_base(big_base(1), PID)
+    snapshot.save_drive(drive, big_base(2), None, None)
+    up = drive.written[-1][1]
+    assert up.startswith(snapshot.GZIP_MAGIC)
+    plain = json.dumps(big_base(2), ensure_ascii=False).encode("utf-8")
+    assert gzip.decompress(up) == plain                    # the very JSON the plain form held
+    assert len(up) * 10 < len(plain)
+    assert snapshot.stored_base(big_base(2)) == up         # (the same base, the same bytes: mtime 0)
+
+
+def test_an_old_plain_file_is_overwritten_in_place_and_read_back() -> None:
+    """The deck keeps naming the same file: a plain one is replaced by the gzip form, not orphaned."""
+    drive = drive_with_base(big_base(5), PID)
+    assert snapshot.save_drive(drive, big_base(6), None, None) == "base-0" and drive.created == []
+    assert loaded(snapshot.load_base(PID, None, drive, None, None))[1] == big_base(6)
+
+
+def test_a_new_base_file_says_what_it_holds() -> None:
+    drive = no_drive_base()
+    snapshot.save_drive(drive, base(PID, 1), "Talk", None)
+    assert drive.created[0]["mimeType"] == snapshot.BASE_MIME == "application/gzip"
+    assert str(drive.created[0]["name"]).endswith("sync base.json.gz")
+
+
+def test_a_broken_gzip_base_is_no_base_and_the_cache_stands_in(tmp_path: Path) -> None:
+    """Cut short in transit or storage: unreadable, as a truncated plain file always was."""
+    cut = snapshot.stored_base(big_base(9))[:40]
+    drive = FakeDrive({PID: {snapshot.BASE_PROPERTY: "base-0"}}, {"base-0": cut}, False)
+    snapshot.save_local(base(PID, 2), tmp_path)
+    where, got = loaded(snapshot.load_base(PID, tmp_path, drive, None, None))
+    assert (where, got["generation"]) == ("local", 2)
+    with pytest.raises(ValueError, match="broken gzip"):
+        snapshot.read_stored_base(cut)
+    with pytest.raises(ValueError):
+        snapshot.read_stored_base(b"\x1f\x8bnot gzip at all")
+
+
+def test_a_base_given_as_text_is_still_read() -> None:
+    """A client library that answers a download as str (the reader always took it)."""
+    assert snapshot.read_stored_base(json.dumps(big_base(1))) == big_base(1)
 
 
 def test_saving_creates_the_file_and_points_the_deck_at_it(tmp_path: Path) -> None:

@@ -457,7 +457,7 @@ a per-slide background picture.
   when a caller handed its own client over (`google_auth.shared_service`: a service object is not
   thread-safe and a lent client is that caller's), with `credentials_for_threads` resolving
   credentials on the calling thread because a worker inherits no context: content batches
-  `CONTENT_WORKERS` (4) at a time with a client per thread (`gslides.per_thread`), the layout and
+  `CONTENT_WORKERS` (4, 8 since 2026-10-04) at a time with a client per thread (`gslides.per_thread`), the layout and
   master pass on a thread of its own (`emit.write_layouts`, overlapping the placeholder read and
   `measure_places` and **nothing below them**: it is joined before the first content batch is
   dispatched, because a slide's TITLE placeholder inherits its layout parent's box until that
@@ -4785,6 +4785,20 @@ timestamps).
   own (7.3 s of extract's 14.6 s profiled); `Line.main` is recomputed by every `line.size` and
   `line.baseline` (393k calls, 6.9 s profiled); emit's DeckPlan rehearsal plans slide parts that
   are planned again (1.5-1.8 s a deck); `plan_theme_of` re-reads the background files.
+
+2026-10-04, round trips (live profile of `ambiguous.pdf`: 30.4 s, 25 calls, 27.2 s of them with a
+request open; the base upload 4.0 s, `measure_places` 13.5-16 s on the critical path):
+- the Drive base is stored gzip -9 (`snapshot.stored_base`, `... sync base.json.gz`,
+  `application/gzip`; 689 kB -> 54 kB); `read_stored_base` takes either form, so a deck stored
+  plain is read and rewritten. An older version reading a gzip base gets no Drive base and falls
+  back to the folder copy (none: refused as having no base - never a wrong one).
+- `write_layouts` works from the import's own full read (one GET fewer); the read of the copied
+  slides goes out beside `measure_places`; the scratch slides are deleted on the layout thread
+  behind its pass, beside the content; every slide is planned before the layout join (the race
+  rule stands: no content batch is in the air before the layouts land).
+- Interleaved, 3 pairs each: ambiguous 26.9 -> 23.7 s median (25 -> 23 calls, every pair
+  faster); real_presentation-biore 42.0 -> 39.5 s with 4 content workers. 8 workers lost on biore
+  every round (43.3 s) and tied on ambiguous, so `CONTENT_WORKERS` stays 4.
 
 ## Triangle bullets through the .pptx (probe, 2026-10-03)
 No Slides preset has a filled ▶, so beamer's default triangle became ➢ (ARROW3D): the most frequent

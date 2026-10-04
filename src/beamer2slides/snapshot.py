@@ -3,10 +3,12 @@ created, recorded right after the deck was written, in `<out>/sync/base.json` an
 
 import contextlib
 import copy
+import gzip
 import io
 import json
 import os
 import re
+import zlib
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -1397,9 +1399,42 @@ def base_file(info: DriveFile) -> str | None:
     return (info.get("appProperties") or {}).get(BASE_PROPERTY) or None
 
 
+BASE_MIME = "application/gzip"
+"""What the base file in Drive holds since 2026-10-04: its JSON, gzip-compressed (`stored_base`)."""
+GZIP_MAGIC = b"\x1f\x8b"
+
+
+def stored_base(base: Mapping[str, object]) -> bytes:
+    """The bytes `save_drive` uploads: the base's JSON, gzip-compressed at the highest level.
+
+    The upload is the last round trip of a conversion and it is all bytes: the 48-slide
+    `ambiguous.pdf`'s base is 689 kB of JSON and took 4.0 s to go up on a 2 Mbit/s line; gzip -9
+    makes it 54 kB (12.8x) in 15 ms. The level is the highest because the line, not the CPU, is
+    what waits. `mtime=0`: the same base is the same bytes. Every reader takes this form and the
+    plain JSON every base before it was stored as (`read_stored_base`)."""
+    return gzip.compress(json.dumps(base, ensure_ascii=False).encode("utf-8"), compresslevel=9, mtime=0)
+
+
+def read_stored_base(data: bytes | str) -> Json:
+    """A Drive base file's content as JSON, in either form it may hold: gzip (`stored_base`), or
+    the plain JSON text bases were uploaded as until 2026-10-04 (a deck converted before keeps
+    one until its next store). Told apart by gzip's magic bytes, which no JSON text starts with.
+    A file that is neither, or a gzip stream that is cut short, raises ValueError - what a file
+    that is no JSON always raised here."""
+    if isinstance(data, bytes) and data.startswith(GZIP_MAGIC):
+        try:
+            data = gzip.decompress(data)
+        except (OSError, EOFError, zlib.error) as e:   # (gzip.BadGzipFile is an OSError)
+            raise ValueError(f"the base file is a broken gzip stream ({type(e).__name__}: {e})") from e
+    parsed: Json = json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
+    return parsed
+
+
 def save_drive(drive: DriveService, base: Mapping[str, object], title: str | None, info: DriveFile | None) -> str:
-    """The base as a JSON file next to the presentation (drive.file scope), its id in the
-    presentation's appProperties.b2sBase. Returns the file id.
+    """The base as a file next to the presentation (drive.file scope), its id in the
+    presentation's appProperties.b2sBase. Returns the file id. The file holds the base's JSON
+    gzip-compressed (`stored_base`); a file an older version wrote as plain JSON is overwritten in
+    place, and read in either form (`read_stored_base`).
 
     `info`: the presentation's name, parents and appProperties, where a caller has already read
     them (`deck_info` - they need nothing but the id, so a caller may fetch them while it is doing
@@ -1412,21 +1447,21 @@ def save_drive(drive: DriveService, base: Mapping[str, object], title: str | Non
         raise JsonShapeError(f"base.presentationId: a string was expected, found {type(pid).__name__}")
     if info is None:
         info = deck_info(drive, pid)
-    data = json.dumps(base, ensure_ascii=False).encode("utf-8")
+    data = stored_base(base)
     fid = base_file(info)
     if fid:
         try:
-            execute(drive.files().update(fileId=fid, media_body=media_upload(io.BytesIO(data), "application/json"),
+            execute(drive.files().update(fileId=fid, media_body=media_upload(io.BytesIO(data), BASE_MIME),
                                          fields="id"))
         except HttpError:
             fid = None
     if not fid:
-        body: FileBody = {"name": f"{title or info.get('name', pid)} - beamer2slides sync base.json",
-                          "mimeType": "application/json", "appProperties": {"b2sBaseOf": pid}}
+        body: FileBody = {"name": f"{title or info.get('name', pid)} - beamer2slides sync base.json.gz",
+                          "mimeType": BASE_MIME, "appProperties": {"b2sBaseOf": pid}}
         from .drive_folder import place
         place(body, drive, info.get("parents"))
         fid = file_id(execute(drive.files().create(body=body, fields="id", media_body=media_upload(
-            io.BytesIO(data), "application/json"))), "the sync base")
+            io.BytesIO(data), BASE_MIME))), "the sync base")
         execute(drive.files().update(fileId=pid, body={"appProperties": {BASE_PROPERTY: fid}}, fields="id"))
         info["appProperties"] = {**(info.get("appProperties") or {}), BASE_PROPERTY: fid}
     return fid
@@ -1457,16 +1492,16 @@ def mark_cleaned(drive: DriveService | None, pid: str, generation: int, info: Dr
 
 
 def load_drive(drive: DriveService, pid: str, info: DriveFile | None) -> Json:
-    """The base file the deck names, as JSON (None: none, or it could not be read)."""
+    """The base file the deck names, as JSON (None: none, or it could not be read). The file is
+    gzip or plain JSON (`read_stored_base`): this is the one place a Slides deck's Drive base is
+    read (`load_base`, which sync, guard and adopt_sync go through)."""
     try:
         if info is None:
             info = execute(drive.files().get(fileId=pid, fields="appProperties"))
         fid = base_file(info)
         if not fid:
             return None
-        data = execute(drive.files().get_media(fileId=fid))
-        parsed: Json = json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
-        return parsed
+        return read_stored_base(execute(drive.files().get_media(fileId=fid)))
     except (HttpError, ValueError):
         return None
 

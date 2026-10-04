@@ -84,7 +84,9 @@ from .emit_widths import (  # noqa: F401 (callers take these from here)
 from .fonts import font_info  # noqa: F401 (callers take these from here)
 from .gapi import HttpError
 from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
-from .google_types import DriveService, SlidesRequest, SlidesService, as_json, object_id, slides_request_kind
+from .google_types import (
+    DriveService, Presentation, SlidesRequest, SlidesService, as_json, object_id, slides_request_kind,
+)
 from .gslides import EMU_PER_PT, emu_json, execute, per_thread
 from .ir_types import (
     DiagramElement, Element, FallbackImage, ImageElement, MarkedShape, RenderedElement, ShapeElement, TableElement,
@@ -101,7 +103,10 @@ BATCH_MAX_REQUESTS = 400  # slides are sent together until a batch reaches this 
 # conversion is round trips and not work (measured: tools/probe_batch_parallelism.py). Several
 # batches may be in flight on one presentation at once - Google takes them and loses nothing -
 # and four is where the curve flattens: 8 batches of 200 requests take 9.4 s one at a time,
-# 6.1 s two at a time, 3.6 s four at a time and 3.1 s eight at a time.
+# 6.1 s two at a time, 3.6 s four at a time and 3.1 s eight at a time. Eight lost to four on a
+# whole conversion twice (real_presentation-biore, 2026-10-03, and interleaved on 2026-10-04:
+# 43.3 s against 39.5 s, every round), and on the 48-slide ambiguous.pdf, whose fifth batch
+# waits for a worker, the two were within noise (20.9 / 21.2 s).
 CONTENT_WORKERS = 4
 PICTURE_TITLES = {"math": "Formula", "icon": "Icon", "fallback": "Picture"}
 # An element emit trips over while planning it is the picture of its region, with a warning, instead
@@ -455,12 +460,13 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
     client = per_thread(lambda: slides_service(creds)) if threaded else (lambda: slides)
     pool = ThreadPoolExecutor(CONTENT_WORKERS, thread_name_prefix="b2s-content") if threaded else None
     ground = mp.ground
+    # (the layout pass reads the masters and layouts off the import's own read: `write_layouts`)
     layout_pool, layout_work = None, None
     if threaded:
         layout_pool = ThreadPoolExecutor(1, thread_name_prefix="b2s-layout")
-        layout_work = layout_pool.submit(write_layouts, client, pid, written, scale, fonts, ground)
+        layout_work = layout_pool.submit(write_layouts, client, pid, written, scale, fonts, ground, pres)
     else:
-        write_layouts(client, pid, written, scale, fonts, ground)
+        write_layouts(client, pid, written, scale, fonts, ground, pres)
 
     slide_states: list[emit_state.SlideState] = []  # (emit.json's "slides", which the base is read with)
     master_color = master_fill.get("color")
@@ -471,10 +477,28 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
     # (emit.json's "contained": which elements are pictures because emit could not plan them)
     contained = tuple(emit_state.Contained(page=c["page"], id=c["id"], kind=c["kind"], error=c["error"])
                       for c in plan.contained) or None
-    # Placeholder sizes (needed to resize them) and any extra layout placeholders.
-    created = execute(slides.presentations().get(
-        presentationId=pid,
-        fields="slides(objectId,pageElements(objectId,size),slideProperties/notesPage/notesProperties)"))
+    # Placeholder sizes (needed to resize them) and any extra layout placeholders. The read is in
+    # the air while `measure_places` works: neither needs the other, and all `measure_places`
+    # writes is scratch slides of its own (b2s_m...), which an answer may or may not list - every
+    # lookup below is by our slides' ids (`slide_parts`).
+    def read_copies() -> Presentation:
+        return execute(client().presentations().get(
+            presentationId=pid,
+            fields="slides(objectId,pageElements(objectId,size),slideProperties/notesPage/notesProperties)"))
+    reading = pool.submit(read_copies) if pool else None
+    moves: Mapping[str, Place] = {}
+    scratch: list[str] = []
+    if measure:
+        moves, scratch = measure_places(slides, pid, written, scale, fonts, plan.placed, plan.page_slide, out, SLIDE_W)
+    # The scratch slides have served their purpose once `measure_places` returns: their thumbnails
+    # are read and measured, and nothing below looks at them again (the content is planned from
+    # `moves`). So they are deleted beside the content rather than after it, on the layout thread,
+    # behind its own pass (its batches stay where the race below needs them). A delete that fails
+    # is raised where it always was, once the content has landed.
+    cleanup: Future[None] | None = None
+    if scratch and layout_pool is not None:
+        cleanup = layout_pool.submit(delete_scratch, client, pid, scratch)
+    created = reading.result() if reading is not None else read_copies()
     copied = created.get("slides")
     if copied is None:
         raise KeyError("slides")  # (the answer always has them: as reading it by key said before)
@@ -484,10 +508,6 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
                                                    .get("notesProperties", {}).get("speakerNotesObjectId"),
                                                    "speakerNotesObjectId")
                      for s in copied}
-    moves: Mapping[str, Place] = {}
-    scratch: list[str] = []
-    if measure:
-        moves, scratch = measure_places(slides, pid, written, scale, fonts, plan.placed, plan.page_slide, out, SLIDE_W)
 
     # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
     # element) so that a rejected batch can be narrowed down to the element at fault.
@@ -518,28 +538,13 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
                 if el and el["kind"] != "image":
                     refused.append((page, as_str(el["id"], "element id")))
 
-    # A full batch is sent while the next slides are still being planned, several at a time.
+    # Every slide is planned first - local work, done while the layout pass may still be in the
+    # air - and the batches then go out all at once (CONTENT_WORKERS at most).
+    batches: list[list[tuple[str, int, list[Part]]]] = []
     sent: list[Future[None]] = []
-
-    def dispatch(items: list[tuple[str, int, list[Part]]]) -> None:
-        if pool:
-            sent.append(pool.submit(send, items))
-        else:
-            send(items)
-
     pending: list[tuple[str, int, list[Part]]] = []
     pending_size = 0
     try:
-        # The layouts first, and never beside the slides: a slide's title placeholder inherits
-        # the layout's box until we give it one of its own, and while the layout batch is in the
-        # air together with the content batch that does that, the one Google commits LAST wins -
-        # a layout batch landing second takes every title's own box away again and the deck's
-        # titles all sit at the layout's, silently. Measured with three conversions at once
-        # (`tools/probe_layout_race.py`): the deck whose layout batch landed after its first
-        # content batch lost all ten titles, the two that landed first kept theirs. So the
-        # layout pass overlaps the read and `measure_places` above it, and nothing below.
-        if layout_work is not None:
-            layout_work.result()
         for slide in plan.slides():
             n = _page(slide)
             slide_id = _slide_id(n)
@@ -557,7 +562,7 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
             size = sum(len(rs) for _, rs in parts)
             # Several slides per round trip; a slide's requests are never split across batches.
             if pending and pending_size + size > BATCH_MAX_REQUESTS:
-                dispatch(pending)
+                batches.append(pending)
                 pending = []
                 pending_size = 0
             pending.append((slide_id, n, parts))
@@ -574,20 +579,43 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
             print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
                   f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
         if pending:
-            dispatch(pending)
+            batches.append(pending)
+        # The layouts first, and never beside the slides: a slide's title placeholder inherits
+        # the layout's box until we give it one of its own, and while the layout batch is in the
+        # air together with the content batch that does that, the one Google commits LAST wins -
+        # a layout batch landing second takes every title's own box away again and the deck's
+        # titles all sit at the layout's, silently. Measured with three conversions at once
+        # (`tools/probe_layout_race.py`): the deck whose layout batch landed after its first
+        # content batch lost all ten titles, the two that landed first kept theirs. So the
+        # layout pass overlaps the read, `measure_places` and the planning above, and no batch.
+        if layout_work is not None:
+            layout_work.result()
+        for items in batches:
+            if pool:
+                sent.append(pool.submit(send, items))
+            else:
+                send(items)
         for job in sent:             # every content batch has landed
             job.result()
+        if cleanup is not None:      # (and the scratch slides are gone: a failed delete raises here)
+            cleanup.result()
     finally:
         for p in (pool, layout_pool):
             if p:
                 p.shutdown()
     refused.sort()                   # several threads appended to it
-    if scratch:
-        batch(slides, pid, [{"deleteObject": {"objectId": oid}} for oid in scratch])
+    if scratch and cleanup is None:  # (one client, lent by the caller: one call at a time, last)
+        delete_scratch(client, pid, scratch)
     state = emit_state.EmitState(presentation_id=pid, url=f"https://docs.google.com/presentation/d/{pid}/edit",
                                  scale=scale, slides=tuple(slide_states), contained=contained, theme=theme_state,
                                  previous=None)
     return Emitted(state=state, deck=written), refused  # (the deck as built, for the sync snapshot)
+
+
+def delete_scratch(client: Callable[[], SlidesService], pid: str, scratch: Sequence[str]) -> None:
+    """`measure_places`' scratch slides out of the deck, in one batch (`client()`: the Slides
+    client of the thread this runs on)."""
+    batch(client(), pid, [{"deleteObject": {"objectId": oid}} for oid in scratch])
 
 
 def created_ids(reqs: Sequence[SlidesRequest]) -> list[str]:
