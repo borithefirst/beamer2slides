@@ -151,7 +151,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   breaks, `BREAKS_AFTER`); math letters are styled per piece (`classify.math_pieces`: italic
   per glyph, NFKC, script capitals as Unicode, written in STIX Two Math / Libertinus Math by
   `fonts.letter_face` and read back as their run, `deck_ir.capitals_as_their_runs`; a relation's
-  no-break space in a Lato run is U+2008, `classify_text.thick_spaces`); OT1 accents compose (`compose_accents`), `\not`
+  no-break space in a Lato run is U+2008, `classify_text.thick_spaces`; a word gap TeX set wide
+after a sentence, a script or a formula letter is U+2008 + space where the line has room,
+`wide_gap`/`widens_after`/`widened`, read back as one space by `inverse.latex_escape`); OT1 accents compose (`compose_accents`), `\not`
   negates (`negate`). Every text range emit writes is UTF-16 (`emit.u16`: astral math letters). A
   run inside a sentence keeps its paragraph's size (`emit.in_sentence`); leader dots and ellipses
   never set `shape_ratio`; a line of spaced dots is a leader (`classify_lines.leader_item`), never

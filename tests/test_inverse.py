@@ -261,6 +261,7 @@ def test_word_and_style_diffs():
 
 def test_latex_helpers():
     assert latex_escape("50% & $5_x") == r"50\% \& \$5\_x"
+    assert latex_escape("ends.  Then") == "ends. Then"  # a wide gap is one TeX space
     defined: dict[str, str] = {}
     assert colour_name("#FF0000", defined) == "red" and defined == {}
     assert colour_name("#123456", defined) == "b2s123456" and defined == {"b2s123456": "123456"}

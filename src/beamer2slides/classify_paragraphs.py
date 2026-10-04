@@ -11,11 +11,11 @@ from .classify_model import (
     union_all,
 )
 from .classify_text import (
-    COMPOSED, FRACTION_SLASH, LABEL_SEP_EM, NBSP, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
+    COMPOSED, FRACTION_SLASH, LABEL_SEP_EM, NBSP, THICK_SPACE_EM, WIDE_ROOM_EM, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
     family_of, first_word_width, formula_groups, gap_between, glued, is_code, is_mono, last_word_width,
     line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, on_columns, prose_spaces,
     raised_mark, reading_order, script_in_script, script_of, script_size, stretched, thick_spaces, thin_span,
-    wide_columns, with_accent, with_text,
+    wide_columns, wide_gap, widened, widens_after, with_accent, with_text, word_gap,
 )
 from .classify_lines import LinesMixin, ends_in_leader, leader_line, leader_pitch, overprint_word, prints_over
 from .fonts import serif_math_letters
@@ -664,6 +664,10 @@ class ParagraphsMixin(LinesMixin):
             # (a justified line's own word space, stretched; a \quad does not stretch)
             # (its last line keeps natural spaces)
             word_space = min(gaps) if par.justified and gaps and li < len(par.lines) - 1 else 0.33
+            # (what a wider gap is measured against: wide_gap; none on a line TeX stretched)
+            own_space = math.inf if par.justified and li < len(par.lines) - 1 else word_gap(gaps)
+            widest = max(l.x1 for l in par.lines)
+            widenings = 0  # (thick spaces this line gained: each needs its room, THICK_SPACE_EM)
             order = reading_order(line)
             # (not in code, whose spaces are columns)
             formulas: dict[int, int] = {} if pitch else formula_groups(line, max(l.x1 - l.x0 for l in par.lines))
@@ -794,6 +798,24 @@ class ParagraphsMixin(LinesMixin):
                             # (a \quad measures 0.999 em between the advance boxes; a justified
                             # line's own stretched spaces stay spaces)
                             sep += EM_SPACE * max(1, round((gap - 0.33 * line.size) / line.size))
+                        elif sep == " " and not runs[-1].get("hole") and not pitch and \
+                                wide_gap(gap / line.size, own_space) and prev.highlight is None and \
+                                widens_after(prev, bool(runs[-1]["script"])) and \
+                                span.highlight is None and (par.align == "center" or line.x1 + (
+                                    THICK_SPACE_EM * (widenings + 1) + WIDE_ROOM_EM) * line.size <= widest) and \
+                                (id(prev) not in formulas or formulas.get(id(span)) != formulas[id(prev)]):
+                            # a sentence's end, a script's or a formula letter's wider space: a
+                            # thick space before it (in the run it goes into, below); not beside a
+                            # \colorbox, whose padding is its no-break spaces (BOX_PAD)
+                            widenings += 1
+                            if runs[-1]["text"].endswith(" "):  # (the span before brought its space)
+                                if not runs[-1]["script"]:
+                                    runs[-1]["text"] = runs[-1]["text"][:-1] + widened(prev)
+                            elif text.startswith(" "):  # (this one did)
+                                text = widened(span)[:-1] + text
+                            else:
+                                into_next = bool(runs[-1]["script"]) or prev.size < 0.85 * span.size
+                                sep = widened(span if into_next else prev)
                     hole_w = runs[-1].get("hole")
                     if si and sep == " " and hole_w:
                         # The space after a formula becomes part of its gap: TeX's space there

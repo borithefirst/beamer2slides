@@ -118,7 +118,9 @@ GUARD_UNITS: bool = False
 
 
 def latex_escape(text: str) -> str:
-    out = "".join(ESCAPE.get(c, c) for c in text)
+    # (a gap TeX widens - after a sentence, a script - is written U+2008 then a space,
+    # classify_text.wide_gap: one space in TeX, which widens it again; never `~ `)
+    out = "".join(ESCAPE.get(c, c) for c in text.replace("  ", " "))
     return re.sub(r"(\d)(?=pt)", r"\1{}", out) if GUARD_UNITS else out
 
 

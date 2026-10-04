@@ -604,6 +604,62 @@ def glued(text: str, lead: bool, trail: bool) -> str:
 THICK_SPACE = "\u2008"
 RELATIONS = frozenset("=<>≤≥≠≈≡∼≃≅∝∈∉∋⊂⊃⊆⊇⊊⊋≺≻≪≫⊢⊨→←↔⇒⇐⇔↦⟶⟵⟷⟹⟸⟺⟼↪↩")
 
+# A word space TeX set wider than its line's others: after a sentence's end (\nonfrenchspacing's
+# extra space), after a sub- or superscript (\scriptspace) or a formula's italic letter. Lato draws
+# every space 0.192 em against CM's 0.333 (its wider letters make a sentence up), so such a gap
+# came out under half the PDF's and the words beside it ran together ('S_t as a', 0.43 em in the
+# PDF, real_linear-attention-a s33; 'Questions?  Comments?', 0.42 em, real_ansible-meetup-201-beamer
+# s26). It is written as a thick space before the word space (`widened`: 0.278 + 0.192 em): Slides
+# draws nothing for it, breaks at no U+2008 but still after the space, so the line breaks where
+# it did. No narrower than WIDE_GAP_EM, and WIDE_GAP_EXCESS_EM wider than the line's own spaces.
+WIDE_GAP_EM = 0.4
+WIDE_GAP_EXCESS_EM = 0.07
+TEX_WORD_SPACE_EM = 0.333  # CM's word space: the measure of a line of too few word gaps
+WORD_GAP_MIN_EM = 0.15     # a narrower gap is no word space (as in PageClassifier.runs)
+# What a thick space adds to its line in Slides (Lato's U+2008), against TeX's ~0.1 em more than a
+# word space: a sentence keeps its calibrated width only to there, so a line gains it only with
+# room before its paragraph's widest line (or centred), WIDE_ROOM_EM besides. Written at a block
+# body's last colon, its line 3 pt from the page's edge, the box ran 9 pt past the slide
+# (27_text_fit p8).
+THICK_SPACE_EM = 0.278
+WIDE_ROOM_EM = 1.0
+
+
+def word_gap(gaps: list[float]) -> float:
+    """A line's own word space (em): the median of its word gaps `gaps` (em, between neighbouring
+    words), TeX's on a line of fewer than three. (Not of a line TeX stretched, a justified
+    paragraph's but its last: Slides stretches its spaces too, and TeX's stretch after a comma or a
+    full stop is no wider natural space - 'columns,  demonstra-' at 0.70 em among 0.63, 14_misc.)"""
+    spaces = [g for g in gaps if g > WORD_GAP_MIN_EM]
+    return statistics.median(spaces) if len(spaces) >= 3 else TEX_WORD_SPACE_EM
+
+
+def wide_gap(gap: float, word: float) -> bool:
+    """`gap` (em) is a word space wider than the line's own `word_gap`: a sentence's end, a space
+    after a script or after a formula's italic letter, not a \\quad (an em space's)."""
+    return gap >= max(WIDE_GAP_EM, word + WIDE_GAP_EXCESS_EM)
+
+
+SENTENCE_END = re.compile(r"[.?!:][\"'”’)\]»]*$")
+
+
+def widens_after(s: Span, script: bool) -> bool:
+    """TeX sets a wider space after `s` - a sentence's end or a colon (space factor 2000 and up:
+    \\nonfrenchspacing's extra space), a script (`script`: \\scriptspace) or a formula's letter
+    (italic correction): only there is a wide gap the PDF's natural space. Elsewhere it is a line
+    TeX stretched (a justified line not read as one, a column of Cyrillic prose), a \\hfill or a
+    font whose own space is wider than CM's."""
+    word = s.text.strip()
+    return script or bool(SENTENCE_END.search(word)) or s.info.family == "math" or \
+        (s.info.italic and len(word) == 1 and word.isalpha())
+
+
+def widened(s: Span) -> str:
+    """The separator a wide gap is written as in `s`'s run: a thick space and the word space where
+    Slides sets it in Lato (a sans run in no Google font of the PDF's own: `thick_spaces`), else
+    the word space (emit measures every U+2008 as Lato's)."""
+    return THICK_SPACE + " " if s.info.family == "sans" and google_font(s.font) is None else " "
+
 
 def thick_spaces(runs: list[Run]) -> None:
     """The no-break space beside a relation (" = " in a formula: `glued`) as THICK_SPACE where Slides

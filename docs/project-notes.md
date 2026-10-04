@@ -5311,3 +5311,14 @@ class on a fresh conversion before working on it.
   third-year-talk s11 0.81 -> 0.92 (mean 0.918 -> 0.924); africa's author native layout text on
   every slide (s13/s47 0.95 -> 0.93: Lato Regular for the PDF's heavier footline face, the
   small-cut compromise, where the background picture showed the PDF's own glyphs).
+- **Track U, wide word gaps** (ansible-meetup s26, linear-attention s33): TeX widens a word
+  space after a sentence's end or a colon (\nonfrenchspacing), after a script (\scriptspace) and
+  after a formula's italic letter, 0.42-0.45 em in the PDF; Lato draws every space 0.192 em, so
+  `S_t as` and `? Then` ran together. classify writes such a gap (`classify_text.wide_gap` over
+  the line's own `word_gap`, only where `widens_after` says TeX meant it, so no stretched or
+  \hfill line) as U+2008 + space in a Lato run (`widened`), and only where the line has room
+  before its paragraph's widest line (`THICK_SPACE_EM`, `WIDE_ROOM_EM`; at a block body's colon
+  a line 3 pt from the edge ran 9 pt past the slide, 27_text_fit p8). pull and adopt read it back
+  as one TeX space (`inverse.latex_escape`), never `~ `. Open: a mono run's edges lose about
+  0.14 em each (needs a measured narrow space in emit); LinLibertineTI math (monodromy) is not
+  read as a formula.
