@@ -164,7 +164,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   label) is written JUSTIFIED with a `\parindent` first line, and never ends past its PDF lines
   (`justified_right`, else START); a paragraph needing a nearer edge than its box's gets
   `indentEnd` (`paragraph_ends`, which `text_layout` honours); an unmeasured paragraph may grow its
-  box up to 1 em to keep the PDF's line count (`unhyphenated_room`); `\hfill` pieces are their own right-aligned lines (`find_hfill_pieces`);
+  box up to 1 em to keep the PDF's line count (`unhyphenated_room`); a wrapped paragraph in a face
+  nobody measured whose join the box's edge passes ends between its lines (+5%) and its
+  `wrap_limit` (`emit_text.unmeasured_end`); `\hfill` pieces are their own right-aligned lines (`find_hfill_pieces`);
   a `\quad` is an em space at max(0.9, word space + 0.4) em; thin-spaced digits keep NBSP
   (`thin_span`). Code keeps its columns: spaces from glyph x over the column pitch (`code_pitch`),
   line numbers a right-aligned box of their own (`split_line_numbers`, Line `code_number`); a

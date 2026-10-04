@@ -523,7 +523,9 @@ def paragraph_ends(paras: Sequence[SetParagraph], measured: Measured | None, rig
     widest line. A justified paragraph ends where its full lines do (justified_right), short of
     it for its next word, and is ragged where no edge fits: over a box of justified paragraphs
     (`justify_box`) that is the box's own edge. Only a left-to-right box measured line by line
-    (box_lines) has a paragraph edge; any other keeps its box's."""
+    (box_lines) has a paragraph edge; any other keeps its box's. In such a box a paragraph in a
+    face nobody measured ends short of its PDF next word's join where the box's edge reaches it
+    (`unmeasured_end`)."""
     out: list[tuple[bool, float]] = []
     for i, p in enumerate(paras):
         g = measured[i] if measured else None
@@ -546,10 +548,44 @@ def paragraph_ends(paras: Sequence[SetParagraph], measured: Measured | None, rig
         elif justified and not justify_box:
             edge = max(ln.x1 for ln in p.lines[:-1]) * scale
             lines = flowed_lines(p, scale, fonts, edge - LINE_MARGIN, None) if edge <= right else None
-            out.append((True, right - edge) if lines is not None and lines <= n else (False, 0.0))
+            if lines is not None and lines <= n:
+                out.append((True, right - edge))
+            else:
+                own = unmeasured_end(p, right, scale, fonts) if g is None else None
+                out.append((False, 0.0 if own is None else right - own))
+        elif justified and justify_box:
+            out.append((True, 0.0))
         else:
-            out.append((justified and justify_box, 0.0))
+            own = unmeasured_end(p, right, scale, fonts) if g is None else None
+            out.append((False, 0.0 if own is None else right - own))
     return out
+
+
+def unmeasured_end(p: SetParagraph, right: float, scale: float, fonts: FontMapper) -> float | None:
+    """Where (Slides pt) a left-aligned wrapped paragraph in a face nobody measured ends
+    when its box's text edge `right` reaches where its next line's first word would join its
+    line in the PDF (`wrap_limit`, less `LINE_MARGIN`), or None to keep the box's edge.
+
+    A box of such paragraphs is sized from its widest PDF line and the least room before any
+    paragraph's next word; a wider paragraph beside a narrower one leaves the narrower one's
+    edge past its own join (real_thesis-defense s4: an item ending at 403 pt, its next word
+    joining at 443.9, in a box ending at 447.6 for an item 442 pt wide; 'sources' came up).
+    It ends in the middle of its own range, never before its PDF lines as an unmeasured face
+    may set them (`UNMEASURED_PAD` of each line, at least `UNMEASURED_EM`): a word joined up
+    costs no line, a line wrapped adds one. None where no such edge stays short of the join."""
+    limit = p.wrap_limit
+    if not limit or len(p.lines) < 2 or hugs_of(p) != "left" or p.direction == "rtl" or \
+            any(SOFT_BREAK in r.text for r in p.runs) or \
+            all(r.hole_size or slides_width_of([r], scale, fonts) is not None for r in p.runs):
+        return None  # (a measured face whose lines could not be measured may run wider: Lato for CM)
+    joins = limit * scale - LINE_MARGIN
+    if right <= joins:
+        return None
+    widest = max(ln.x1 for ln in p.lines) * scale
+    keep = max(ln.x1 * scale + max(UNMEASURED_PAD * (ln.x1 - ln.x0) * scale, UNMEASURED_EM * p.size * scale)
+               for ln in p.lines)
+    end = max(widest + (limit * scale - widest) / 2, keep)
+    return end if end < joins and end < right else None
 
 
 def unhyphenated_room(paras: Sequence[SetParagraph], measured: Measured | None, left: float, right: float,

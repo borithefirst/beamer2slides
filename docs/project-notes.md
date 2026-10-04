@@ -5182,3 +5182,16 @@ class on a fresh conversion before working on it.
   elements changed, none in the test decks. Open: an unmeasured box (NimbusSanL) overruns a
   paragraph's `wrap_limit` by its 2 + 0.01 w slack (thesis-defense s4: 'sources' joins up);
   Slides presumably cannot break before '.' after a space (UAX#14 LB13, c-error-handling s15).
+- **Unmeasured faces and the join** (track M, real_thesis-defense s4). A box of paragraphs in a
+  face nobody measured (NimbusSanL->Arial, Fira, HaranoAji, Calibri) is sized from its widest PDF
+  line and the least room to any next word; where that room is under 4 pt the edge goes 2 pt + 1%
+  past the widest line, which can pass a narrower paragraph's own join (item 1 ended at 403.0, its
+  next word 'sources' joining at 443.9, the box at 447.6 for item 5's 442.1 line: 'sources' came
+  up). `emit_text.unmeasured_end` gives such a paragraph an indentEnd at the middle of its range
+  (widest line to `wrap_limit`), never short of each PDF line plus `UNMEASURED_PAD` (5%, at least
+  `UNMEASURED_EM`), and only where that is short of the join less `LINE_MARGIN`; otherwise the
+  box's edge stays (a joined word costs no line, a wrapped one adds one). Measured faces whose
+  lines could not be measured (hanging labels, holes) are left out: Lato can run more than 5%
+  wider than CM. Offline plans of 609 decks: 5 slides changed, all an added indentEnd; 4 of them
+  were words joined up in the archived renders (Fira 'Network for', two CJK items, ArialMT
+  '5. 6.'). Not yet seen live.
