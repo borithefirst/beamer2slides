@@ -202,7 +202,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   it takes from the background (`render.reach_held_ink`, `holds`: italic overhangs, hanging pieces); a line crossing a picture's edge keeps its
   crossing rows in the background (`picture_crossings`). A figure whose 3+ strokes end on words
   beyond its box stands on its caption: a plain picture, no overlay (`classify_figures.stands_on`;
-  caption lines its box holds count, `caption_above`);
+  caption lines its box holds count, `caption_above`, and are given back to the caption before
+  paragraphs, `release_held_captions`, `StandingFigure`);
   a diagram's segments inside a filled node are drawn after the nodes (`on_filled_node`); a smaller
   glyph raised 0.3 em over its words is a footnote mark, no label (`classify_reasons.footnote_mark`).
   A figure crop over words the layout carries (`on_layout`) is see-through where it paints

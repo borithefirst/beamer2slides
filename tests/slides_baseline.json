@@ -696,8 +696,7 @@
  },
  "text_fit_known": {
   "27_text_fit": {
-   "17:p16t1 width": "line 2 of the inline-math paragraph is 0.912: Slides ends line 1 with and, because inline math set in Lato is much narrower than TeX math (Lato italic x 0.469 em against CMMI 0.571, plus TeX spacing around = and -): a line-break difference no size factor can fix (docs/project-notes.md, Width prediction)",
-   "4:p3t2 width": "line 4, small caps: set at 1.13x the serif size on purpose (emit.SMALL_CAPS_WIDTH), a compromise between width and height - the line is 0.88 of the PDF width, its capitals ~13% taller than CMCSC's; full width (1.28x) stood them 30% taller (docs/calibration.md 2c)"
+   "4:p3t3 width": "line 3, small caps (the typewriter line is a box of its own since 2026-10-04): set at 1.13x the serif size on purpose (emit.SMALL_CAPS_WIDTH), a compromise between width and height - the line is 0.88 of the PDF width, its capitals ~13% taller than CMCSC's; full width (1.28x) stood them 30% taller (docs/calibration.md 2c)"
   }
  }
 }

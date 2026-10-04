@@ -5293,6 +5293,20 @@ class on a fresh conversion before working on it.
   it. A bullet's cap is the largest size holding 30% of its item's letters
   (`emit_text.bullet_cap`, `BULLET_CAP_SHARE`), not the size most use: `\texttt` words
   outnumbering the prose made one ball 25% smaller than its neighbours.
+- **Track W, a caption held as labels is given back** (third-year-talk p10 panel 6): the plot
+  beside the tree reaches down past the caption's first two lines, so `assign_reasons` made them
+  figure labels and the caption was cut in two (two lines in the picture in the PDF's face, one
+  native). `classify_figures.release_held_captions` (after `axis_titles`) runs `overlay()`'s test
+  (`stands_on` over `caption_above`) on the clusters `figures()` will form and gives those lines
+  back before paragraphs are built; a `classify_state.StandingFigure` keeps the figure a plain
+  picture of its drawing and true labels under the whole caption. One slide of 1,487 changed.
+- **Track V, subscripts 'low and large'** (linear-attention s33/s52/s14): no change. emit's
+  script sizes match TeX's after Slides' 0.665 reduction (s33's `t` as tall as the PDF's); it
+  reads large because Slides' fixed 0.371 em drop hangs it ~0.21 em low, its top pinned near the
+  baseline whatever size is written (0.363z drop - 0.329z x-height), as the earlier "no size fixes
+  it" finding said. Only a hole picture would place it exactly. ⊤ in `QK^⊤` (and likely ⊙, ℝ) is
+  half CMSY's height because Lato lacks it and Slides' fallback face draws it small: an operator
+  face probe (`tools/probe_math_glyphs.py`'s operators) is the next step.
 - **Live check of Q-T** (2026-10-04): ansible s13's six balls the PDF's size and all alike;
   third-year-talk s11 0.81 -> 0.92 (mean 0.918 -> 0.924); africa's author native layout text on
   every slide (s13/s47 0.95 -> 0.93: Lato Regular for the PDF's heavier footline face, the

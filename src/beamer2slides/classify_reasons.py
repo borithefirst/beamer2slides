@@ -645,6 +645,7 @@ class ReasonsMixin(FiguresMixin):
                     changed = True
         self.release_stranded_labels(lines, joined)
         self.axis_titles(lines)
+        self.release_held_captions(lines)
 
         for line in lines:
             if line.reason is None:

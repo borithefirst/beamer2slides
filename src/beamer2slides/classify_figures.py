@@ -15,7 +15,7 @@ from .classify_model import (
 )
 from .classify_paragraphs import ParagraphsMixin
 from .classify_shapes import preset_shape, split_rectangle, turned_rounded, turned_shape
-from .classify_state import DiagramRefusal, Refusal
+from .classify_state import DiagramRefusal, Refusal, StandingFigure
 from .classify_text import EQ_NUMBER_RE, card_text, family_of, math_text, span_runs
 from .classify_turned import SpanFrame, holds, moved, reframe, same_turn, span_frame, turn, unturned_spans
 from .ir import (
@@ -168,6 +168,31 @@ def on_rim(rect: Rect, end: Sequence[float], other: Sequence[float]) -> bool:
     cx, cy, radius = rect.cx, rect.cy, (rect.w + rect.h) / 4
     behind = (cx - end[0]) * (other[0] - end[0]) + (cy - end[1]) * (other[1] - end[1]) < 0
     return behind and abs(math.dist((cx, cy), end) - radius) <= 0.6
+
+
+def path_points(d: RawDrawing) -> list[Sequence[float]]:
+    """A drawing's line ends, corners and curve ends: where it may meet words."""
+    out: list[Sequence[float]] = []
+    for op, pts in d.get("path") or []:
+        if op == "re":
+            (x0, y0), (x1, y1) = pts
+            out += [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        else:
+            out += [pts[0], pts[-1]] if op == "c" else pts
+    return out
+
+
+def near_words(s: Span, x: float, y: float) -> bool:
+    """A drawing's point at a span: over it, or a third of an em off it."""
+    return s.rect.x0 - 0.1 * s.size <= x <= s.rect.x1 + 0.1 * s.size and \
+        s.rect.y0 - 0.35 * s.size <= y <= s.rect.y1 + 0.35 * s.size
+
+
+def rim_only(d: RawDrawing) -> bool:
+    """A closed curve: it has no ends, it meets the words it circles, not those its rim passes
+    (a Venn circle under the title of its set)."""
+    path = d.get("path") or []
+    return len(path) >= 2 and all(op == "c" for op, _ in path) and math.dist(path[0][1][0], path[-1][1][-1]) <= 0.5
 
 
 STANDING_STROKES = 3  # drawings ending on a caption's words from one side: a figure standing on it
@@ -363,10 +388,12 @@ class FiguresMixin(ParagraphsMixin):
                 out.append(diagram)  # frames around their own text (a framed paragraph), not marks on prose
                 continue
             overlay = self.overlay(c, label_spans, lines, len(out), over_text)
+            captions = {sid for f in self.standing if c.expand(0.5).contains_rect(f.drawing, tol=0.5) for sid in f.caption}
             if overlay == "standing" and over_text and all(
-                    t.cy >= c.y1 or t.cy <= c.y0 for e, t in zip(text_elements, text_rects)
-                    if t.intersects(c) and not grazed(e, t, c)):
-                # (its strokes reach into the caption's box: no text under it all the same)
+                    t.cy >= c.y1 or t.cy <= c.y0 or not captions.isdisjoint(e["spans"])
+                    for e, t in zip(text_elements, text_rects) if t.intersects(c) and not grazed(e, t, c)):
+                # (its strokes reach into the caption's box - its plot down beside a caption it
+                # gave back its first lines - no text under it all the same)
                 over_text = False
                 drafted = self.diagram_from(c, label_spans, len(out))
                 diagram = None if isinstance(drafted, DiagramRefusal) else drafted
@@ -456,32 +483,13 @@ class FiguresMixin(ParagraphsMixin):
                                  if id(l) not in self.line_owner for s in l.spans):
             return None  # math set inside a figure: one picture of everything in its box
 
-        def points(d: RawDrawing) -> list[Sequence[float]]:
-            out: list[Sequence[float]] = []
-            for op, pts in d.get("path") or []:
-                if op == "re":
-                    (x0, y0), (x1, y1) = pts
-                    out += [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-                else:
-                    out += [pts[0], pts[-1]] if op == "c" else pts
-            return out
-
-        def near(s: Span, x: float, y: float) -> bool:
-            return s.rect.x0 - 0.1 * s.size <= x <= s.rect.x1 + 0.1 * s.size and \
-                s.rect.y0 - 0.35 * s.size <= y <= s.rect.y1 + 0.35 * s.size
-
-        # The words its line ends, corners and tips touch; else those it is drawn across. A
-        # closed curve has no ends: it meets the words it circles, not those its rim passes (a
-        # Venn circle under the title of its set).
-        def rim_only(d: RawDrawing) -> bool:
-            path = d.get("path") or []
-            return len(path) >= 2 and all(op == "c" for op, _ in path) and math.dist(path[0][1][0], path[-1][1][-1]) <= 0.5
-        ends = [(p, d) for d in drawings for p in points(d)]
-        met = [(s, l) for s, l in words if any(near(s, x, y) and (not rim_only(d) or self.graphic_drawings[d["id"]].contains(s.rect.cx, s.rect.cy))
-                                                for (x, y), d in ends)]
+        ends = [(p, d) for d in drawings for p in path_points(d)]
+        met = self.met_words(ends, words)
         held = [s for s in label_spans if c.expand(0.5).contains_rect(s.rect, tol=0.5)]
-        if met and stands_on(c, met, ends, near, caption_above([s for s, _ in met], held)):
+        if met and stands_on(c, met, ends, near_words, caption_above([s for s, _ in met], held)):
             return "standing"  # a figure on its caption: no overlay, whatever its strokes reach into
+        if any(c.expand(0.5).contains_rect(f.drawing, tol=0.5) for f in self.standing):
+            return "standing"  # (its caption's first lines given back: release_held_captions)
         if not met and over_text:
             met = [(s, l) for s, l in words if any(s.rect.intersects(self.graphic_drawings[d["id"]]) for d in drawings)]
         if not over_text:
@@ -593,6 +601,50 @@ class FiguresMixin(ParagraphsMixin):
             out.append({"id": f"p{self.raw['index']}k{len(out)}", "kind": "image", "role": "icon",
                         "bbox": c.expand(1.0).as_list(), "spans": []})
         return out
+
+    def met_words(self, ends: Sequence[tuple[Sequence[float], RawDrawing]],
+                  words: Sequence[tuple[Span, Line]]) -> list[tuple[Span, Line]]:
+        """The words a figure's line ends, corners and tips touch (`near_words`); a closed curve
+        only those it circles (`rim_only`)."""
+        return [(s, l) for s, l in words if any(
+            near_words(s, x, y) and (not rim_only(d) or self.graphic_drawings[d["id"]].contains(s.rect.cx, s.rect.cy))
+            for (x, y), d in ends)]
+
+    def release_held_captions(self, lines: list[Line]) -> None:
+        """A figure standing on a caption (`stands_on`) whose first lines it holds as labels
+        (`caption_above`: a tree's plot reaching down beside them, real_third-year-talk p10
+        panel 6) gives those lines back to the caption, before paragraphs are built: the
+        caption was cut in two, its first lines in the picture in the PDF's face and the rest
+        native in Slides' face and measure. Its picture is then of the drawing and its true
+        labels, under the whole caption (`standing`: `figures` makes no overlay of it)."""
+        label_spans = [s for l in lines if l.reason in ("figure", "rotated") for s in l.spans]
+        if not label_spans:
+            return
+        regions = [r for r in self.regions if not self.band_ornament(r)]
+        words = [(s, l) for l in lines if l.reason is None for s in l.content
+                 if s.text.strip() and s.info.family != "icon"]
+        rects = regions + [s.rect for s in label_spans] + self.title_bridges + self.column_bridges
+        for c in cluster_rects(rects, gap=0.8 * self.body):
+            inside = [r for r in regions if r.intersects(c.expand(0.1))]
+            if max(c.w, c.h) < 25 or not inside:
+                continue
+            box = c.expand(1)
+            drawings = [d for d in self.raw["drawings"] if d["id"] in self.graphic_drawings
+                        and box.contains_rect(self.graphic_drawings[d["id"]], tol=0.5)]
+            if not drawings or any(box.intersects(Rect.of(im["bbox"])) for im in self.raw["images"]):
+                continue
+            ends = [(p, d) for d in drawings for p in path_points(d)]
+            met = self.met_words(ends, words)
+            held = [s for s in label_spans if c.expand(0.5).contains_rect(s.rect, tol=0.5)]
+            caption = caption_above([s for s, _ in met], held)
+            if not met or not caption or not stands_on(c, met, ends, near_words, caption):
+                continue
+            given = [l for l in lines if l.reason == "figure" and any(s in caption for s in l.spans)]
+            for l in given:
+                l.reason = None
+            self.standing.append(StandingFigure(
+                drawing=union_all(inside),
+                caption=frozenset(s.id for l in given + [l for _, l in met] for s in l.spans)))
 
     def release_stranded_labels(self, lines: list[Line], joined: list[Line]) -> None:
         """Labels joined to graphics that `figures` will make no picture of - a cluster under

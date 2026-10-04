@@ -111,6 +111,17 @@ class Fill:
     color: RawColor
 
 
+@dataclass(frozen=True, kw_only=True)
+class StandingFigure:
+    """A figure standing on a caption whose first lines its box held as labels, the lines given
+    back to the caption before paragraphs (`release_held_captions`): `figures` makes it a plain
+    picture under its whole caption, not an overlay of the words it now reaches into."""
+    drawing: Rect
+    """The figure's graphics (no labels)."""
+    caption: frozenset[str]
+    """The caption's span ids: the lines given back and the line its strokes met."""
+
+
 PathKey = tuple[float, ...]
 """A graphic's box as `Rect.as_list` rounds it: how `graphic_paths` finds its drawing."""
 
@@ -153,6 +164,8 @@ class PageState:
         """What joins a plot's title to its plot (`axis_titles`)."""
         self.column_bridges: list[Rect] = []
         """What joins a column of axis labels to its plot (`axis_label_column`)."""
+        self.standing: list[StandingFigure] = []
+        """Figures whose caption lines were given back to the caption (`release_held_captions`)."""
         # decorations on words (text_decorations, underscores)
         self.decor_ids: set[str] = set()
         self.decor_rects: dict[str, list[Rect]] = {}
