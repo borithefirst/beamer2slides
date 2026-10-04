@@ -5128,3 +5128,57 @@ class on a fresh conversion before working on it.
   Left: defense s35 still ends 6.7 pt past its frame (the fixed 7.2 pt TABLE_CELL_PAD against a
   scaled table's \tabcolsep, the 32 pt column minimum: a per-table .pptx margin is a design
   decision, sync's API fallback cannot pad); `lay.bounds` ignores the TABLE_MIN_COLUMN_PT clamp.
+- Inline math in beamer's sans text faces (track G). beamer's default sans math sets letters in
+  CMSSI, vectors in CMSSBX, scripts in CMSS8/CMSSI8 and '=' in CMSS10: no span is a math font's,
+  so `formula_groups` saw no formula, relations kept 0.19 em breakable word spaces (TeX: 0.278
+  thick) and `thick_spaces` never ran ('W_[t] = T_[t]K_[t]', linear-attention s46; 'β_t = 1',
+  s30). `classify_text.formula_spans` reads a formula by its scripts and their nuclei (a word of
+  at most `NUCLEUS_LETTERS` 3 letters within `NUCLEUS_GAP_EM` 0.12 em of a script); a group with
+  an anchor (math font or script) is glued when short, a wider one cut where TeX may break (after
+  a relation or binary operator outside a script, `BREAKS_AFTER`) and each piece glued; a piece
+  still too long falls back to the math-or-letterless runs ('a_1, a_2, ..., a_n'). Scan: 94
+  paragraphs in 11 real decks, 10 in the test decks, no kind changes, read by eye. Left: Slides
+  lowers SUBSCRIPT 0.371z and draws it at 0.665z where TeX lowers 0.15 em, so a script at body
+  size is 91% of TeX's and 0.22 em too low; its top stays near the baseline whatever z, so a
+  smaller z only lifts its bottom (z 0.8: still 0.15 em low at 73% size) and no size fixes it
+  (monodromy s3/14/18/21). A smaller unscripted run on the baseline would sit 0.15 em high and
+  break deck_ir's round trip. Relations in Lato/PT Serif are smaller than CM's (0.577 against
+  0.778 em). A √'s vinculum under the line above is read as an underline of a word (monodromy
+  s21's 'e': the `below` guard in classify_graphics' rule-under-words test, the digit under the
+  bar 0.85 em down). Fixed after: a rule starting where a √ ends, within its height, is its
+  vinculum and underlines nothing (classify_graphics' rule-under-words test; corpus and test
+  decks: only monodromy pages 69-71 lost their 'e' underline).
+- Bullet sizes on the real decks (track J). dstalk s12's level-1 square is 4.43 pt beside 5.98 pt
+  words (0.74 em); Slides' square preset is 0.45 em, so the cap at the item's text size
+  (`bullet_size_of`) draws it at 62% (8 vs 13 px). defense s31's balls are within a pixel (their
+  shading is Slides' limit) and look alike at both levels only because the top one is capped.
+  Slides' presets are Arial's glyphs (■ 0.461, ● 0.430, ► 0.707 em in arial.ttf; measured 0.45,
+  0.41, 0.68), so a written ■ is no larger: the remedy is a bullet past its text with its push
+  taken out of spaceAbove, which `tools/probe_bullet_push.py` measures for ● and ■ at 1.0-1.85x.
+  Run live: no remedy. The bullet's size sets its line's ascent, so its own baseline drops with it
+  (middle line +2.7 / +5.4 / +8.6 / +11.3 / +14.4 pt at 1.15 / 1.33 / 1.5 / 1.65 / 1.85x of 18 pt
+  Lato, ● and ■ alike) and the next line by 0.175 / 0.375 / 0.575 / 0.8 / 1.0 em: about
+  (ratio - 1) x 1.2 em, more than any item gap holds and inside the line itself, where no
+  spaceAbove reaches. The cap at the text's size stays. (Ink per em of the bullet's own size: ●
+  0.43, ■ 0.46-0.48.) defense s41's leader has the PDF's 45 dots and length, but each dot 2.27x
+  the PDF's ink: PT Serif's period is 0.137 em against CM's ~0.10, Lato's no lighter per pitch
+  (0.125 / 0.405); open (dot and space runs sized apart, or Lato 300). pifont's ✴ (Zapf Dingbats,
+  0.72 em), drawn as Slides' ★ (0.81 em) at the label's size, was 12% tall (africa s39, s41): a
+  glyph whose label is an icon font is now sized by its ink (`SetBullet.label_icon`, `ink_sized`).
+  Scan over 609 decks' offline plans: only those two slides changed. The eight spokes stay a star.
+- Lines broken by hand and labels that are words (track H). A paragraph's column beside other
+  content is measured by its column mates (`column_mates`: same size within 1 pt, starting at the
+  edge to 3 em left of it, within 8 em, beside that content), not only by the lines stacked at its
+  own edge (slide-20250221 s7); CJK lines reach the next character with no space (s24). Two lines
+  ending together are a narrow justified measure only when no known line of the column runs
+  further than the next word needs (biore s63) and the line has more than one word
+  (c-error-handling s3, s27: empty items '5.' / '6.' had joined). A tab whose gap is under 0.4 em
+  or no wider than the line's word spaces is a word, not a label (`label_is_word`, biore s57). The
+  gutter veto looks only at the rows' own block (`LinesMixin.block_of`, rows less than 1 em apart):
+  a paragraph 2.7 em below no longer closes an align*'s description column (linear-attention
+  s18); decision-tree s26's eqnarray became one picture rather than mixed text and picture.
+  `continues` keeps centred lines centred when a third starts by chance where the first did, and
+  `free_width` ignores a text margin only the paragraph's own lines set (dstalk s17). Scan: 22
+  elements changed, none in the test decks. Open: an unmeasured box (NimbusSanL) overruns a
+  paragraph's `wrap_limit` by its 2 + 0.01 w slack (thesis-defense s4: 'sources' joins up);
+  Slides presumably cannot break before '.' after a space (UAX#14 LB13, c-error-handling s15).

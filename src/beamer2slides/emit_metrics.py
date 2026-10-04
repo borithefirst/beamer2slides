@@ -752,15 +752,18 @@ def face_ems(shape: BulletFace, char: bool) -> tuple[float, float]:
 
 def ink_sized(bullet: SetBullet, size: float, scale: float, char: bool) -> float | None:
     """The size that gives a glyph bullet its PDF ink height, when it is to be used. A bullet
-    written as its own character (`char`) is always sized by its ink: Slides draws it in another
-    face than the PDF's, so the label's size says nothing of its height."""
+    written as its own character (`char`), or one whose label is an icon font's glyph
+    (`label_icon`: a dingbat drawn as the preset nearest it), is always sized by its ink: Slides
+    draws another face's glyph than the PDF's, so the label's size says nothing of its height.
+    (Zapf Dingbats' eight-pointed ✴ at 5.98 pt, 0.72 em of ink, was a ★ of 0.81 em at the
+    label's size: 12% taller than the PDF's, real_africa-remote-sens-30 41.)"""
     shape = bullet_shape_of(bullet)
     if bullet.kind != "glyph" or bullet.ink is None or shape is None:  # (a glyph always has a shape)
         return None
     full = _label_size(bullet, size, scale)
     height = (bullet.ink.box[3] - bullet.ink.box[1]) * scale
     inked = max(0.3 * size, min(size, height / face_ems(shape, char)[0]))
-    if char and shape in CHAR_BULLETS:
+    if (char and shape in CHAR_BULLETS) or bullet.label_icon:
         return inked
     return inked if inked < INK_SIZED * full or shape != GLYPH_SHAPES.get(bullet.text, "disc") else None
 

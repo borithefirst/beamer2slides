@@ -84,6 +84,10 @@ class SetBullet:
     """None where the page says none (a drawn bullet, a ball whose colour render could not read)."""
     label_size: float | None
     """The size of the font the label is drawn in; None where there is no label."""
+    label_icon: bool
+    """The label is drawn in an icon font (a pifont/Zapf Dingbats glyph classify took for the
+    bullet glyph Slides draws closest, `classify_reasons.ICON_BULLET_GLYPHS`): its size says
+    nothing of the height of the glyph Slides draws (`emit_metrics.ink_sized`)."""
     ink: GlyphInk | None
     """A glyph's ink as render measured it; None before render, or when it could not."""
     shape: BulletFace | None
@@ -277,28 +281,30 @@ def set_bullet(b: Bullet | RenderedBullet) -> SetBullet:
     match b:
         case RenderedGlyphBullet():
             return SetBullet(kind="glyph", text=b.text, bbox=b.bbox, color=b.color, label_size=b.label.size,
-                             ink=b.ink, shape=None)
+                             label_icon=b.label.family == "icon", ink=b.ink, shape=None)
         case GlyphBullet():
             return SetBullet(kind="glyph", text=b.text, bbox=b.bbox, color=b.color, label_size=b.label.size,
-                             ink=None, shape=None)
+                             label_icon=b.label.family == "icon", ink=None, shape=None)
         case RenderedDrawnBullet():
-            return SetBullet(kind="glyph", text=b.text, bbox=b.bbox, color=None, label_size=None, ink=b.ink,
-                             shape=None)
+            return SetBullet(kind="glyph", text=b.text, bbox=b.bbox, color=None, label_size=None, label_icon=False,
+                             ink=b.ink, shape=None)
         case DrawnBullet():
-            return SetBullet(kind="glyph", text=b.text, bbox=b.bbox, color=None, label_size=None, ink=None,
-                             shape=None)
+            return SetBullet(kind="glyph", text=b.text, bbox=b.bbox, color=None, label_size=None, label_icon=False,
+                             ink=None, shape=None)
         case NumberBullet():
             return SetBullet(kind="number", text=b.text, bbox=b.bbox, color=b.color, label_size=b.label.size,
-                             ink=None, shape=None)
+                             label_icon=False, ink=None, shape=None)
         case RenderedImageBullet():
             return SetBullet(kind="image", text=b.text, bbox=b.bbox, color=b.color,
-                             label_size=None if b.label is None else b.label.size, ink=None, shape=None)
+                             label_size=None if b.label is None else b.label.size, label_icon=False, ink=None,
+                             shape=None)
         case ImageBullet():
             return SetBullet(kind="image", text=b.text, bbox=b.bbox, color=None,
-                             label_size=None if b.label is None else b.label.size, ink=None, shape=None)
+                             label_size=None if b.label is None else b.label.size, label_icon=False, ink=None,
+                             shape=None)
         case ShapeBullet():
-            return SetBullet(kind="shape", text=b.text, bbox=b.bbox, color=b.color, label_size=None, ink=None,
-                             shape=b.shape)
+            return SetBullet(kind="shape", text=b.text, bbox=b.bbox, color=b.color, label_size=None,
+                             label_icon=False, ink=None, shape=b.shape)
         case _:
             assert_never(b)
 
@@ -492,10 +498,12 @@ def bullet_of(d: JsonMap) -> SetBullet:
     ink = d.get("ink")
     label = d.get("label")
     label_size = _object(label, "label").get("size") if label else None
-    return SetBullet(kind=_bullet_kind(d["kind"]), text=_str(d.get("text", ""), "text"),
+    kind = _bullet_kind(d["kind"])
+    return SetBullet(kind=kind, text=_str(d.get("text", ""), "text"),
                      bbox=_box(d.get("bbox", [0.0, 0.0, 0.0, 0.0]), "bbox"),
                      color=None if not d.get("color") else _color(d.get("color"), "color"),
                      label_size=_opt_num(label_size, "label.size"),
+                     label_icon=kind == "glyph" and bool(label) and _object(label, "label").get("family") == "icon",
                      ink=GlyphInk(box=_box(ink, "ink"), fill=_num(d.get("fill") or 0.0, "fill")) if ink else None,
                      shape=_bullet_face(d.get("shape")))
 

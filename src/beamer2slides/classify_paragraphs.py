@@ -2,6 +2,7 @@
 runs a paragraph is written as.
 """
 
+import math
 import re
 from dataclasses import replace
 
@@ -10,7 +11,7 @@ from .classify_model import (
     union_all,
 )
 from .classify_text import (
-    COMPOSED, FRACTION_SLASH, NBSP, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
+    COMPOSED, FRACTION_SLASH, LABEL_SEP_EM, NBSP, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
     family_of, first_word_width, formula_groups, gap_between, glued, is_code, is_mono, last_word_width,
     line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, on_columns, prose_spaces,
     raised_mark, reading_order, script_in_script, script_of, script_size, stretched, thick_spaces, thin_span,
@@ -31,20 +32,60 @@ BOX_PAD = " "   # a padded \colorbox's \fboxsep, highlighted (a no-break space:
 class ParagraphsMixin(LinesMixin):
     """Methods of classify.PageClassifier; the state they share is `classify_state.PageState`."""
 
-    def has_side_content(self, a: Line, b: Line) -> bool:
-        """Is there text or graphics right of these two lines (a column, a picture next to
-        text)? Content on the left (icons, the left column) does not narrow the text's column."""
+    def side_content(self, a: Line, b: Line) -> list[Rect]:
+        """The text and graphics right of these two lines (a column, a picture next to text).
+        Content on the left (icons, the left column) does not narrow the text's column."""
         y0, y1 = min(a.rect.y0, b.rect.y0), max(a.rect.y1, b.rect.y1)
         x1 = max(a.rect.x1, b.rect.x1)
         others = [l.rect for l in self.all_lines if l is not a and l is not b] + list(self.regions)
-        return any(r.y0 < y1 and y0 < r.y1 and r.x0 > x1 + 5 for r in others)
+        return [r for r in others if r.y0 < y1 and y0 < r.y1 and r.x0 > x1 + 5]
+
+    def has_side_content(self, a: Line, b: Line) -> bool:
+        """Is there text or graphics right of these two lines (`side_content`)?"""
+        return bool(self.side_content(a, b))
+
+    def column_mates(self, par: Paragraph, line: Line, side: list[Rect]) -> list[float]:
+        """The right ends of the other lines of the column `par` and `line` are in, beside the
+        content `side` that stands right of them (`side_content`): lines of their size (within a
+        point: a Japanese face is set 0.96 the size of the Latin one beside it) starting
+        at the column's left edge or up to 3 em further left (a heading, the item a sub-item
+        hangs from), within 8 em of `line`, beside that content (across its height, an em
+        either way) and ending left of it. Every one of them is TeX's measure or short of it,
+        so the widest says the column reaches at least that far.
+
+        The lines stacked above at the paragraph's own edge (`stacked_above`) said too little
+        where there were none: an item's two lines set in under a heading beside a picture
+        (`\\\\` after 'Network', real_slide-20250221 s7) measured the column by their own longer
+        line, so 'for' seemed not to fit after it and the lines were joined - Slides then pulled
+        'for' up. The page's other lines in that column run 60 pt further."""
+        right = min(r.x0 for r in side)
+        top, bottom = min(r.y0 for r in side) - par.size, max(r.y1 for r in side) + par.size
+        mine = {id(l) for l in par.lines} | {id(line)}
+        return [l.x1 for l in self.all_lines
+                if id(l) not in mine and l.reason is None and l.content and abs(l.size - par.size) <= 1.0
+                and par.x0 - 3 * par.size <= l.x0 <= par.x0 + 0.5 and l.x1 < right
+                and l.rect.y0 < bottom and top < l.rect.y1 and abs(l.baseline - line.baseline) <= 8 * par.size
+                and self.panel_of(l.rect) == self.panel_of(par.rect)]
 
     def free_width(self, par: Paragraph) -> float:
         """How wide a line of this centred (or right-aligned) paragraph could have been: the room
         between the text margins (or the panel it is on) and whatever stands beside it - taken
         evenly about its centre for centred text, up to its right edge for right-aligned text."""
         r = par.rect
-        lb, rb = self.text_margin, self.W - self.text_margin
+        # (the text margin bounds the paragraph only where the paragraph stays within it and other
+        # text keeps to it, or the paragraph runs from it to where it mirrors - a full measure: a
+        # margin only its own lines set, or one they cross, says nothing of its room. Two centred
+        # contact columns, the left one setting the page's leftmost edge, had a room as wide as
+        # their widest lines and their \\ breaks were read as wrapped, the left joined by spaces,
+        # real_dstalk-datascience-ta s17)
+        def at_margin(l: Line) -> bool:
+            return abs(l.rect.x0 - self.text_margin) <= 0.5
+        mine_ids = {id(l) for l in par.lines}
+        own = any(at_margin(l) for l in par.lines) and \
+            not any(id(l) not in mine_ids and l.reason is None and at_margin(l) for l in self.all_lines)
+        held = not own or r.x1 >= self.W - self.text_margin - par.size
+        within = self.text_margin - 0.5 <= r.x0 and r.x1 <= self.W - self.text_margin + 0.5
+        lb, rb = (self.text_margin, self.W - self.text_margin) if held and within else (0.0, self.W)
         panel = self.panel_of(r)
         if panel is not None:
             box = self.panels[panel].bbox
@@ -150,6 +191,26 @@ class ParagraphsMixin(LinesMixin):
         return bool(words) and (words[0] in ("—", "–", "---") or words[0][:2] in ("— ", "– ")) and \
             last.text.rstrip()[-1:] in ("”", "\"", "»", "’")
 
+    @staticmethod
+    def label_is_word(line: Line) -> bool:
+        """Is the label `line.tab` hangs from a word of running text? An item's label is set off
+        from its text by \\labelsep (0.5 em), wider than a word space; a word that only looks
+        like a label ('(a)' of 'culture days (a) and for the last...', wrapped to open a line)
+        is followed by the line's own word space - as wide as its other ones, stretched or not -
+        and was read as a label by its shape alone (`detect_bullet`): its paragraph got a tab
+        in the middle, three spaces wide in Slides (real_presentation-biore s57, s63)."""
+        tab = line.tab
+        if tab is None:
+            return False
+        before = [s for s in line.content if s.rect.x1 <= tab.rect.x0 + 0.5]
+        if not before:
+            return False
+        gap = tab.rect.x0 - max(s.rect.x1 for s in before)
+        words = sorted((s for s in line.content if s.rect.x0 >= tab.rect.x0 - 0.5 and s.text.strip()),
+                       key=lambda s: s.rect.x0)
+        spaces = [g for a, b in zip(words, words[1:]) if (g := gap_between(a, b)) > 0.1 * line.size]
+        return gap < LABEL_SEP_EM * line.size or bool(spaces) and gap <= max(spaces) + 0.05 * line.size
+
     def continues(self, par: Paragraph, line: Line) -> Align | None:
         """How `line` continues `par` ('left' | 'center' | 'right'), or None. `join_indent`
         says how far a first line was set in, when that is how it continues."""
@@ -176,6 +237,8 @@ class ParagraphsMixin(LinesMixin):
             # item's end), so the next line starts a paragraph of its own; and flushed pieces on
             # consecutive rows (an example's sources) are each their own paragraph.
             return None
+        if line.tab is not None and par.first.tab is None and not self.label_is_word(line):
+            return None  # (a line opening on a hanging label is an item of its own)
         left = abs(line.x0 - (par.x0 - par.indent)) <= 1.5
         right = abs(line.x1 - last.x1) <= 1.5
         if par.first.tab is not None:  # hanging label: wrapped lines start under the text
@@ -207,16 +270,24 @@ class ParagraphsMixin(LinesMixin):
             # Words after a number cell start under the line above (a verse's line number, an
             # example's number): stacked at one edge, centred only by the lengths of the lines.
             center = False
-        if left:
+        if left and not (center and par.align == "center"):
+            # (lines already centred on each other - the second not flush with the first - stay
+            # centred when the next one also starts where the first did: a coincidence of equal
+            # widths, an e-mail address 0.7 pt off the name two lines above it,
+            # real_dstalk-datascience-ta s17, turned the column left-aligned and cut it in two)
             # TeX would have pulled the next word up if it fitted: then this is a new paragraph.
             col_right = max([l.x1 for l in par.lines] + [line.x1])
             edges = [l.x1 for l in par.lines]
             # Lines already justified to one edge say where the column ends (a \parbox or
             # minipage narrower than the frame, with nothing beside it).
             justified = len(edges) >= 2 and max(edges) - min(edges) <= 1.5
+            side: list[Rect] = [] if justified else self.side_content(last, line)
+            # How far the column's other lines run: the paragraph's lines before `last`, and
+            # beside other content the lines stacked above and the column's (below).
+            known = [l.x1 for l in par.lines[:-1]]
             if justified:
                 pass
-            elif not self.has_side_content(last, line):
+            elif not side:
                 # Full-width text: beamer's margins are symmetric, so the text block ends
                 # where the left margin mirrors. Short paragraphs never reach col_right.
                 # Unless the lines stacked above at this left edge sat beside a picture or
@@ -230,12 +301,28 @@ class ParagraphsMixin(LinesMixin):
             else:
                 # Something stands to the right (a column, a picture, the navigation): the column
                 # is at least as wide as the lines stacked above at this edge - a footnote's first
-                # line over the next ones, a verse's first line over the next.
-                col_right = max([col_right] + [l.x1 for l in self.stacked_above(par, line)])
+                # line over the next ones, a verse's first line over the next - and as wide as
+                # the column's other lines beside that content (`column_mates`).
+                stack = [l.x1 for l in self.stacked_above(par, line)] + self.column_mates(par, line, side)
+                known += stack
+                col_right = max([col_right] + stack)
             # (a span's first word; where its spaces are thin, the whole span: "48 000 EUR")
             head = line.content[0]
             first_word = head.rect.w if thin_span(head, line, par.lines + [line]) else line_word_width(line, False)
-            if not right and last.x1 + 0.3 * par.size + first_word < col_right - 0.5:
+            # Chinese and Japanese join with no space between their characters: one more fitted
+            # where the line above ends ('…再び' / '外線の番号も…' broken by \\, slide-20250221 s24).
+            space = 0.0 if cjk(last.text[-1:]) and cjk(head.text.strip()[:1]) else 0.3 * par.size
+            reach = last.x1 + space + first_word
+            # Two lines ending together (`right`) may be a justified paragraph's, ended at a
+            # measure narrower than the page's - unless other lines of the column run further than
+            # the next word needs: then they are two short lines ending together by chance, each
+            # broken by hand ('d = 0.1 (b),' / 'd = 0.5 (c),' beside a figure, presentation-biore s63).
+            # Nor does a line of one word end at a measure: TeX stretches no space in it, so its end
+            # meeting the next line's is two words of one width ('5.' over '6.', an enumerate's
+            # empty items; three stacked '▶' of empty sub-items, real_c-error-handling s3, s27).
+            # (Chinese and Japanese lines have no spaces to stretch, and fill their measure.)
+            measure = right and (len(last.text.split()) > 1 or cjk(last.text.strip()[:1]))
+            if reach < col_right - 0.5 and (not measure or reach < max(known, default=-math.inf) - 0.5):
                 return None
             if not right and not par.bullet and par.first.tab is None and col_right - last.x1 > 1.5 and \
                     self.hand_broken(par, pitch, col_right):
@@ -356,6 +443,8 @@ class ParagraphsMixin(LinesMixin):
                 par, how = best
                 if self.join_indent:
                     par.indent = self.join_indent  # (continues: a \parindent)
+                if line.tab is not None and par.first.tab is None:
+                    line.tab = None  # (a word that looked like a label: `label_is_word`)
                 par.lines.append(line)
                 par.align = how
                 if line.reason == "math":

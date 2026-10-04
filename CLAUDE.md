@@ -99,7 +99,8 @@ decorations) is a picture, or baked into a per-slide background picture.
 Details, measurements and edge cases: docs/project-notes.md "What becomes native".
 - `text`: paragraphs, bullet lists (glyph, number, ball and vector bullets with their PDF colour and
   size, `emit.BULLET_SHAPES`, `emit.bullet_level`; glyph bullets sized and shaped by their PDF ink,
-  `render.glyph_ink` -> bullet `ink`/`fill`, `emit.ink_sized`, capped at the item's body size; a
+  `render.glyph_ink` -> bullet `ink`/`fill`, `emit.ink_sized`, capped at the item's body size, a
+  dingbat label always by its ink, `SetBullet.label_icon`; a
   ball keeps its label's parentheses unless they reach its rim, `BALL_RIM`; numbers after nested
   glyph items are literal, emit making one list per preset; a mark outlined in another colour is
   a picture),
@@ -122,7 +123,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   separate lines (`overprinted_rows`), and smaller words at the page foot well under or printed
   over a box join no box (`joins_box`, `printed_over`); a lone line starting where its neighbours
   (a bulleted one's: its siblings anywhere) start is left-aligned (`single_line_align`), a lone line flush with a right-aligned paragraph beside it right-aligned;
-  lines broken by hand never join (`hand_broken`); classify records where wrapped lines start
+  lines broken by hand never join (`hand_broken`; beside other content a column is measured by
+  its mates, `column_mates`; two lines ending together are a measure only with several words and
+  no longer known line; a lettered 'label' set off by a word space is a word, `label_is_word`;
+  the gutter veto looks only at its rows' block, `block_of`); classify records where wrapped lines start
   (`line_starts`: the whole first span, a space only where the page leaves one, a line opening on
   a hole at that hole) so emit measures a paragraph without TeX widths; CJK breaks anywhere and joins with no space (`classify.cjk`). Font names
   map through family tables (`fonts.font_info`: `SANS_FAMILIES`, `TEX_TT_RE`, `LIBERTINE_RE`;
@@ -140,7 +144,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   (`emit_widths.breaks_before`, `tools/probe_script_break.py`), so emit writes a U+2060 word
   joiner there to keep TeX's word whole (`emit_widths.joined_runs`; readers drop it:
   `merge.collapse_holes`, deck_ir, inverse); a short inline formula (≤ `FORMULA_GLUE_SHARE` of its line) keeps no-break
-  spaces (`formula_groups`); math letters are styled per piece (`classify.math_pieces`: italic
+  spaces (`formula_groups`; beamer's sans math, CMSSI/CMSSBX/CMSS8 with no math font, is a
+  formula by its scripts and their nuclei, `formula_spans`; a long one is glued between TeX's
+  breaks, `BREAKS_AFTER`); math letters are styled per piece (`classify.math_pieces`: italic
   per glyph, NFKC, script capitals as Unicode, written in STIX Two Math / Libertinus Math by
   `fonts.letter_face` and read back as their run, `deck_ir.capitals_as_their_runs`; a relation's
   no-break space in a Lato run is U+2008, `classify_text.thick_spaces`); OT1 accents compose (`compose_accents`), `\not`

@@ -553,6 +553,27 @@ class LinesMixin(GraphicsMixin):
         return len(edge) >= 2
 
     @staticmethod
+    def block_of(band: list[Span], a: Span, b: Span, size: float) -> list[Span]:
+        """The spans of `band` in the block of rows `a` and `b` stand in: rows following each
+        other with less than an em of empty height between them. A paragraph set apart below
+        (or above) by more is another block, whose words may run across a gap of this one: an
+        align*'s rows ('Q[i] = ... ∈ ℝ^{C×d}' and 'the query block of chunk i.', a column apart
+        like the row above them) were joined into one line by the 'We define K, V, O in a similar
+        way.' 2.7 em under them, and the description moved with the formula's narrower letters
+        (real_linear-attention-a s18)."""
+        lo, hi = min(a.rect.y0, b.rect.y0), max(a.rect.y1, b.rect.y1)
+        taken: set[int] = set()
+        grown = True
+        while grown:
+            grown = False
+            for s in band:
+                if id(s) not in taken and s.rect.y0 < hi + size and lo - size < s.rect.y1:
+                    lo, hi = min(lo, s.rect.y0), max(hi, s.rect.y1)
+                    taken.add(id(s))
+                    grown = True
+        return [s for s in band if id(s) in taken]
+
+    @staticmethod
     def gutter(spans: list[Span], a: Span, b: Span, size: float) -> bool:
         """The gap between two words on one baseline is the gutter between columns: no text
         just above or below crosses it, and other lines there have words on both sides.
@@ -572,7 +593,7 @@ class LinesMixin(GraphicsMixin):
         y0, y1 = min(a.rect.y0, b.rect.y0) - 4 * size, max(a.rect.y1, b.rect.y1) + 4 * size
         band = [s for s in spans if s is not a and s is not b and s.rect.y1 > y0 and s.rect.y0 < y1
                 and s.size <= 1.5 * size]  # (a frame title above spans all columns)
-        if any(s.rect.x0 < mid < s.rect.x1 for s in band):
+        if any(s.rect.x0 < mid < s.rect.x1 for s in LinesMixin.block_of(band, a, b, size)):
             return False
         if len(left.text.strip()) >= 6:
             rows_left = {round(s.baseline) for s in band if s.rect.x1 <= mid}

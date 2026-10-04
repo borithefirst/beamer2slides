@@ -190,6 +190,10 @@ class GraphicsMixin(TablesMixin):
                 words = words or struck
                 if not words:
                     continue
+                # (a radical's vinculum starts where its √ ends, over what is under the sign: the
+                # bar of '√1' on the line below underlined monodromy s21's 'e')
+                if any("√" in s.text and abs(s.rect.x1 - r.x0) <= 0.5 and s.rect.y0 <= r.cy <= s.rect.y1 for s in flat):
+                    continue
                 size = max(s.size for s in words)
                 gaps = [b.rect.x0 - a.rect.x1 for a, b in zip(words, words[1:])]
                 covered = sum(s.rect.w for s in words)
