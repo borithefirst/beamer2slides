@@ -20,7 +20,7 @@ import pypdfium2.raw as R
 
 from ..arrays import Pixels
 from .api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
-                  Drawing, EmbeddedImage, ImageInfo, Link, Mark, MarkParams, Matrix, Metadata, PageLink,
+                  Drawing, DrawingItem, EmbeddedImage, ImageInfo, Link, Mark, MarkParams, Matrix, Metadata, PageLink,
                   PageObject, PdfError, Point, Segment, UriLink, add_stroke, char_box, fill_drawing, font_metrics,
                   join_surrogates, mul, pixel_bounds, render_matrix, trace, transform_box)
 
@@ -104,11 +104,23 @@ def _bitmap_array(bitmap: BitmapHandle) -> Pixels | None:
     if fmt == R.FPDFBitmap_Gray:
         return np.repeat(rows[:, :w, None], 3, axis=2).copy()
     if fmt == R.FPDFBitmap_BGR:
-        return rows[:, :w * 3].reshape(h, w, 3)[..., ::-1].copy()
+        return _swapped(rows[:, :w * 3].reshape(h, w, 3), 3)
     if fmt in (R.FPDFBitmap_BGRA, R.FPDFBitmap_BGRx):
-        px = rows[:, :w * 4].reshape(h, w, 4)
-        return px[..., [2, 1, 0, 3]].copy() if fmt == R.FPDFBitmap_BGRA else px[..., 2::-1].copy()
+        return _swapped(rows[:, :w * 4].reshape(h, w, 4), 4 if fmt == R.FPDFBitmap_BGRA else 3)
     return None
+
+
+def _swapped(bgr: Pixels, channels: int) -> Pixels:
+    """PDFium's BGR(A/x) pixels as RGB (`channels` 3) or RGBA (4), a new array. Copied channel by
+    channel: one copy through a reversed or fancy-indexed last axis took three times as long,
+    longer than PDFium took to render the page (1.1 s of a 86-slide deck's render stage)."""
+    out = np.empty((*bgr.shape[:2], channels), np.uint8)
+    out[..., 0] = bgr[..., 2]
+    out[..., 1] = bgr[..., 1]
+    out[..., 2] = bgr[..., 0]
+    if channels == 4:
+        out[..., 3] = bgr[..., 3]
+    return out
 
 
 def _buffer(getter: Callable[..., int], *args: object) -> bytes:
@@ -210,6 +222,9 @@ class Page:
         self._fonts: list[FontHandle] = []   # font_id -> PDFium font handle
         self._font_info: dict[int, _FontInfo] = {}  # font address -> what chars reads of it
         self._textpage: pdfium.PdfTextPage | None = None
+        # a path's geometry, read once: switching objects off changes what is drawn, not where
+        self._segment_cache: dict[int, list[Segment]] = {}
+        self._traced: dict[tuple[int, bool], tuple[list[DrawingItem], Box] | None] = {}
 
     @property
     def rect(self) -> Box:
@@ -385,10 +400,9 @@ class Page:
             fillmode, stroke = ctypes.c_int(), ctypes.c_int()
             if not R.FPDFPath_GetDrawMode(handle, fillmode, stroke):
                 continue
-            segments = self._segments(po)
             if fillmode.value:
                 fill = _rgba(R.FPDFPageObj_GetFillColor, handle)
-                path = trace(segments, True)
+                path = self._trace(po, True)
                 if path:
                     items, rect = path
                     opacity = fill[3] / 255 if fill is not None else 1.0
@@ -403,7 +417,7 @@ class Page:
                 width = ctypes.c_float()
                 R.FPDFPageObj_GetStrokeWidth(handle, width)
                 a, b, c, d, _, _ = po.matrix
-                path = trace(segments, False)
+                path = self._trace(po, False)
                 if path:
                     items, rect = path
                     scale = math.sqrt(abs(a * d - b * c))
@@ -415,7 +429,21 @@ class Page:
                                dash_phase=phase * scale, obj=po.id)
         return out
 
+    def _trace(self, po: PageObject, filled: bool) -> tuple[list[DrawingItem], Box] | None:
+        """`trace` of the object's path, worked out once per way of painting it: each answer
+        gets a list of its own (the items are tuples), as a fresh trace would give."""
+        key = (po.id, filled)
+        if key not in self._traced:
+            self._traced[key] = trace(self._segments(po), filled)
+        path = self._traced[key]
+        return None if path is None else (list(path[0]), path[1])
+
     def _segments(self, po: PageObject) -> list[Segment]:
+        if po.id not in self._segment_cache:
+            self._segment_cache[po.id] = self._read_segments(po)
+        return self._segment_cache[po.id]
+
+    def _read_segments(self, po: PageObject) -> list[Segment]:
         handle = self._handles[po.id]
         a, b, c, d, e, f = po.matrix
         x, y = ctypes.c_float(), ctypes.c_float()
@@ -441,7 +469,7 @@ class Page:
     def _bounds_of(self, po: PageObject) -> Box:
         handle = self._handles[po.id]
         if po.type == OBJ_PATH:
-            path = trace(self._segments(po), True)
+            path = self._trace(po, True)
             width = ctypes.c_float()
             if path and R.FPDFPageObj_GetStrokeWidth(handle, width):
                 a, b, c, d, _, _ = po.matrix
@@ -619,9 +647,7 @@ class Page:
             buf = R.FPDFBitmap_GetBuffer(bitmap)
             data = np.ctypeslib.as_array(ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)), shape=(h * stride,))
             bgrx = data.reshape(h, stride)[:, :w * 4].reshape(h, w, 4)
-            if transparent:
-                return bgrx[..., [2, 1, 0, 3]].copy()
-            return bgrx[..., 2::-1].copy()
+            return _swapped(bgrx, 4 if transparent else 3)
         finally:
             R.FPDFBitmap_Destroy(bitmap)
 

@@ -632,7 +632,8 @@ class GraphicsMixin(TablesMixin):
         grown = True
         while grown:
             grown = False
-            for i, r in [(i, r) for i, r in self.graphic_drawings.items() if any(r is g for g in graphics)]:
+            listed = {id(g) for g in graphics}  # (by identity: equal boxes of two drawings are two graphics)
+            for i, r in [(i, r) for i, r in self.graphic_drawings.items() if id(r) in listed]:
                 edge = r.y0 <= 1 or r.y1 >= self.H - 1
                 if edge and r.h <= 0.1 * self.H and any(
                         abs(d.y0 - r.y0) <= 1 and abs(d.y1 - r.y1) <= 1 and (abs(d.x0 - r.x1) <= 1 or abs(r.x0 - d.x1) <= 1)

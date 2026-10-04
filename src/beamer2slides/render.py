@@ -13,7 +13,11 @@ within it.
 """
 
 import io
+import os
+from collections import deque
 from collections.abc import Callable, Collection, Iterable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -98,6 +102,43 @@ def save_png(img: Pixels, path: Path) -> None:
 
 def load_png(path: Path) -> RGB:
     return np.array(Image.open(path).convert("RGB"))
+
+
+# PNG encoding (zlib, outside the GIL) took a quarter of the render stage on the main thread: the
+# backgrounds and crops are written by threads of their own while the next page is worked on.
+# Nothing they do touches the PDF (PDFium stays on the main thread); the bytes are the same.
+PNG_WRITERS = max(0, min(4, (os.cpu_count() or 1) - 1))  # 0: written where they are made
+PNG_IN_FLIGHT = 8   # pictures waiting to be written at most (a page is 9 MB of pixels)
+
+
+class PngWriter:
+    """`save_png` (or another write, `submit`) on worker threads. A picture handed over is never
+    changed afterwards. `finish` waits for every write and raises the first that failed; `close`
+    stops the threads."""
+
+    def __init__(self, workers: int) -> None:
+        self.pool = ThreadPoolExecutor(workers, thread_name_prefix="b2s-png") if workers else None
+        self.pending: deque[Future[None]] = deque()
+
+    def save(self, img: Pixels, path: Path) -> None:
+        # (save_png as the module holds it now: checks.convert_locally keeps pictures in memory)
+        self.submit(lambda: save_png(img, path))
+
+    def submit(self, job: Callable[[], None]) -> None:
+        if self.pool is None:
+            job()
+            return
+        while len(self.pending) >= PNG_IN_FLIGHT:
+            self.pending.popleft().result()
+        self.pending.append(self.pool.submit(job))
+
+    def finish(self) -> None:
+        while self.pending:
+            self.pending.popleft().result()
+
+    def close(self) -> None:
+        if self.pool is not None:
+            self.pool.shutdown(wait=True, cancel_futures=True)
 
 
 class Eraser:
@@ -281,9 +322,27 @@ IMAGE_CHECK_PX_PER_PT = 2.0  # the file is verified against the page at this sca
 IMAGE_CHECK_DIFF = 12      # levels of mean difference allowed there
 
 
+@dataclass(frozen=True, kw_only=True)
+class ImageChoice:
+    """`image_file`'s answer, with the file as it decodes (`image`, loaded once: `_shows` lays
+    it on the page without decoding the file a second time)."""
+    data: bytes
+    ext: str
+    px: tuple[int, int]
+    route: str
+    image: Image.Image
+
+
 def image_file(page: Page, obj: int) -> tuple[bytes, str, tuple[int, int], str] | None:
     """The file to write for an image object drawn on its own, as (bytes, extension, pixel size,
-    route), or None where only a render of the page will do.
+    route), or None where only a render of the page will do (`image_choice`)."""
+    chosen = image_choice(page, obj)
+    return None if chosen is None else (chosen.data, chosen.ext, chosen.px, chosen.route)
+
+
+def image_choice(page: Page, obj: int) -> ImageChoice | None:
+    """The file to write for an image object drawn on its own, or None where only a render of
+    the page will do. Its route:
 
     - `raw`: the embedded stream is a plain JPEG (DCTDecode) that Pillow decodes exactly like
       PDFium, so it is the author's file byte for byte;
@@ -305,20 +364,30 @@ def image_file(page: Page, obj: int) -> tuple[bytes, str, tuple[int, int], str] 
     if im.jpeg and im.colorspace in ("DeviceRGB", "DeviceGray", "ICCBased"):
         # The very bytes of the author's file, if they decode to what PDFium draws (a decode
         # array, a CMYK or Lab JPEG or an Adobe inversion would not).
-        decoded = _pillow_rgb(im.jpeg)
-        if decoded is not None and decoded.shape[:2] == pixels.shape[:2] and \
-                np.abs(decoded.astype(int) - pixels[..., :3].astype(int)).mean() <= IMAGE_PIXEL_DIFF:
-            return im.jpeg, "jpg", im.px, "raw"
+        opened = _pillow_rgb(im.jpeg)
+        # (the mean difference in bytes: a photo widened to int64 twice took 0.4 s)
+        if opened is not None and opened[1].shape[:2] == pixels.shape[:2] and \
+                _differences(opened[1], pixels[..., :3]).mean() <= IMAGE_PIXEL_DIFF:
+            return ImageChoice(data=im.jpeg, ext="jpg", px=im.px, route="raw", image=opened[0])
     if max(im.px) > IMAGE_MAX_PX:
         return None
     buf = io.BytesIO()
-    Image.fromarray(pixels[..., :3]).save(buf, format="PNG")
-    return buf.getvalue(), "png", im.px, "decoded"
+    image = Image.fromarray(pixels[..., :3])
+    image.save(buf, format="PNG")
+    # (the PNG decodes to these very pixels)
+    return ImageChoice(data=buf.getvalue(), ext="png", px=im.px, route="decoded", image=image)
 
 
-def _pillow_rgb(data: bytes) -> RGB | None:
+def _differences(a: Pixels, b: Pixels) -> Pixels:
+    """|a - b| per byte of two pictures of one shape, without widening them."""
+    return np.maximum(a, b) - np.minimum(a, b)
+
+
+def _pillow_rgb(data: bytes) -> tuple[Image.Image, RGB] | None:
+    """The file as Pillow decodes it (loaded), and its RGB pixels; None where it does not."""
     try:
-        return np.array(Image.open(io.BytesIO(data)).convert("RGB"))
+        image = Image.open(io.BytesIO(data))
+        return image, np.array(image.convert("RGB"))
     except Exception:
         return None
 
@@ -342,19 +411,29 @@ def _looks_like(data: bytes, page: Page, obj: int, bbox: Sequence[float]) -> boo
     """Does the file, laid on the page without the image, show what the page shows there? The
     last check on PDFium's decode: a palette, colour space or mask read differently would come
     out as another picture."""
+    return _shows(Image.open(io.BytesIO(data)), page, obj, bbox)
+
+
+def _shows(image: Image.Image, page: Page, obj: int, bbox: Sequence[float]) -> bool:
+    """`_looks_like` for the file as it decodes."""
     want = page.render(IMAGE_CHECK_PX_PER_PT, _box(bbox), transparent=False).astype(int)
     h, w = want.shape[:2]
     if w < 2 or h < 2:
         return True
-    page.set_active([obj], False)
-    try:
-        under = page.render(IMAGE_CHECK_PX_PER_PT, _box(bbox), transparent=False).astype(float)
-    finally:
-        page.set_active([obj], True)
-    img = Image.open(io.BytesIO(data)).convert("RGBA").resize((w, h), Image.Resampling.BILINEAR)
+    img = image.convert("RGBA").resize((w, h), Image.Resampling.BILINEAR)
     px = np.array(img).astype(float)
     alpha = px[..., 3:] / 255
-    got = px[..., :3] * alpha + under * (1 - alpha)
+    if (alpha == 1).all():
+        # Opaque (a JPEG, a PNG of RGB pixels: every file image_file writes) shows nothing of the
+        # page under it, which is not rendered: px * 1 + under * 0 is px to the last bit.
+        got = px[..., :3]
+    else:
+        page.set_active([obj], False)
+        try:
+            under = page.render(IMAGE_CHECK_PX_PER_PT, _box(bbox), transparent=False).astype(float)
+        finally:
+            page.set_active([obj], True)
+        got = px[..., :3] * alpha + under * (1 - alpha)
     return bool(np.abs(got - want).mean() <= IMAGE_CHECK_DIFF)
 
 
@@ -365,16 +444,13 @@ def embedded_picture(eraser: Eraser, fig: JsonObject, path: Path) -> Path | None
     obj = sole_image(eraser.page, bbox)
     if obj is None:
         return None
-    chosen = image_file(eraser.page, obj)
-    if chosen is None:
+    chosen = image_choice(eraser.page, obj)
+    if chosen is None or not _shows(chosen.image, eraser.page, obj, bbox):
         return None
-    data, ext, px, route = chosen
-    if not _looks_like(data, eraser.page, obj, bbox):
-        return None
-    path = path.with_suffix("." + ext)
-    save_bytes(data, path)
-    fig["px"] = [px[0], px[1]]
-    fig["picture"] = route
+    path = path.with_suffix("." + chosen.ext)
+    save_bytes(chosen.data, path)
+    fig["px"] = [chosen.px[0], chosen.px[1]]
+    fig["picture"] = chosen.route
     return path
 
 
@@ -384,9 +460,9 @@ def save_bytes(data: bytes, path: Path) -> None:
 
 
 def crop_figure(eraser: Eraser, bbox: Sequence[float], raw_images: list[RawImage], path: Path,
-                transparent: bool, hide: Sequence[int]) -> tuple[int, int]:
+                transparent: bool, hide: Sequence[int], writer: PngWriter) -> tuple[int, int]:
     """The picture of a figure region on the page as erased so far, at a resolution for its
-    size; its (width, height) in pixels."""
+    size, handed to `writer`; its (width, height) in pixels."""
     x0, y0, x1, y1 = bbox
     width, height = x1 - x0, y1 - y0
     zoom = FIGURE_PX_PER_PT if max(width, height) > 60 else SMALL_FIGURE_PX_PER_PT
@@ -399,7 +475,7 @@ def crop_figure(eraser: Eraser, bbox: Sequence[float], raw_images: list[RawImage
     img = eraser.render(zoom, _box(bbox), False, hide)
     if transparent:
         img = clear_ground(eraser, bbox, zoom, img, hide)
-    save_png(img, path)
+    writer.save(img, path)
     return img.shape[1], img.shape[0]
 
 
@@ -486,11 +562,12 @@ def unblend_rim(rgba: RGBA, clear: Mask, ground: Floats, width: int) -> RGBA:
     return out
 
 
-def crop_overlay(eraser: Eraser, fig: JsonObject, labels: list[RawSpan], path: Path) -> tuple[int, int]:
+def crop_overlay(eraser: Eraser, fig: JsonObject, labels: list[RawSpan], path: Path,
+                 writer: PngWriter) -> tuple[int, int]:
     """A graphic drawn over text (classify.overlay): only its own drawings and labels, on a
     transparent ground, so neither the page nor text left in the background under it comes
-    along. They leave the background right away: no other crop shows them either. Its (width,
-    height) in pixels."""
+    along. They leave the background right away: no other crop shows them either. Handed to
+    `writer`; its (width, height) in pixels."""
     page = eraser.page
     objects = [d["object"] for d in page.drawings()]  # in the order extract numbered them
     paths = {objects[int(i.rsplit("d", 1)[1])] for i in _ids(fig, "drawings")}
@@ -513,7 +590,7 @@ def crop_overlay(eraser: Eraser, fig: JsonObject, labels: list[RawSpan], path: P
     for key in paths:
         eraser._remove(key)
     eraser.remove_chars(hit)
-    save_png(img, path)
+    writer.save(img, path)
     return img.shape[1], img.shape[0]
 
 
@@ -582,14 +659,16 @@ def _fill_fraction(page: Page, rect: Box, fill: str, avoid: list[Box]) -> float:
     target = np.array([int(fill[i:i + 2], 16) for i in (1, 3, 5)])
     ys = np.linspace(h * 0.2, h * 0.8 - 1, 12).astype(int)
     xs = np.linspace(w * 0.02, w * 0.98 - 1, 40).astype(int)
-    hits = total = 0
-    for y in ys:
-        for x in xs:
-            px, py = rect[0] + x / zoom, rect[1] + y / zoom
-            if any(a[0] <= px <= a[2] and a[1] <= py <= a[3] for a in avoid):
-                continue
-            total += 1
-            hits += int(np.abs(img[y, x] - target).max() <= 12)
+    # The 12 x 40 samples at once (one by one against every word's box: 1.4 s on a 57-slide deck)
+    px, py = rect[0] + xs / zoom, rect[1] + ys / zoom
+    counted = np.ones((len(ys), len(xs)), bool)
+    if avoid:
+        a = np.array(avoid, dtype=float).reshape(-1, 4)
+        rows = (a[:, 1, None] <= py) & (py <= a[:, 3, None])  # (box, sample row)
+        cols = (a[:, 0, None] <= px) & (px <= a[:, 2, None])  # (box, sample column)
+        counted = ~(rows[:, :, None] & cols[:, None, :]).any(axis=0)
+    total = int(np.count_nonzero(counted))
+    hits = int(np.count_nonzero(counted & (np.abs(img[np.ix_(ys, xs)] - target).max(axis=2) <= 12)))
     return hits / total if total else 0.0
 
 
@@ -667,7 +746,20 @@ def render_backgrounds(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path,
                        kept_shapes: frozenset[str]) -> list[Path]:
     """Each slide's background picture and its figures' crops, written under `out`; `deck`
     (deck.json) is changed in place into rendered.json. `kept_shapes`: marks
-    `marked.pictured_shapes` leaves shapes (sync over an old adopt base), else none."""
+    `marked.pictured_shapes` leaves shapes (sync over an old adopt base), else none. Every file
+    is written when it returns."""
+    writer = PngWriter(PNG_WRITERS)
+    try:
+        paths = _render_slides(pdf, raw, deck, out, kept_shapes, writer)
+        writer.finish()
+    finally:
+        writer.close()
+    return paths
+
+
+def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_shapes: frozenset[str],
+                   writer: PngWriter) -> list[Path]:
+    """render_backgrounds' work, its pictures handed to `writer`."""
     from .marked import pictured_shapes
 
     doc = Document(pdf)
@@ -724,7 +816,7 @@ def render_backgrounds(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path,
             fid = as_str(fig["id"], "id")
             path = out / "figures" / f"{fid}.png"
             if fig.get("overlay"):
-                w, h = crop_overlay(eraser, fig, [spans[sid] for sid in _ids(fig, "spans")], path)
+                w, h = crop_overlay(eraser, fig, [spans[sid] for sid in _ids(fig, "spans")], path, writer)
                 fig["px"] = [w, h]
             else:
                 # A region that is one `\includegraphics` keeps the embedded file itself.
@@ -738,7 +830,7 @@ def render_backgrounds(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path,
                                             [spans[sid] for sid in _ids(fig, "spans") if sid in spans])
                         fig["bbox"] = _json_numbers(grown)
                     w, h = crop_figure(eraser, _numbers(fig["bbox"], "bbox"), raw_pages[index]["images"], path,
-                                       bool(fig.get("anchor")), bullet_objects + others.get(fid, []))
+                                       bool(fig.get("anchor")), bullet_objects + others.get(fid, []), writer)
                     fig["px"] = [w, h]
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
         # Native tables leave the background the same way pictures do (text and rules), without a crop.
@@ -803,7 +895,7 @@ def render_backgrounds(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path,
         if bullets:
             patch_rects(img, bullets, px_per_pt)
         paint_out_leftovers(img, slide, px_per_pt)
-        save_png(img, path)
+        writer.save(img, path)
         paths.append(path)
         slide["background"] = str(path.relative_to(out)).replace("\\", "/")
         slide["background_color"] = uniform_color(img, 3)
@@ -1080,17 +1172,23 @@ def ring_background(img: Pixels, a0: int, b0: int, a1: int, b1: int, r: int) -> 
     h, w = b1 - b0, a1 - a0
     if a0 < 0 or b0 < 0 or a1 > img.shape[1] or b1 > img.shape[0] or h <= 0 or w <= 0:
         return None
-    px = img[..., :3].astype(float)
+
+    def px(ys: slice, xs: slice) -> Floats:
+        # (only the strips read are made floats: the whole page took 10 ms a bullet)
+        return img[ys, xs, :3].astype(float)
+
     t = (np.arange(h) + 0.5) / h
     s = (np.arange(w) + 0.5) / w
     guesses: list[Floats] = []
     errors: list[float] = []
     if b0 >= r and b1 + r <= img.shape[0]:
-        top, bottom = np.median(px[b0 - r:b0, a0:a1], axis=0), np.median(px[b1:b1 + r, a0:a1], axis=0)
+        top = np.median(px(slice(b0 - r, b0), slice(a0, a1)), axis=0)
+        bottom = np.median(px(slice(b1, b1 + r), slice(a0, a1)), axis=0)
         guesses.append(top[None] * (1 - t)[:, None, None] + bottom[None] * t[:, None, None])
         errors.append(np.abs(top - bottom).sum(axis=1).mean())
     if a0 >= r and a1 + r <= img.shape[1]:
-        left, right = np.median(px[b0:b1, a0 - r:a0], axis=1), np.median(px[b0:b1, a1:a1 + r], axis=1)
+        left = np.median(px(slice(b0, b1), slice(a0 - r, a0)), axis=1)
+        right = np.median(px(slice(b0, b1), slice(a1, a1 + r)), axis=1)
         guesses.append(left[:, None] * (1 - s)[None, :, None] + right[:, None] * s[None, :, None])
         errors.append(np.abs(left - right).sum(axis=1).mean())
     if not guesses:

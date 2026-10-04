@@ -380,9 +380,13 @@ class ReasonsMixin(FiguresMixin):
         """Fraction bars and radical overbars at a line - not the overbar of a radical sign set in
         another line of words (a √ of the line below reaches up into this one; a sign alone on a
         line of its own is this line's, see formula holes)."""
-        signs = [s for l in self.all_lines if l is not line and sum(o.size >= 0.8 * line.size for o in l.spans) >= 2
+        bars = [b for b in self.bars if b.expand(1).intersects(line.rect)]
+        if not bars:  # (the signs are looked for over every line: only where a bar asks)
+            return []
+        size = line.size
+        signs = [s for l in self.all_lines if l is not line and sum(o.size >= 0.8 * size for o in l.spans) >= 2
                  for s in l.spans if extension_font(s.font) or "√" in s.text]
-        return [b for b in self.bars if b.expand(1).intersects(line.rect) and not any(
+        return [b for b in bars if not any(
             abs(s.rect.x1 - b.x0) <= 1 and s.rect.y0 - 1 <= b.y0 <= s.rect.y1 for s in signs)]
 
     def formula_holes(self, line: Line, fractions: list[Fraction]) -> list[list[Span]]:

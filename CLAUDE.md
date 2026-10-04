@@ -677,6 +677,9 @@ markers.
 - A layout batch and a slide batch in flight together can undo each other's placeholder boxes
   (last commit wins, silently): the layout pass is joined before content batches.
 - `render_text`'s `x_subpixel` is C's `%` (negative for glyphs left of their origin).
+- PNGs (backgrounds, crops, debug) are encoded on `render.PngWriter` threads (`PNG_WRITERS`, 0 =
+  in place; same bytes, PDFium on the main thread): a picture handed to it is never changed after,
+  and a writer looks up `render.save_png` when it runs. `cluster_rects` sweeps by left edge.
 - `fidelity` reuses saved thumbnails unless the deck was emitted again (or `--refresh`).
 - **Drive's .pptx export embeds the deck's fonts**: a deck with a Noto Sans SC run took 115 s (TC
   77 s, 6.7 MB; JP/KR ~45 s; Serif CJK faces are not embedded), past the library's 60 s. Every

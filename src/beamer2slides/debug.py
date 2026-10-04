@@ -1,5 +1,6 @@
 """Draw classification decisions on top of the PDF pages, for eyeballing."""
 
+import functools
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from . import ir
 from .pdf import Document
+from .render import PNG_WRITERS, PngWriter
 
 Rgb = tuple[float, float, float]
 Dashes = tuple[float, float]
@@ -118,6 +120,16 @@ def _draw_element(page: Canvas, el: ir.Element) -> None:
 def render_debug(pdf: Path, deck: ir.Deck, out_dir: Path, zoom: float) -> list[Path]:
     """One picture per slide under `out_dir`: the page at `zoom` pixels per point with what
     classify decided drawn over it."""
+    writer = PngWriter(PNG_WRITERS)  # (the pictures are written while the next page is drawn)
+    try:
+        paths = _render_debug(pdf, deck, out_dir, zoom, writer)
+        writer.finish()
+    finally:
+        writer.close()
+    return paths
+
+
+def _render_debug(pdf: Path, deck: ir.Deck, out_dir: Path, zoom: float, writer: PngWriter) -> list[Path]:
     doc = Document(pdf)
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
@@ -134,7 +146,7 @@ def render_debug(pdf: Path, deck: ir.Deck, out_dir: Path, zoom: float) -> list[P
         for el in slide["elements"]:
             _draw_element(page, el)
         path = out_dir / f"slide-{slide['page'] + 1:03}.png"
-        page.save(path)
+        writer.submit(functools.partial(page.save, path))
         paths.append(path)
     doc.close()
     return paths

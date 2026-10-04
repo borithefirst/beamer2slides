@@ -3,7 +3,7 @@
 import functools
 import math
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal, TypedDict, Union
 
@@ -97,14 +97,37 @@ def cluster_rects(rects: list[Rect], gap: float) -> list[Rect]:
             i = parent[i]
         return i
 
-    for i in range(len(rects)):
-        for j in range(i + 1, len(rects)):
-            if rects[i].expand(gap).intersects(rects[j]):
-                parent[find(i)] = find(j)
+    for i, j in _pairs_within(rects, gap):
+        parent[find(i)] = find(j)
     groups: dict[int, list[Rect]] = {}
     for i, r in enumerate(rects):
         groups.setdefault(find(i), []).append(r)
     return [union_all(g) for g in groups.values()]
+
+
+SWEEP_SLACK = 1e-3  # pt past a right edge that a left edge is still compared at (float rounding)
+
+
+def _pairs_within(rects: list[Rect], gap: float) -> Iterator[tuple[int, int]]:
+    """The pairs (i < j) of rectangles where the i-th grown by `gap` meets the j-th, as
+    cluster_rects asks it. Met in order of their left edges: a rectangle starting further right
+    than another's right edge plus the gap meets neither it nor any after it (a plot of thousands
+    of marks took 10 s a page pair by pair). Each pair that can meet is asked exactly as before,
+    so the groups are the same; boxes off the number line are asked pair by pair."""
+    grown = [r.expand(gap) for r in rects]
+    if not all(math.isfinite(v) for r in rects for v in (r.x0, r.x1)):
+        yield from ((i, j) for i in range(len(rects)) for j in range(i + 1, len(rects)) if grown[i].intersects(rects[j]))
+        return
+    order = sorted(range(len(rects)), key=lambda k: rects[k].x0)
+    for a, i in enumerate(order):
+        reach = grown[i].x1 + SWEEP_SLACK
+        for b in range(a + 1, len(order)):
+            j = order[b]
+            if rects[j].x0 > reach:
+                break
+            lo, hi = (i, j) if i < j else (j, i)
+            if grown[lo].intersects(rects[hi]):
+                yield lo, hi
 
 
 @dataclass(eq=False, kw_only=True)

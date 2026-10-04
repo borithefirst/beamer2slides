@@ -4764,6 +4764,28 @@ went 55-66 s -> 39.8 s:
 What is left, by size: the .pptx import (8 s, mostly the upload), the content batches (about 8 s),
 classify and render (about 5 s each), the base upload (2.7 s).
 
+2026-10-04, track E, on five real decks with interleaved best-of-3 runs: the local half went from
+7.4-39.6 s to 4.6-16.8 s (defense 39.6 -> 16.8, zds 24.8 -> 16.3, biore 13.9 -> 10.3), output
+byte-identical (deck.json, rendered.json, `emit.plan_offline`, every PNG, upload.pptx but for its
+timestamps).
+- `cluster_rects` tested every pair (29M `Rect.expand` calls on defense: 13 s of classify). It now
+  sweeps by left edge (`classify_model._pairs_within`, `SWEEP_SLACK`), asking each pair that can
+  meet the same predicate; boxes with infinite edges go pair by pair.
+- PNG encoding (zlib frees the GIL) was a quarter of render and half of debug: `render.PngWriter`
+  threads write them (`PNG_WRITERS`, 0 = in place; `PNG_IN_FLIGHT` bounds the memory), PDFium
+  staying on the main thread; a writer looks up `render.save_png` when it runs
+  (`checks.convert_locally` patches it).
+- `ring_background` made the whole page float per bullet (2.9 s on defense); the channel swap was
+  a reversed-stride copy (`pdfium_backend._swapped`, 1.3 s on biore); `_fill_fraction` tested 480
+  samples x every word box in Python; a Page reads a path's segments and trace once
+  (`_segment_cache`, `_traced`; each answer its own list); `_shows` skips its second render for
+  an opaque image and reuses the decoded file (`render.image_choice`); `line_bars` finds bars
+  first.
+- Still open, by size (zds profile): `notes.prepare` reads every page again in a Document of its
+  own (7.3 s of extract's 14.6 s profiled); `Line.main` is recomputed by every `line.size` and
+  `line.baseline` (393k calls, 6.9 s profiled); emit's DeckPlan rehearsal plans slide parts that
+  are planned again (1.5-1.8 s a deck); `plan_theme_of` re-reads the background files.
+
 ## Triangle bullets through the .pptx (probe, 2026-10-03)
 No Slides preset has a filled ▶, so beamer's default triangle became ➢ (ARROW3D): the most frequent
 finding of the real-deck campaign (180 of about 550, 11 of 27 decks). A .pptx `a:buChar` ▶ (▸ at
