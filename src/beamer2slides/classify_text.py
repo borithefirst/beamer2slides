@@ -5,6 +5,7 @@ import statistics
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Literal, Protocol, TypedDict
 
 from . import bidi
@@ -469,32 +470,112 @@ FORMULA_GLUE_SHARE = 0.5
 NBSP = " "
 
 
+# A letter of a formula set in a text face (beamer's sans math: CMSSI letters, \mathbf's CMSSBX
+# vectors) is a short word touching a script: its nucleus (W_{[t]}, \mathbf{k}_t) or the letter
+# after a script's end (T_{[t]}K). No longer than this many letters, no closer than a word space.
+NUCLEUS_LETTERS = 3
+NUCLEUS_GAP_EM = 0.12
+
+
+@dataclass(frozen=True, kw_only=True)
+class FormulaSpan:
+    """A content span of a line as `formula_groups` reads it."""
+    span: Span
+    formulaic: bool  # a formula's span
+    anchor: bool     # says a formula is one: set in a math font, or a script
+    script: bool     # raised or lowered: a script, or a fraction's part
+
+
+def formula_spans(line: "Line") -> list[FormulaSpan]:
+    """The line's content spans in reading order, read for formulas. A formula's span is set in a
+    math font or is a script (a smaller span raised or lowered, `script_of`, or a fraction's part) -
+    both anchors -, holds no letter (CMR's '=', '(', digits), or is a nucleus: a short word touching
+    a script on either side (`NUCLEUS_LETTERS`, `NUCLEUS_GAP_EM`). Beamer sets math in its sans text
+    faces (CMSSI8's subscript t, CMSSBX10's bold W, CMSS8's brackets), none of them a math font:
+    such a formula was no formula, its relations kept breakable word spaces (0.19 em in Lato
+    against TeX's 0.278: 'W_[t] = T_[t]K_[t]', real_linear-attention-a s46; 'β_t = 1', s30)."""
+    spans: list[Span] = []
+    scripts: set[int] = set()
+    for s, forced in reading_order(line):
+        if isinstance(s, Span) and s.text.strip() and s.info.family != "icon":
+            spans.append(s)
+            if forced is not None or script_of(s, line) is not None:
+                scripts.add(id(s))
+
+    def nucleus(k: int) -> bool:
+        word = spans[k].text.strip()
+        if any(c.isspace() for c in word) or sum(c.isalpha() for c in word) > NUCLEUS_LETTERS:
+            return False
+        near = [spans[j] for j in (k - 1, k + 1) if 0 <= j < len(spans)]
+        return any(id(o) in scripts and gap_between(o, spans[k]) <= NUCLEUS_GAP_EM * line.size for o in near)
+    held = {id(s) for h in line.holes for s in h}
+    out: list[FormulaSpan] = []
+    for k, s in enumerate(spans):
+        anchor = s.info.family == "math" or id(s) in scripts
+        formulaic = id(s) not in held and (anchor or not any(c.isalpha() for c in s.text) or nucleus(k))
+        out.append(FormulaSpan(span=s, formulaic=formulaic, anchor=anchor, script=id(s) in scripts))
+    return out
+
+
+# Where TeX may break an inline formula: after a relation or a binary operator at its own level.
+BREAKS_AFTER = frozenset("=<>≤≥≠≈≡∼≃≅∝∈∉∋⊂⊃⊆⊇⊊⊋≺≻≪≫⊢⊨→←↔⇒⇐⇔↦⟶⟵⟷⟹⟸⟺⟼↪↩+−×·±∓∪∩∧∨⊕⊗⊙∘")
+
+
 def formula_groups(line: "Line", measure: float) -> dict[int, int]:
     """The line's short inline formulas, as {id(span): formula}: runs of neighbouring spans in
-    reading order that are math (or hold no letter: CMR's '=', '(', digits), at least one of them
-    math, less than a \\quad apart, none in a hole, the whole no wider than FORMULA_GLUE_SHARE of
-    `measure`. The spaces between and inside their spans are written as no-break spaces
-    (PageClassifier.runs)."""
-    held = {id(s) for h in line.holes for s in h}
-    groups: list[list[Span]] = []
-    cur: list[Span] = []
-    for s, _ in reading_order(line):
-        if not isinstance(s, Span) or not s.text.strip() or s.info.family == "icon":
-            continue
-        formulaic = id(s) not in held and (s.info.family == "math" or not any(c.isalpha() for c in s.text))
-        if formulaic and cur and s.rect.x0 - cur[-1].rect.x1 < 0.9 * line.size:
-            cur.append(s)
+    reading order that are a formula's (`formula_spans`), at least one of them an anchor, less than
+    a \\quad apart, none in a hole, the whole no wider than FORMULA_GLUE_SHARE of `measure`. The
+    spaces between and inside their spans are written as no-break spaces (PageClassifier.runs),
+    and those beside a relation as thick spaces (`thick_spaces`). A longer formula is glued between
+    the places TeX may break it (`BREAKS_AFTER`, not inside a script), each piece no wider than
+    that share: Slides may break it where TeX could, and its relations keep their thick spaces
+    before them ('S_t = S_{t-1} − β_t(...)', real_linear-attention-a s35)."""
+    groups: list[list[FormulaSpan]] = []
+    cur: list[FormulaSpan] = []
+    for f in formula_spans(line):
+        if f.formulaic and cur and f.span.rect.x0 - cur[-1].span.rect.x1 < 0.9 * line.size:
+            cur.append(f)
             continue
         if cur:
             groups.append(cur)
-        cur = [s] if formulaic else []
+        cur = [f] if f.formulaic else []
     if cur:
         groups.append(cur)
+
+    def width(g: list[FormulaSpan]) -> float:
+        return max(f.span.rect.x1 for f in g) - min(f.span.rect.x0 for f in g)
+
+    def short(g: list[FormulaSpan]) -> bool:
+        return bool(g) and width(g) <= FORMULA_GLUE_SHARE * measure
+    pieces: list[list[FormulaSpan]] = []
+    for g in groups:
+        if not any(f.anchor for f in g):
+            continue
+        if short(g):
+            pieces.append(g)
+            continue
+        cut: list[list[FormulaSpan]] = [[]]
+        for f in g:
+            cut[-1].append(f)
+            if not f.script and f.span.text.rstrip()[-1:] in BREAKS_AFTER:
+                cut.append([])
+        for piece in cut:
+            if short(piece):
+                pieces.append(piece)
+                continue
+            # A piece TeX could not break that is still too long ('a_1, a_2, ..., a_n' across its
+            # line): only its runs of math-font and letterless spans hold together.
+            runs: list[list[FormulaSpan]] = [[]]
+            for f in piece:
+                if f.formulaic and (f.span.info.family == "math" or not any(c.isalpha() for c in f.span.text)):
+                    runs[-1].append(f)
+                elif runs[-1]:
+                    runs.append([])
+            pieces += [r for r in runs if any(f.span.info.family == "math" for f in r)]
     out = {}
-    for i, g in enumerate(groups):
-        if any(s.info.family == "math" for s in g) and \
-                max(s.rect.x1 for s in g) - min(s.rect.x0 for s in g) <= FORMULA_GLUE_SHARE * measure:
-            out.update((id(s), i) for s in g)
+    for i, p in enumerate(pieces):
+        if short(p):
+            out.update((id(f.span), i) for f in p)
     return out
 
 

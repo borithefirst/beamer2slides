@@ -122,14 +122,15 @@ def test_spaces_inside_a_short_formula_are_no_break_spaces():
 
 
 def test_a_formula_as_wide_as_half_the_line_keeps_its_spaces():
-    """A long formula keeps breakable spaces, or Slides would cut it inside a word."""
+    """A long formula keeps breakable spaces, or Slides would cut it inside a word: TeX's own,
+    after its relations and binary operators, never before one (`classify_text.BREAKS_AFTER`)."""
     spans = formula_line(x=30.0)[:1]
     x = 133.0
     for t, font in (("W", MI), ("=", RM), ("C", MI), ("−", SY), ("λ", MI)):
         spans.append(span(t, x, 100.0, 11.0, w=30.0, font=font))
         x += 33.0
     got = [text(p) for p in paragraphs(spans)]
-    assert len(got) == 1 and " " not in got[0], got
+    assert len(got) == 1 and got[0].endswith(" W\xa0= C\xa0− λ"), got
 
 
 def test_text_italic_letters_inside_a_formula_are_in_its_hole():
