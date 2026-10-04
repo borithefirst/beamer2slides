@@ -5333,3 +5333,13 @@ class on a fresh conversion before working on it.
   Lato (as near or nearer). Offline over 43 decks, 8 changed, only on elements gaining a face.
   Open: `classify_text.unmeasured_symbols` and `emit_widths.guessed_chars` still treat these
   operators as unmeasured; a bold run asks weight 700 of faces with no bold cut, as capitals do.
+  Live: linear-attention s38's hole 0.52 pt from its PDF gap (the re-predicted pin holds); demo
+  p3's hole moves 16.7 slide pt with Lato's line and sits 0.34 pt from its words, so
+  test_emit_requests' MAX_SHIFT is 18.
+- **Open, from the live check of U/Y**: decision-tree's graphicx draft placeholders ('icl.pdf',
+  'collage' in CMTT8 framed boxes in the footline, repeated on every frame) became layout text
+  with Track Q (5e36355: a figure line of only furniture is theme). The width is right by advance
+  but Roboto Mono's x-height is 9% over CMTT's, -0.016 ink on five slides against the PDF's own
+  pixels before. A fix: keep the figure-to-theme change only when the holding figure reaches out
+  of the header/footer band or is not itself repeated on the frames (a logo's words are the
+  logo's); africa's footline author must stay layout text.
