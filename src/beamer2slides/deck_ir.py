@@ -37,8 +37,8 @@ from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_ins
                           thumbnail_cell_text, thumbnail_insets, thumbnail_picture_masks,
                           thumbnail_picture_places, thumbnail_rows, thumbnail_weights, top_drift)
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, OPTICAL_WEIGHTS_READ, PAD_X,
-                   PPTX_TITLE_DY, SOFT_BREAK, ZWSP, FontMapper, extra_above, line_size)
-from .emit_widths import WORD_JOINER
+                   PPTX_TITLE_DY, SOFT_BREAK, FontMapper, extra_above, line_size)
+from .emit_widths import HOLE_BREAKS, WORD_JOINER
 from .fonts import LETTER_FACE_NAMES, cjk_font, script_capital
 from .google_types import (AffineTransform, Dimension, Page, PageElement, Presentation, SlidesService, children,
                            object_id, part, parts, presentation)
@@ -611,11 +611,11 @@ def text_paragraphs(pe: PageElement, text: JsonObject, resolver: StyleResolver, 
             base = cur.base
             tr = _obj(te.get("textRun") or te.get("autoText"))
             content = _text(tr.get("content"), "")
-            if ZWSP in content or WORD_JOINER in content:
+            if any(ch in content for ch in HOLE_BREAKS) or WORD_JOINER in content:
                 # (the break emit writes in front of a hole, emit.HOLE_BREAK, and the joiner it
                 # writes where Slides would break inside a word, emit_widths.joined_runs: no
                 # characters of the text, and pull writes nothing for them)
-                content = content.replace(ZWSP, "").replace(WORD_JOINER, "")
+                content = "".join(ch for ch in content if ch not in HOLE_BREAKS and ch != WORD_JOINER)
                 if not content:
                     continue
             st = _obj(tr.get("style"))

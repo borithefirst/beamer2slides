@@ -22,6 +22,8 @@ from .fonts import LETTER_FACE_ADVANCE_EM, font_info, letter_face, script_capita
 
 
 ZWSP = "​"
+LINE_SEPARATOR = " "   # no width; Slides may end a line after it, before no-break spaces too (emit_text.HOLE_BREAK)
+HOLE_BREAKS = ZWSP + LINE_SEPARATOR  # what emit writes (or wrote) in front of a hole: no character of the text
 WORD_JOINER = "⁠"       # no break here, no width (tools/probe_script_break.py); emit writes it: joined_runs
 SCRIPT_SIZE = 2 / 3          # super- and subscripts in Slides (measured 0.665: tools/probe_text_fit_fonts.py)
 WRAP_MARGIN = 1.0            # Slides pt kept free in a cell so kerning or rounding cannot wrap it
@@ -90,8 +92,8 @@ def wide_advance(ch: str, unmeasured: float) -> float:
     full-width form is a whole em in every fallback font (unicodedata's East Asian Width W / F).
     At 0.6 em a Japanese header came out 40% narrower than Slides sets it and wrapped its cell.
     A bidi mark (`bidi.MARKS`: the LRM or RLM `bidi.logical_line` writes) draws nothing, nor
-    does the zero-width space before a hole (HOLE_BREAK), nor a word joiner (`joined_runs`)."""
-    if ch in bidi.MARKS or ch == ZWSP or ch == WORD_JOINER:
+    does the break before a hole (HOLE_BREAKS), nor a word joiner (`joined_runs`)."""
+    if ch in bidi.MARKS or ch in HOLE_BREAKS or ch == WORD_JOINER:
         return 0.0
     return 1.0 if unicodedata.east_asian_width(ch) in "WF" else unmeasured
 
@@ -339,7 +341,7 @@ def guessed_chars(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> in
         table = face_advances(family, fonts.face_of(run))
         count += sum(1 for ch in run.text if (ch.upper() if run.smallcaps else ch) not in table
                      and ch not in " " and not unicodedata.combining(ch) and ch not in bidi.MARKS
-                     and ch != ZWSP and ch != WORD_JOINER and unicodedata.east_asian_width(ch) not in "WF")
+                     and ch not in HOLE_BREAKS and ch != WORD_JOINER and unicodedata.east_asian_width(ch) not in "WF")
     return count
 
 

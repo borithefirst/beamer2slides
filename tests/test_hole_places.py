@@ -6,6 +6,9 @@ Offline: the expected places are the ones measured live on Google's thumbnails."
 
 from beamer2slides import ir
 from beamer2slides.classify import PageClassifier
+from beamer2slides.classify_model import Rect, Span, new_line, new_span
+from beamer2slides.classify_text import line_starts
+from beamer2slides.fonts import font_info
 from beamer2slides.emit_holes import fit_holes, formula_shifts, hole_slide_dicts, slide_holes_of, slides_hole_x
 from beamer2slides.emit_metrics import FontMapper
 from beamer2slides.emit_text import held_paragraph
@@ -300,6 +303,66 @@ def test_a_turned_glyph_with_no_words_beside_it_stays_apart() -> None:
     """A sloped glyph away from any line's gap (a mark beside a line's end) joins no line."""
     alone = [s for s in TURNED if s[0] not in ("p", "−", "1", "(", "x", ")", ".")]
     assert not [e for e in turned_page(alone) if e["kind"] == "image" and e.get("anchor")]
+
+
+def level(text: str, font: str, x0: float, x1: float, baseline: float) -> tuple[str, str, float, list[float], list[float], list[float]]:
+    return text, font, 10.909, [x0, baseline], [x0, baseline - 8.0, x1, baseline + 2.9], [1.0, 0.0]
+
+
+# real_beamer-monodromy s12 item 2: a first line of 28 spans of inline math, the next starting "is even, φ is".
+INJECTIVE = [level("2)", "LinBiolinumT", 36.4, 44.7, 127.93), level("Define", "LinBiolinumT", 50.2, 79.9, 127.93),
+             level(" \U0001d711", "LibertineMathMI", 79.9, 88.5, 127.93), level(" :", "LinLibertineT", 88.5, 92.9, 127.93),
+             level("H", "LinLibertineTI", 96.5, 103.9, 127.93), level("→", "txsys", 108.0, 119.2, 127.93),
+             level(" Aut", "LinLibertineT", 119.2, 138.7, 127.93), level("(", "txsys", 139.2, 142.9, 127.93),
+             level("Y", "LinLibertineTI", 143.3, 149.3, 127.93), level("|", "txsys", 154.0, 156.2, 127.93),
+             level("H", "LinLibertineTI", 159.7, 167.0, 127.93), level("\\", "txsys", 168.2, 173.2, 127.93),
+             level("Y", "LinLibertineTI", 173.2, 179.2, 127.93), level(")", "txsys", 180.4, 184.0, 127.93),
+             level("by", "LinBiolinumT", 187.3, 198.3, 127.93), level(" \U0001d711", "LibertineMathMI", 198.3, 206.9, 127.93),
+             level("(", "txsys", 208.1, 211.7, 127.93), level("h", "LinLibertineTI", 212.1, 217.8, 127.93),
+             level(")(", "txsys", 217.9, 226.2, 127.93), level("y", "LinLibertineTI", 226.7, 232.2, 127.93),
+             level(")", "txsys", 232.7, 236.3, 127.93), level(":", "LinLibertineT", 239.9, 242.4, 127.93),
+             level("=", "txmiaX", 242.4, 249.4, 127.93), level(" h", "LinLibertineTI", 249.4, 257.6, 127.93),
+             level(" ·", "txsys", 257.6, 263.0, 127.93), level(" y", "LinLibertineTI", 263.0, 271.0, 127.93),
+             level(". Since", "LinBiolinumT", 271.5, 300.9, 127.93), level(" H", "LinLibertineTI", 300.9, 311.0, 127.93),
+             level("Y", "LinLibertineTI", 326.6, 332.6, 127.93),
+             level("is even,", "LinBiolinumT", 50.2, 83.1, 141.48), level(" \U0001d711", "LibertineMathMI", 83.1, 91.6, 141.48),
+             level("is injective. By “Maps into covering spaces” it is also", "LinBiolinumT", 95.0, 329.4, 141.48),
+             level("surjective. Hence the map is a bijection.", "LinBiolinumT", 50.2, 230.0, 156.16)]
+
+
+def test_a_line_starts_where_its_whole_first_span_follows() -> None:
+    """Guessed with a space between every two of the first line's 28 spans, line 2's "is" was taken
+    at "is injective", eleven characters late: emit measured "is even, φ" on line 1 and sized the
+    box past the PDF's line, and Slides set them there."""
+    paras = [p for e in turned_page(INJECTIVE) if e["kind"] == "text" for p in e["paragraphs"]]
+    text = "".join(r["text"] for r in paras[0]["runs"])
+    starts = paras[0].get("line_starts")
+    assert starts is not None
+    assert [text[s:s + 8] for s in starts[:-1]] == ["is even,", "surjecti"]
+
+
+def word(text: str, x0: float, x1: float, baseline: float, font: str) -> Span:
+    return new_span(id=text, text=text, font=font, size=10.909, color="#000000",
+                    rect=Rect(x0, baseline - 8.0, x1, baseline + 2.9), baseline=baseline, horizontal=True,
+                    info=font_info(font), link=None, drawn=False, visual=None)
+
+
+def test_a_line_opening_on_a_hole_starts_at_the_hole() -> None:
+    """real_beamer-monodromy s3: "... determines uniquely a value of / √γ(t) for all t": the
+    third line's first glyph is the radical of a hole, no word of the text, and the paragraph went
+    unmeasured (Slides moved "of" down). Its line starts at its hole; the second line, starting at
+    the same x with a word, still starts at that word."""
+    one = new_line([word("Let us pick", 28.35, 330.0, 192.76, "LinBiolinumT")])
+    two = new_line([word("with a value of", 28.35, 330.0, 206.31, "LinBiolinumT")])
+    root = word("√︁", 28.35, 38.0, 221.09, "txsys")
+    three = new_line([root, word("for all t", 50.0, 120.0, 221.09, "LinBiolinumT")])
+    three.holes = [[root]]
+    def text(t: str) -> ir.Run:
+        return {"text": t, "font": "LinBiolinumT", "family": "sans", "size": 10.909, "bold": False, "italic": False,
+                "smallcaps": False, "color": "#000000", "link": None, "script": None}
+    hole: ir.Run = {**text("\xa0"), "hole": 24.0, "hole_x0": 28.35}
+    runs = [text("Let us pick "), text("with a value of "), hole, text("for all t")]
+    assert line_starts([one, two, three], runs) == [12, 28, 38]
 
 
 # real_beamer-monodromy s12: "surjective. Hence <\boxed{H ↦ (H\Y → X) ↦ Aut(Y | H\Y) ≅ H}>." - the

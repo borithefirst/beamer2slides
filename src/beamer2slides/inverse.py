@@ -108,7 +108,7 @@ def tex_env() -> dict[str, str]:
 # ---------------------------------------------------------------- LaTeX writing helpers
 
 ESCAPE = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_", "{": r"\{",
-          "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}", "\u00a0": "~", "\u2008": "~", "\u200b": "", "\u2060": "", "\x0b": r"\\ ",
+          "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}", "\u00a0": "~", "\u2008": "~", "\u200b": "", "\u2028": "", "\u2060": "", "\x0b": r"\\ ",
           "\t": " "}
 
 

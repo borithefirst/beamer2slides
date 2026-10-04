@@ -24,6 +24,7 @@ from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, F
 from beamer2slides.emit_model import Place, PptxText, set_text, table_of, text_of
 from beamer2slides.emit_pptx import SHELL_CHAR
 from beamer2slides.emit_tables import pptx_table_of, table_requests_of
+from beamer2slides.emit_widths import HOLE_BREAKS
 from beamer2slides.emit_text import text_box_requests_of, words_right
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.fonts import font_info
@@ -70,7 +71,7 @@ def pt_of(dim: Json) -> float:
 
 
 def collapse(text: str) -> str:
-    return re.sub(NBSP + "+", NBSP, text.replace(emit.ZWSP, ""))  # (the break before a hole, HOLE_BREAK)
+    return re.sub(NBSP + "+", NBSP, "".join(ch for ch in text if ch not in HOLE_BREAKS))  # (emit.HOLE_BREAK)
 
 
 def run_text(runs: Sequence[Mapping[str, Json]]) -> str:

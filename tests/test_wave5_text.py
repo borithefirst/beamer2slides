@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from beamer2slides import emit, emit_text
+from beamer2slides import emit
 from beamer2slides.classify import Span
 from beamer2slides.emit import SLIDE_W
 from beamer2slides.json_types import JsonObject, as_str
@@ -223,25 +223,28 @@ def written(el: JsonObject) -> tuple[str, list[tuple[str, int, int]]]:
     return text, fonts
 
 
-def test_a_word_space_before_a_hole_is_followed_by_a_zero_width_break(monkeypatch: pytest.MonkeyPatch) -> None:
-    """r1_math_v2 s6 'but', r3_textfx_v1 s3 'than': Slides keeps a space and the no-break spaces
-    after it together, so the word before a formula went down with it. A zero-width space after
-    the word space would allow a break there (it did not, live: HOLE_BREAK is off); switched on,
-    it is set in the word's font, so words typed in front of the hole are too."""
-    monkeypatch.setattr(emit_text, "HOLE_BREAK", emit.ZWSP)
+def test_a_word_space_before_a_hole_is_followed_by_a_line_separator() -> None:
+    """r1_math_v2 s6 'but', r3_textfx_v1 s3 'than', real_beamer-monodromy s3 'of': Slides keeps a
+    space and the no-break spaces after it together, so the word before a formula went down with
+    it. A zero-width space did not break there live (r10); a LINE SEPARATOR does, taking no room
+    (tools/probe_hole_break.py). It is set in the word's font, so words typed in front of the
+    hole are too, and only after a word space."""
+    assert emit.HOLE_BREAK == " "
     text, fonts = written(holes_box())
-    assert text.startswith("A ​\xa0") and text.count("​") == 3, repr(text)
-    k = text.index("​")
+    assert text.startswith("A  \xa0") and text.count(" ") == 3, repr(text)
+    k = text.index(" ")
     assert [f for f, a, b in fonts if a <= k < b][-1] == "Lato", fonts
     glued = holes_box()
     jobj(glued, "paragraphs", 0, "runs", 0)["text"] = "A"  # no word space: no break before its formula
-    assert written(glued)[0].count("​") == 2
+    assert written(glued)[0].count(" ") == 2
 
 
-def test_the_break_before_a_hole_is_off():
-    """Written live (r10), Slides still took 'but' and 'than' down with their holes."""
-    assert emit.HOLE_BREAK == ""
-    assert "​" not in written(holes_box())[0]
+def test_the_break_before_a_hole_takes_no_room() -> None:
+    """Measured at 0 (probe_hole_break: 130.0 pt with and without it), so box widths stay."""
+    from beamer2slides import text_layout
+    from beamer2slides.emit_widths import wide_advance
+    assert wide_advance(" ", 0.5) == 0.0
+    assert text_layout.advance(" ", {"fontFamily": "Lato"}, 14.0) == 0.0
 
 
 def test_the_word_before_a_hole_stays_on_its_line_in_the_layout_model():
@@ -259,25 +262,29 @@ def test_the_word_before_a_hole_stays_on_its_line_in_the_layout_model():
     a = (text_layout.advance("A", styles[0], jnum(styles[0], "fontSize"))
          + text_layout.advance(" ", styles[1], jnum(styles[1], "fontSize")))
     lines = text_layout.wrap(chars, styles, a + 5.0)  # 'A' and its space fit, its formula does not
-    assert chars[lines[0][0]:lines[0][1]].rstrip("​ ") == "A", [chars[s:e] for s, e, _ in lines]
+    assert chars[lines[0][0]:lines[0][1]].rstrip("  ") == "A", [chars[s:e] for s, e, _ in lines]
+    assert chars[lines[1][0]] == "\xa0"  # (the next line opens on the hole)
 
 
-def test_pull_and_merge_read_the_break_before_a_hole_as_nothing():
+@pytest.mark.parametrize("brk", [" ", "​"])  # (and the ZWSP r10's decks carry)
+def test_pull_and_merge_read_the_break_before_a_hole_as_nothing(brk: str):
     """deck_ir drops it (the IR, compare and pull never see it), merge.collapse_holes too (a deck
     converted before the break and one after say the same), and LaTeX escaping writes nothing."""
-    from beamer2slides import inverse, merge
+    from beamer2slides import compare, inverse, merge
     from .irs import deck_ir
-    from beamer2slides.devtools import deck_edits
+    from beamer2slides.devtools import deck_edits, sync_check
     from .test_adopt import pt
     from .test_adopt_text import box, deck, para, text_of
     lato, mono = {"fontFamily": "Lato", "fontSize": pt(14)}, {"fontFamily": "Roboto Mono", "fontSize": pt(14)}
-    d = deck(box("s_c", para("x", runs=[("pointwise, but ​", lato), ("\xa0" * 6, mono), (" is finite", lato)])))
+    d = deck(box("s_c", para("x", runs=[(f"pointwise, but {brk}", lato), ("\xa0" * 6, mono), (" is finite", lato)])))
     runs = text_of(deck_ir(d), "s_c")["paragraphs"][0]["runs"]
-    assert "​" not in "".join(r["text"] for r in runs)
+    assert brk not in "".join(r["text"] for r in runs)
     assert [r["text"] for r in runs if r.get("hole")] == [" "] and runs[0]["text"] == "pointwise, but "
-    assert merge.collapse_holes("but ​\xa0\xa0\xa0 is\n") == merge.collapse_holes("but \xa0\xa0 is\n") == "but \xa0 is\n"
-    assert inverse.latex_escape("but ​~") == r"but \textasciitilde{}"
-    found = deck_edits.HOLE.search("but ​\xa0\xa0 is")
+    assert merge.collapse_holes(f"but {brk}\xa0\xa0\xa0 is\n") == merge.collapse_holes("but \xa0\xa0 is\n") == "but \xa0 is\n"
+    assert inverse.latex_escape(f"but {brk}~") == r"but \textasciitilde{}"
+    assert brk not in f"but {brk}x".translate(compare.NORMALISE)
+    assert sync_check.norm(f"but {brk}\xa0is") == "but is"
+    found = deck_edits.HOLE.search(f"but {brk}\xa0\xa0 is")
     assert found is not None and found.start() == 4  # typed in front of the break
 
 

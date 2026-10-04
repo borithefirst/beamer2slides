@@ -24,7 +24,7 @@ from .emit_model import (
     json_number, number_box, number_box_of, run_of, set_text, text_of,
 )
 from .emit_widths import (
-    SCRIPT_SIZE, SMALL_CAPS_SIZE, guessed_chars, held_starts, joined_runs, paragraph_dict, runs_between,
+    LINE_SEPARATOR, SCRIPT_SIZE, SMALL_CAPS_SIZE, guessed_chars, held_starts, joined_runs, paragraph_dict, runs_between,
     set_runs_of, slides_lines_of, slides_width_of,
 )
 from .fonts import cjk_font, font_info, google_font
@@ -283,11 +283,12 @@ def hole_run_of(run: SetRun, hole: float, scale: float, fonts: FontMapper) -> Se
 # Written after the word space in front of a hole, in that word's run. Slides keeps a space and
 # the no-break spaces after it together (UAX #14's old "× GL"), so the word before a formula
 # went down with it to the next line: "pointwise, / but ∫..." in a box 54 pt wider than
-# "... pointwise, but" (r1_math_v2 s6; 'than', r3_textfx_v1 s3). A zero-width space breaks
-# there by UAX #14 (LB8, ahead of LB12), as text_layout.wrap models it - but Slides does not:
-# written live (r10), both words still went down with their holes. So none is written; deck_ir,
-# merge.collapse_holes and the other readers still drop one (pull writes nothing for it).
-HOLE_BREAK: str = ""
+# "... pointwise, but" (r1_math_v2 s6; 'than', r3_textfx_v1 s3; 'of', real_beamer-monodromy s3).
+# A zero-width space breaks there by UAX #14 (LB8) but not in Slides (r10), nor does an en,
+# thin or punctuation space, nor NEL; a LINE SEPARATOR (U+2028) does, takes no room and reads
+# back as itself (tools/probe_hole_break.py). deck_ir, merge.collapse_holes and the other
+# readers drop it, and an old ZWSP (`emit_widths.HOLE_BREAKS`); pull writes nothing for them.
+HOLE_BREAK: str = LINE_SEPARATOR
 
 
 def hole_runs(runs: Sequence[JsonMap], scale: float, fonts: FontMapper) -> list[JsonMap]:

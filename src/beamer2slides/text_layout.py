@@ -28,7 +28,7 @@ from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 
 from . import bidi, emit
-from .emit_widths import WORD_JOINER, breaks_before
+from .emit_widths import HOLE_BREAKS, WORD_JOINER, breaks_before
 from .fonts import LETTER_FACE_ADVANCE_EM, script_capital
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object
 
@@ -38,7 +38,6 @@ CAP_EM = 0.72                   # ink above the baseline (Lato's capitals)
 DESC_EM = 0.2                   # ink below it
 NBSP = "\xa0"
 THICK_SPACE = "\u2008"          # a relation's thick space, set as a no-break space (classify_text.THICK_SPACE)
-ZWSP = emit.ZWSP                # zero width, a line may break after it (UAX #14 LB8; emit.HOLE_BREAK)
 SOFT_BREAK = emit.SOFT_BREAK
 UNKNOWN_EM = 0.5                # a character nobody measured
 TAB_EM = 2.0
@@ -178,8 +177,8 @@ def advance(ch: str, st: JsonMap, size: float) -> float:
         size *= emit.SCRIPT_SIZE
     if ch == "\t":
         return TAB_EM * size
-    if ch in bidi.MARKS or ch == ZWSP or ch == WORD_JOINER:
-        return 0.0  # (an LRM or RLM draws nothing, nor does a zero-width space or word joiner)
+    if ch in bidi.MARKS or ch in HOLE_BREAKS or ch == WORD_JOINER:
+        return 0.0  # (an LRM or RLM draws nothing, nor does a hole's break or a word joiner)
     if family == emit.FONT_FOR_FAMILY["mono"]:
         return emit.ROBOTO_MONO_ADVANCE_EM * size
     if family in LETTER_FACE_ADVANCE_EM and script_capital(ch):  # (emit_metrics.letter_faces)
@@ -280,8 +279,8 @@ def wrap(chars: str, styles: Sequence[JsonMap], width: float) -> list[tuple[int,
 
     Nor before a no-break space: Slides keeps a space and the no-break spaces after it together
     (UAX #14's old "× GL"), so a word before a formula hole goes down with it (visual hunt r8,
-    r1_math_v2 s6: "pointwise, / but ∫..." in a box 54 pt wider than "... pointwise, but"). A
-    zero-width space breaks anywhere, before a no-break space too (LB8, ahead of LB12)."""
+    r1_math_v2 s6: "pointwise, / but ∫..." in a box 54 pt wider than "... pointwise, but"). The
+    break emit writes before a hole (a LINE SEPARATOR, emit.HOLE_BREAK) breaks there."""
     lines: list[tuple[int, int, float]] = []
     start, n = 0, len(chars)
     while start <= n:
@@ -296,9 +295,9 @@ def wrap(chars: str, styles: Sequence[JsonMap], width: float) -> list[tuple[int,
                 end, nxt = i, i + 1
                 break
             adv = advance(ch, styles[i], font_size(styles[i]))
-            if ch == " " or ch == ZWSP:
+            if ch == " " or ch in HOLE_BREAKS:
                 w += adv
-                if ch == ZWSP or chars[i + 1:i + 2] not in (NBSP, THICK_SPACE):
+                if ch in HOLE_BREAKS or chars[i + 1:i + 2] not in (NBSP, THICK_SPACE):
                     last_break, ink_at_break = i + 1, ink
                 i += 1
                 continue

@@ -732,8 +732,8 @@ def last_word_width(span: Span) -> float:
 
 def line_starts(lines: list["Line"], runs: list[Run]) -> list[int] | None:
     """Where each of a paragraph's lines after the first starts in its runs' joined text (at the
-    word after a space), then that text's length - or None where a line's first word is not found
-    there (a hyphenated or CJK line end, a hole, a glyph read another way). emit sets each PDF line's
+    word after a space, or the hole a line opens on), then that text's length - or None where a
+    line's first word is not found there (a hyphenated or CJK line end, a glyph read another way). emit sets each PDF line's
     words as Slides will to size a wrapped paragraph's box (`emit.slides_lines`); where TeX's
     widths are not known (Palatino, a formula's letters without CM metrics) it could not find the
     lines from their extents, the box came from the PDF's and Slides' narrower substitute pulled a
@@ -744,20 +744,51 @@ def line_starts(lines: list["Line"], runs: list[Run]) -> list[int] | None:
         return None
     starts: list[int] = []
     at = 0
+    holes: list[tuple[int, float]] = []  # (where in the text, PDF x) of each hole run
+    for r in runs:
+        x0 = r.get("hole_x0")
+        if "hole" in r and x0 is not None:
+            holes.append((at, x0))
+        at += len(r["text"])
+    at = 0
     for above, line in zip(lines, lines[1:]):
+        # A line opening on a formula's picture starts at its hole: the hole's words are no text
+        # ("… a value of / √γ(t) for all t", real_beamer-monodromy s3 went unmeasured and Slides
+        # moved "of" down).
         first = next((s for s, _ in reading_order(line) if isinstance(s, Span) and s.text.strip()), None)
         if first is None:
             return None
-        word = first.text.split()[0]
+        if any(s is first for h in line.holes for s in h):
+            opening = [i for i, x0 in holes if i > at and abs(x0 - line.x0) <= HOLE_AT_LINE_START]
+            if not opening:
+                return None
+            at = min(opening, key=lambda i: abs(i - (at + spoken_length(above) + 1)))
+            starts.append(at)
+            continue
+        word, whole = first.text.split()[0], first.text.strip()
         heads = {word, unicodedata.normalize("NFC", word), unicodedata.normalize("NFKC", word)}
-        # (about where it should be: after the line above's words, a space between spans)
-        guess = at + len(" ".join(s.text.strip() for s in above.content if s.text.strip())) + 1
+        wholes = {whole, unicodedata.normalize("NFC", whole), unicodedata.normalize("NFKC", whole)}
+        guess = at + spoken_length(above) + 1
         found = [i for i in range(at + 1, len(text)) if text[i - 1] == " " and any(text.startswith(h, i) for h in heads)]
         if not found:
             return None
-        at = min(found, key=lambda i: abs(i - guess))
+        # (where the line's whole first span follows, if anywhere: a line of inline math is many
+        # spans, and "is" of "is even, φ is injective" was taken at "is injective", real_beamer-
+        # monodromy s12)
+        at = min([i for i in found if any(text.startswith(w, i) for w in wholes)] or found, key=lambda i: abs(i - guess))
         starts.append(at)
     return starts + [len(text)]
+
+
+def spoken_length(line: "Line") -> int:
+    """About how long a line's words are in its paragraph's text: its spans' words, a space between
+    two only where the page leaves a gap (`SPOKEN_GAP_EM`) - a formula's pieces abut. A space
+    between every two spans overshot a line of inline math by a dozen characters."""
+    words = [s for s in line.content if s.text.strip()]
+    n = sum(len(s.text.strip()) for s in words)
+    return n + sum(1 for a, b in zip(words, words[1:])
+                   if b.rect.x0 - a.rect.x1 > SPOKEN_GAP_EM * max(a.size, b.size)
+                   or a.text != a.text.rstrip() or b.text != b.text.lstrip())
 
 
 def line_spaces(line: "Line") -> dict[str, float]:
@@ -1012,6 +1043,8 @@ BULLET_GLYPHS = set("▶►▸‣•◦▪■□○●★⋆✓∗–")
 ENUM_RE = re.compile(r"^(\(?\d{1,2}[.)]|\(?[a-z][.)]|\([a-z]\)|\(?[ivx]{1,4}[.)])$")
 
 LABEL_SEP_EM = 0.4  # gap after a description label (beamer: 0.5 em; word spaces are about 0.33 em)
+SPOKEN_GAP_EM = 0.15  # spans this far apart read with a space between (word spaces are about 0.33 em)
+HOLE_AT_LINE_START = 1.0  # pt: a hole starting this near its line's left edge opens the line
 
 EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
 

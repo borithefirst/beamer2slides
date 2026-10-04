@@ -120,7 +120,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   on another line; `column_edge`); a lone line starting where its neighbours start is left-aligned
   (`single_line_align`), a lone line flush with a right-aligned paragraph beside it right-aligned;
   lines broken by hand never join (`hand_broken`); classify records where wrapped lines start
-  (`line_starts`) so emit measures a paragraph without TeX widths; CJK breaks anywhere and joins with no space (`classify.cjk`). Font names
+  (`line_starts`: the whole first span, a space only where the page leaves one, a line opening on
+  a hole at that hole) so emit measures a paragraph without TeX widths; CJK breaks anywhere and joins with no space (`classify.cjk`). Font names
   map through family tables (`fonts.font_info`: `SANS_FAMILIES`, `TEX_TT_RE`, `LIBERTINE_RE`;
   0.6 em monos -> Roboto Mono; CJK faces -> Noto Sans/Serif JP/SC/TC/KR, `fonts.cjk_font`; a CM sans
   cut of 6 pt or less is written at weight 600 (`FontMapper.optical_weight`), drawn Regular: Lato
@@ -643,9 +644,10 @@ markers.
   (`emit.line_sizes`, `inner_pitch`). Slides rounds each paragraph step to whole pixels with its
   spaceAbove included (`emit.pitch_between(..., gap)`, 0.07 pt rms on 18 boxes). Slides keeps a
   space and the no-break spaces after it together, so the word before a hole wraps with it
-  (`text_layout.wrap` models it). A ZWSP after that space does **not** break there live (r10), so
-  `emit.HOLE_BREAK` is `""`; every reader (deck_ir, `merge.collapse_holes`, compare, inverse, the
-  fuzzers) still reads one as nothing.
+  unless a LINE SEPARATOR (U+2028) follows the space: zero width, a break, no forced one
+  (`tools/probe_hole_break.py`; a ZWSP, en/thin space or NEL does not break, r10).
+  `emit.HOLE_BREAK` writes it; every reader (deck_ir, `merge.collapse_holes`, compare, inverse,
+  the fuzzers, `emit_widths.HOLE_BREAKS`) reads it, and an old ZWSP, as nothing.
 - Title placeholders exist before any other element: bring them to front after adding shapes.
 - Layout pages reject `pageBackgroundFill.propertyState = INHERIT`. Imported layout/master
   placeholders hold "\n" per list level: updateTextStyle works on them, insertText is refused. A

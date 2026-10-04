@@ -4724,6 +4724,13 @@ block all bold, a paragraph broken inside a formula, a footline too heavy at Lat
   and 'than' (r3_textfx_v1 s3) down with their holes, though both lines had room: Slides does not
   break after U+200B in front of no-break spaces. `HOLE_BREAK` is off (""); the readers keep
   dropping one. Untried: a breakable space (U+2002) as the hole's first character.
+- 2026-10-04 (`tools/probe_hole_break.py`): U+2002 in place of the space, or as the hole's first
+  character, a thin or punctuation space, NEL or two spaces change nothing either; a hole of em
+  or ideographic spaces breaks but hangs at the line end and the hole is lost. A LINE SEPARATOR
+  (U+2028) after the word space breaks there, takes no room (130.0 pt with or without it) and
+  forces nothing (a wide box keeps one line); Slides reads it back as itself. `HOLE_BREAK` is
+  U+2028; the readers drop it and the ZWSP (`emit_widths.HOLE_BREAKS`). real_beamer-monodromy s3
+  "a value of / √γ(t)" had its starts right (`line_starts`, above) and still lost 'of' to the hole.
 
 ### Waves 1-5 on Google (r10, 2026-09-24)
 Five blind verifiers (`out/hunt/VERIFY5.md`, `verified/verify5_z*.json`) on the 92 findings still
@@ -4988,6 +4995,15 @@ to (real_linear-attention-a s35/s38: a `k_t^⊤` 23 pt right of its gap, one aft
   level line's words with words on both sides within 1.5 em of its centre joins that line as a hole
   (`LinesMixin.join_turned_glyphs`), its box the turned box cut to the gap; its picture grows to
   its ink, and `render.owned_by` already keeps a turned span's glyph by its direction.
+- `classify_text.line_starts` took each line's first word nearest a guess that put a space between
+  every two spans of the line above: a line of inline math (28 spans) overshot by a dozen
+  characters, and "is" of "is even, φ is injective" was taken at "is injective" (monodromy s12
+  item 2; emit then measured "is even, φ" on line 1, and the box let Slides set it there). The
+  guess counts a space only where the page leaves one (`spoken_length`, `SPOKEN_GAP_EM`), and a
+  place where the line's whole first span follows wins. A line opening on a hole (its first span is
+  one of `Line.holes`; "… a value of / √γ(t) for all t", s3) starts at the hole run standing at the
+  line's x0 (`HOLE_AT_LINE_START`); the paragraph went unmeasured and Slides moved "of" down. Over
+  the real-deck corpus 5 of 6,176 paragraphs' starts changed, all to the PDF's lines.
 - A literal list number (`classify.literal_list_numbers`, "5)<TAB>") was put before the text
   without moving the recorded `line_starts`: three short, so the item went unmeasured. They move
   with it now.

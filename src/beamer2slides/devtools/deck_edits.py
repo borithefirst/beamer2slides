@@ -386,7 +386,7 @@ def add_paragraph(deck: LiveDeck, slide: Json, text: str, paragraph: str) -> Exp
                         {"check": "text", "slide": slide, "text": text, "count": 1}])
 
 
-HOLE = re.compile("​?\xa0+")  # (with the zero-width break emit writes in front of it, emit.HOLE_BREAK)
+HOLE = re.compile("[\u200b\u2028]?\xa0+")  # (with the zero-width break emit writes in front of it, emit.HOLE_BREAK)
 
 
 def insert_before_hole(deck: LiveDeck, slide: Json, text: str, words: str) -> Expectation:
