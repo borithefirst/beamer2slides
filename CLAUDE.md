@@ -110,7 +110,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   a picture),
   inline math as runs with scripts (down from 0.10 em, up from 0.12 em, beside \tiny words 0.85-0.95
   of their size raised 0.3 em, `script_of`; raised rings and asterisks
-  become `°`/`*` at line size) and Unicode,
+  become `°`/`*` at line size, primes ′ ″ unscripted too, `unscripted_mark`, a script's own at its
+  size, `prime_size`; a glyph right after a script gets U+200A hair spaces for Slides' short
+  advance there, `script_space`, `script_tail`, added spaces read as nothing) and Unicode,
   links, code. Frame titles use the layout's TITLE placeholder. Hanging labels are `label<TAB>text`.
   RTL (Hebrew/Arabic) is turned into logical order (`bidi.py`) and written `RIGHT_TO_LEFT` with
   mirrored alignment: a line is read whole (`classify.read_lines`, `bidi.logical_line`: the logical
@@ -178,7 +180,8 @@ a line's added spaces only if Slides sets it within 1% of its PDF width, `emit_t
   `stretched`: word spaces compared font by font, the last line never the longest, no hanging
   label) is written JUSTIFIED with a `\parindent` first line, and never ends past its PDF lines
   (`justified_right`, else START); a paragraph needing a nearer edge than its box's gets
-  `indentEnd` (`paragraph_ends`, which `text_layout` honours); an unmeasured paragraph may grow its
+  `indentEnd` (`paragraph_ends`, which `text_layout` honours), a centred one in a box of left
+  ones indents centring it on its PDF middle (`emit_text.centred_indents`); an unmeasured paragraph may grow its
   box up to 1 em to keep the PDF's line count (`unhyphenated_room`); a wrapped paragraph in a face
   nobody measured whose join the box's edge passes ends between its lines (+5%) and its
   `wrap_limit` (`emit_text.unmeasured_end`); `\hfill` pieces are their own right-aligned lines (`find_hfill_pieces`);
@@ -199,7 +202,9 @@ a line's added spaces only if Slides sets it within 1% of its PDF width, `emit_t
   CMEX ink hangs an em below its box); a bar as wide as one part with the other centred is a
   fraction bar (`typeset_fraction`); hanging CMEX/√ signs go to the line below
   (`drop_hanging_glyphs`); `extension_font` names every math-extension font. A glyph a picture
-  owns stays for its crop (`render.owned_by`); a figure takes the glyphs its box holds and ignores
+  owns stays for its crop (`render.owned_by`), as does one a span left in the background owns
+  inside a native line's band; a much smaller span off the baseline is a script, never a word
+  (`classify_text.scripted`), and no overlay crosses a math line; a figure takes the glyphs its box holds and ignores
   words it only grazes; a stroked arrow head reaches its mitred point (`miter_reach`); ulem chains
   are underlines, and a lone hairline under words stays in the background; overlapped pieces are
   one symbol (`compose_symbols`); an accent over a Greek letter is a hole (`accent_beside`);
@@ -207,7 +212,7 @@ a line's added spaces only if Slides sets it within 1% of its PDF width, `emit_t
   (`wrapped_formula`) but its own paragraph (`wrapped_formulas_apart`), one hole when it has no
   prose and holds symbols Slides was never measured on (`unmeasured_symbols`; an operator
   written in its measured face, `fonts.written_advance`, is measured, as in `guessed_chars`); a long arrow
-  (⟶ ⟹ ⟺, mhchem) is a hole at its PDF length, its labels in its picture (`long_arrow_groups`);
+  (⟶ ⟹ ⟺ ↪, mhchem) is a hole at its PDF length, its labels in its picture (`long_arrow_groups`);
   a figure label beside a column is no line (`figure_label_apart`), nor one of a row of like
   labels a plot title (`in_label_row`). A list's balls and a photo under a hole stay whole
   whatever box reaches them; a hole's picture on a photo is its glyphs on a clear ground
@@ -226,7 +231,8 @@ a line's added spaces only if Slides sets it within 1% of its PDF width, `emit_t
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
   and the table does not grow over its caption; classify cuts a spanning chunk at word gaps when it
   lines up with the other rows. Rules wider than half the page with rows of cells between them are
-  a table's, not theme decoration (`table_hairlines`). A plain table's row stands on one baseline
+  a table's, not theme decoration (`table_hairlines`); boxes stacked with a wordless gap closed
+  by uprights are two tables (`classify_graphics.stacked_boxes`). A plain table's row stands on one baseline
   (`one_baseline`); a lone line under a blank first cell continues the cell only when it runs on
   (`TableRows.runs_on_below`). A wrapped `p{}` cell is one cell of several
   lines (`row_lines`, `wrapped`), its column wide enough for each PDF line (`emit.wrapped_width`).

@@ -482,6 +482,13 @@ class FiguresMixin(ParagraphsMixin):
         if not over_text and any(box.contains_rect(s.rect, tol=0.5) and s not in label_spans for l in lines
                                  if id(l) not in self.line_owner for s in l.spans):
             return None  # math set inside a figure: one picture of everything in its box
+        if over_text and any(box.contains_rect(s.rect, tol=0.5) and s not in label_spans
+                             for l in lines if l.reason == "math" for s in l.spans):
+            # A display formula's own drawing (an \underbrace under a \left( ... \right) row,
+            # its \text label native below it): the formula stays where it is, and so does its
+            # brace. As an overlay it took the paren pieces its labels' bands reached off the
+            # background and was stretched to the label's words (real_linear-attention-a s42).
+            return None
 
         ends = [(p, d) for d in drawings for p in path_points(d)]
         met = self.met_words(ends, words)

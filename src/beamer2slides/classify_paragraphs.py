@@ -2,27 +2,34 @@
 runs a paragraph is written as.
 """
 
+import functools
 import math
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from .classify_model import (
     ACCENTS, HOLE_PAD, Line, Paragraph, Rect, Span, column_x0, extension_font, ir_bullet, new_paragraph, reads_rtl,
     union_all,
 )
 from .classify_text import (
-    COMPOSED, FRACTION_SLASH, LABEL_SEP_EM, NBSP, THICK_SPACE_EM, WIDE_ROOM_EM, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
+    COMPOSED, FRACTION_SLASH, LABEL_SEP_EM, NBSP, THICK_SPACE_EM, WIDE_ROOM_EM, NEGATION, cjk, code_indent, code_pitch, explicit_hyphen,
     family_of, first_word_width, formula_groups, gap_between, glued, is_code, is_mono, last_word_width,
-    line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, on_columns, prose_spaces,
-    raised_mark, reading_order, script_in_script, script_of, script_size, stretched, thick_spaces, thin_span,
+    line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, on_columns, prime_size,
+    prose_spaces, raised_mark, reading_order, script_in_script, script_of, script_size, stretched, thick_spaces,
+    thin_span, unscripted_mark,
     WORD_GAP_MIN_EM, wide_columns, wide_gap, widened, widens_after, with_accent, with_text, word_gap,
 )
 from .classify_lines import LinesMixin, ends_in_leader, leader_line, leader_pitch, overprint_word, prints_over
 from .cjk_glue import CJK_GLUE, boundary, in_glue, line_glue
+from .emit_metrics import FontMapper
+from .emit_model import SetRun
+from .emit_widths import SCRIPT_SIZE, slides_width_of
 from .fonts import google_font, serif_math_letters
 from .ir import Align, BeforeWord, Run, TextElement
 from .ir import Paragraph as ParagraphJson
+from .ir_types import Color
 from .mono_edges import edge_fill, edge_width
+from .script_space import script_fill
 
 
 EM_SPACE = chr(0x2003)
@@ -51,6 +58,48 @@ def code_edges_width(spans: list[Span], size: float) -> float:
     all its edges or none, so that the code words on it stand alike."""
     gaps = [gap_between(a, b) / size for a, b in zip(spans, spans[1:]) if code_edge(a, b)]
     return sum(edge_width(edge_fill(g)) for g in gaps if WORD_GAP_MIN_EM < g < QUAD_EM)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ScriptStart:
+    """Where the script a paragraph's runs end on began (`runs_reaching`): the line it is on, the
+    character of the runs' joined text it starts at and the PDF x of its first glyph."""
+    line: int
+    at: int
+    x0: float
+
+
+@functools.cache
+def slides_fonts() -> FontMapper:
+    return FontMapper()
+
+
+def set_run(r: Run, text: str) -> SetRun:
+    """A run of words as emit sets it, with `text`, for its measure."""
+    return SetRun(text=text, font=r["font"], family=r["family"], size=r["size"], bold=r["bold"], italic=r["italic"],
+                  smallcaps=r["smallcaps"], script=r["script"], color=Color(r["color"]), underline=False, strike=False,
+                  highlight=None, link=None, hole=None, hole_size=None, cell=False, in_sentence=True,
+                  pitch=r.get("pitch"))
+
+
+def script_tail(runs: list[Run], start: ScriptStart, distance: float) -> str:
+    """The SCRIPT_SPACEs closing the script the runs end on (from `start`), which the PDF sets
+    `distance` pt from its first glyph to the glyph after it (`script_space`); none where Slides'
+    advance of it is not known."""
+    group: list[SetRun] = []
+    at = 0
+    for r in runs:
+        lo = max(0, start.at - at)
+        if lo < len(r["text"]):
+            group.append(set_run(r, r["text"][lo:].lstrip() if not group else r["text"][lo:]))
+        at += len(r["text"])
+    if not group or any(r.script is None for r in group):
+        return ""
+    fonts = slides_fonts()
+    width = slides_width_of(group, 1.0, fonts)
+    if width is None:
+        return ""
+    return script_fill(distance - width, fonts.size_of(group[-1], 1.0)[1] * SCRIPT_SIZE)
 
 
 class ParagraphsMixin(LinesMixin):
@@ -735,6 +784,7 @@ class ParagraphsMixin(LinesMixin):
         runs: list[Run] = []
         prev: Span | None = None
         hole_x1 = 0.0
+        script_at: ScriptStart | None = None  # (the script the runs end on: script_space)
         for li, line in enumerate(par.lines):
             words = [s for s in line.content if s.text.strip()]
             gaps = [gap_between(a, b) / line.size for a, b in zip(words, words[1:])]
@@ -760,6 +810,7 @@ class ParagraphsMixin(LinesMixin):
                                  "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
                                  "color": main.color, "link": main.link, "script": None,
                                  "underline": False, "highlight": None})
+                    script_at = None
                     continue
                 hole = next((h for h in line.holes if span in h), None)
                 if span.info.family == "icon" and hole is None:
@@ -795,7 +846,7 @@ class ParagraphsMixin(LinesMixin):
                                  # (the picture is cropped with HOLE_PAD on both sides: room for that too)
                                  "highlight": None, "hole": round(x1 - x0 + 2 * HOLE_PAD, 2), "hole_x0": round(x0, 2),
                                  "before": before, "next_x0": round(min(after), 2) if after else None})
-                    prev, hole_x1 = max(hole, key=lambda s: s.rect.x1), x1
+                    prev, hole_x1, script_at = max(hole, key=lambda s: s.rect.x1), x1, None
                     continue
                 text = span.text
                 if prev is not None and runs and not runs[-1].get("hole") and text.strip() and \
@@ -957,10 +1008,11 @@ class ParagraphsMixin(LinesMixin):
                     text = negate(NEGATION + text)
                 if thin_span(span, line, par.lines):
                     text = re.sub(r"(?<=\S) (?=\S)", " ", text)  # "48 000 EUR" breaks nowhere
+                outer = runs[-1] if runs and not runs[-1].get("hole") else None
                 script = forced or script_of(span, line) or script_in_script(
-                    span, prev, runs[-1]["script"] if runs and not runs[-1].get("hole") else None, line)
+                    span, prev, outer["script"] if outer else None, line)
                 # Slides shrinks sub/superscripts itself: give them the line's size.
-                size = script_size(span, line) if script else span.size
+                size = prime_size(text, script, outer, script_size(span, line)) if script else span.size
                 family, italic = family_of(span), span.info.italic
                 pieces = [(text, italic)]
                 if family == "math":
@@ -969,8 +1021,13 @@ class ParagraphsMixin(LinesMixin):
                     family = "serif" if serif_math_letters(span.font) else math_family(line, par)
                     pieces = math_pieces(span.font, text)
                 tail = TRAILING_PUNCT.search(text) if span.decor_to is not None and family != "math" else None
-                if script == "super" and not forced and text.strip() in RAISED_MARKS:
+                if script == "super" and not forced and unscripted_mark(text):
                     pieces, script, size, tail = [(raised_mark(text), False)], None, line.size, None
+                if script is None and script_at is not None and script_at.line == li and not pitch and \
+                        text[:1].strip() and runs and not runs[-1].get("hole") and runs[-1]["script"] and \
+                        runs[-1]["text"][-1:].strip():
+                    # a glyph right after a script stands as far from it as TeX set it (script_space)
+                    runs[-1]["text"] += script_tail(runs, script_at, span.rect.x0 - script_at.x0)
                 if tail:  # (its decoration ends before this punctuation: Span.decor_to)
                     pieces = [(text[:tail.start()], italic), (text[tail.start():], italic)]
                 if id(span) in formulas:
@@ -982,6 +1039,7 @@ class ParagraphsMixin(LinesMixin):
                         runs[-1]["text"] = ahead.rstrip(" ") + NBSP * (len(ahead) - len(ahead.rstrip(" ")))
                     last = len(pieces) - 1
                     pieces = [(glued(t, glue if k == 0 else True, k < last), it) for k, (t, it) in enumerate(pieces)]
+                added = 0  # (characters this span adds to the runs: where a script starts)
                 for k, (text, italic) in enumerate(pieces):
                     plain = bool(tail) and k == 1
                     style: Run = {
@@ -1017,6 +1075,11 @@ class ParagraphsMixin(LinesMixin):
                         runs[-1]["text"] += text
                     else:
                         runs.append(with_text(style, text))
+                    added += len(text)
+                if not script or forced:
+                    script_at = None
+                elif script_at is None or script_at.line != li:
+                    script_at = ScriptStart(line=li, at=sum(len(r["text"]) for r in runs) - added, x0=span.rect.x0)
                 prev = span
         prose_spaces(runs)
         thick_spaces(runs)

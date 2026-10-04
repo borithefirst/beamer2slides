@@ -74,18 +74,47 @@ def test_a_prime_over_its_subscript_joins_the_subscript():
     by_text = {r["text"].strip(): r for r in rs}
     assert by_text["s"]["script"] == "sub"
     assert by_text["′"]["script"] == "sub", [(r["text"], r["script"]) for r in rs]
-    # (6 pt is less than 0.6 of the line: given the size Slides draws as small, as a script's script)
-    assert by_text["′"]["size"] == round(5.98 / 0.665, 2)
+    # (6 pt is less than 0.6 of the line, which made a script's script as small as TeX set it:
+    # a prime is as large as its subscript, ′'s tick being under half CMSY's prime: prime_size)
+    assert by_text["′"]["size"] == by_text["s"]["size"] == 10.91
     assert by_text["(w)"]["script"] is None
 
 
-def test_a_prime_after_a_letter_of_the_line_stays_its_superscript():
-    """s' (CMSY8 raised 0.4 em after a body letter) is a superscript of the line as before; a
-    prime beside a body letter is no script's script."""
+def test_a_script_of_a_script_other_than_a_prime_keeps_its_own_size():
+    """monodromy s9's p^{-1} in a subscript is drawn as small as TeX set it (script_size)."""
+    bar = span("p|", 100.0, 89.2, 10.91, "CMMI10")
+    p = span("p", 108.0, 91.6, 7.97, "CMMI8")
+    minus = span("−", 112.2, 88.2, 6.08, "CMSY6")
+    rs = runs([span("is true for", 50.0, 89.2, 10.91, SANS), bar, p, minus])
+    assert next(r for r in rs if "−" in r["text"])["size"] == round(6.08 / 0.665, 2)
+
+
+def test_a_prime_after_a_letter_of_the_line_is_set_at_the_line_size():
+    """s' (CMSY8 raised 0.4 em after a body letter) is a superscript of the line, not a script's
+    script; as a SUPERSCRIPT run Slides drew its ′ (a tick 0.48-0.72 em high, where TeX raises
+    CMSY's prime to) 2/3 as large and 0.37 em higher: a speck over the s (big-o-for-weighted s6).
+    Unscripted at the line's size, as a raised ring or asterisk is (RAISED_MARKS)."""
     s = span("s", 100.0, 89.2, 10.91, SANS_ITALIC)
     prime = span("′", 104.0, 84.8, 7.97, "CMSY8")
     assert script_in_script(prime, s, None, s) is None
-    assert [r["script"] for r in span_runs([s, prime])] == [None, "super"]
+    rs = span_runs([s, prime])
+    assert [(r["text"], r["script"], r["size"]) for r in rs][-1] == ("′", None, 10.91)
+    line = runs([span("then", 75.0, 89.2, 10.91, SANS), s, prime, span("is fixed", 108.0, 89.2, 10.91, SANS)])
+    primed = next(r for r in line if "′" in r["text"])
+    assert (primed["script"], primed["size"]) == (None, 10.91), [(r["text"], r["script"]) for r in line]
+
+
+@pytest.mark.parametrize("marks", ["″", "‴", "′′"])
+def test_every_prime_mark_is_unscripted(marks: str):
+    s = span("f", 100.0, 89.2, 10.91, SANS_ITALIC)
+    prime = span(marks, 104.0, 84.8, 7.97, "CMSY8")
+    assert [r["script"] for r in span_runs([s, prime])] == [None, None]
+
+
+def test_a_superscript_holding_more_than_primes_stays_a_superscript():
+    s = span("f", 100.0, 89.2, 10.91, SANS_ITALIC)
+    sup = span("′2", 104.0, 84.8, 7.97, "CMSY8")
+    assert [r["script"] for r in span_runs([s, sup])] == [None, "super"]
 
 
 def script_of_second(rise_em: float, gap: float) -> Script | None:

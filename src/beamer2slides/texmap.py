@@ -18,6 +18,8 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+from .script_space import SCRIPT_SPACE
+
 OPAQUE = "\ue000"  # stands for math and other things whose PDF text can't be predicted
 PARA = "\n"
 
@@ -745,8 +747,9 @@ def frame_visible(source: Source, frame: Frame) -> Visible:
 
 # ---------------------------------------------------------------- locating words
 
-WORD_RE = re.compile(r"\S+")
-NORMALISE = str.maketrans({"\u00a0": " ", "\u2008": " ", "\u2009": " ", "\u202f": " ", "\t": " ", "\x0b": " ", "“": '"', "”": '"',
+# (the hair space closing a script is inside its word, and nothing of it: script_space)
+WORD_RE = re.compile(r"(?:\S|" + SCRIPT_SPACE + ")+")
+NORMALISE = str.maketrans({SCRIPT_SPACE: "", "\u00a0": " ", "\u2008": " ", "\u2009": " ", "\u202f": " ", "\t": " ", "\x0b": " ", "“": '"', "”": '"',
                            "‘": "'", "’": "'", "ﬁ": "fi", "ﬂ": "fl", "…": "...", "−": "-"})
 
 

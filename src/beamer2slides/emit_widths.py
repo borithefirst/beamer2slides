@@ -20,6 +20,7 @@ from .emit_metrics import (
 from .emit_model import JsonMap, SetParagraph, SetRun, paragraph_of, run_of, runs_of
 from .fonts import font_info, written_advance
 from .mono_edges import EDGE_SPACE
+from .script_space import SCRIPT_SPACE
 
 
 ZWSP = "​"
@@ -29,8 +30,9 @@ WORD_JOINER = "⁠"       # no break here, no width (tools/probe_script_break.py
 # What classify adds before a word space where TeX's is wider than Lato's: U+2008 after a
 # sentence, a script or a formula letter (`classify_text.widened`), EDGE_SPACEs at an edge of
 # inline code (`mono_edges.edge_fill`). emit keeps them only on a line they leave no wider than the
-# PDF's (`emit_text.within_budget`); readers take them and their space for one space.
-ADDED_SPACE = re.compile("(?: |" + EDGE_SPACE + "+)(?= )")
+# PDF's (`emit_text.within_budget`); readers take them and their space for one space. And the hair
+# spaces closing a script before the glyph after it (`script_space`), which readers take for nothing.
+ADDED_SPACE = re.compile("(?: |" + EDGE_SPACE + "+)(?= )|" + SCRIPT_SPACE + "+")
 SCRIPT_SIZE = 2 / 3          # super- and subscripts in Slides (measured 0.665: tools/probe_text_fit_fonts.py)
 WRAP_MARGIN = 1.0            # Slides pt kept free in a cell so kerning or rounding cannot wrap it
 SMALL_CAPS_SIZE = 0.70       # Slides draws a small capital at 70% of its capital (tools/probe_text_fit_fonts.py)
@@ -397,11 +399,16 @@ def first_break(text: str, a: int, end: int) -> int:
     digit: UAX #14 LB25), or before a bracket opening after a Greek letter (`breaks_before`), as
     `text_layout.wrap` breaks. Taken to its space, the next line's first word was
     'Санкт-Петербургский', and the box left room for 'Санкт-', which Slides pulled up onto the
-    line above (r3_scripts_ruxe s1)."""
+    line above (r3_scripts_ruxe s1).
+
+    Or at the hair spaces closing a script (`script_space`): Slides decides whether the word fits
+    only up to them, a word joiner after them notwithstanding, and the rest of the word goes along.
+    'x_t' + two hair spaces + '.' stayed whole at the end of a line it ran 5.7 pt past, where 'x_t.'
+    in the same box wrapped (real_linear-attention-a s28): 'x_t' fitted."""
     space = text.find(" ", a)
     space = end if space < 0 or space > end else space
     for i in range(a + 1, space):
-        if breaks_before(text, i):
+        if breaks_before(text, i) or text[i] == SCRIPT_SPACE:
             return i
         if i < space - 1 and text[i] == "-" and not text[i - 1].isspace() and not text[i + 1].isdigit():
             return i + 1

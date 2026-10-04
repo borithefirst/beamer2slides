@@ -1207,6 +1207,16 @@ def _bullet_requests(paras: Sequence[SetParagraph], texts: Sequence[str], object
     return reqs
 
 
+def centred_indents(p: SetParagraph, left: float, right: float, scale: float) -> tuple[float, float]:
+    """(indentStart, indentEnd) (Slides pt) centring paragraph `p` on its PDF lines' middle in a
+    box whose text runs from `left` to `right` (slide pt): Slides centres a CENTER paragraph
+    between its indents (`text_layout`), so they are made equally far from that middle, as far
+    out as the box allows."""
+    middle = (min(ln.x0 for ln in p.lines) + max(ln.x1 for ln in p.lines)) / 2 * scale
+    half = max(0.0, min(middle - left, right - middle))
+    return max(0.0, middle - half - left), max(0.0, right - middle - half)
+
+
 def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                    placeholder: Placeholder | None, shell: Shell | None, page_slide: Mapping[int, str] | None,
                    bar: Sequence[float] | None, right_limit: float | None,
@@ -1288,9 +1298,21 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
         x -= slack / 2
     elif aligns == {"right"}:
         x -= slack
+    # A box mixing a centred paragraph with others keeps its words' left edge, so all its slack
+    # lay right of them and Slides centred that paragraph slack/2 right of its PDF middle (a TikZ
+    # node's centred title over a left-aligned line, 13.5 pt off: real_decision-tree-lect s30).
+    # The box takes half its slack on the left too (`lead`: what every start-edge paragraph's
+    # indents add back, its words staying put), and a centred paragraph is centred between
+    # indents equally far from its own PDF middle (`centred_indents`), with as much room as
+    # before. (Where the page has no room left of the box, as before.)
+    lead = 0.0
+    if "center" in aligns and len(aligns) > 1 and not text.code and all(p.direction != "rtl" for p in paras) \
+            and x >= slack / 2:
+        lead = slack / 2
+        x -= lead
     z_first, z_last = per_line[0][0], per_line[-1][-1]
     y = first_baseline - (BASELINE_A + ASCENT_EM * z_first + extra_above(ratios[0], z_first))
-    w = inner_w + 2 * PAD_X + slack
+    w = inner_w + 2 * PAD_X + slack + lead
     h = last_baseline - y + DESCENT_EM * z_last + extra_below(ratios[-1], z_last) + 4
     if right_limit and not multiline and aligns == {"left"} and not any(SOFT_BREAK in r.text for p in paras for r in p.runs):
         # Room up to the block edge or the next element: text typed later wraps where a user
@@ -1441,16 +1463,20 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
         # only offset it.
         start_edge = "right" if rtl else "left"
         room = (right_pdf - max(ln.x1 for ln in p.lines)) if rtl else (p.text_x0 - left_pdf)
-        text_indent = 0.0 if text.code or edge != start_edge else room * scale
+        text_indent = 0.0 if text.code or edge != start_edge else room * scale + lead
+        end = round(indent_end, 2)
         if p.bullet is not None:
             # Slides ends the bullet glyph a little before indentFirstLine.
             b_x0, b_x1, gap = bullet_extent_of(p.bullet, cap, scale, shell is not None)
             side = (right_pdf - b_x0) if rtl else (b_x1 - left_pdf)
-            first_indent = side * scale + gap
+            first_indent = side * scale + gap + lead
         elif p.tab_x0 and not text.code and not rtl:
             # "label<TAB>content": a tab after the hanging label jumps to indentStart.
             # (a right-to-left label's tab lands where nothing in the PDF says: no hang)
-            first_indent, text_indent = text_indent, (p.tab_x0 - left_pdf) * scale
+            first_indent, text_indent = text_indent, (p.tab_x0 - left_pdf) * scale + lead
+        elif edge == "center" and lead:
+            text_indent, more = centred_indents(p, x + PAD_X, x + w - PAD_X - indent_end, scale)
+            first_indent, end = text_indent, round(indent_end + more, 2)
         else:
             first_indent = text_indent
             if edge == start_edge and not rtl and not text.code and len(p.lines) > 1 and \
@@ -1461,7 +1487,6 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
         # ends at its PDF lines' edge (justified_right, paragraph_ends); Slides leaves the last
         # line ragged, as TeX does. A paragraph whose breaks need an edge short of the box's
         # keeps the difference free (indentEnd), written only where there is one.
-        end = round(indent_end, 2)
         paragraph: SlidesParagraphStyle = {
             "alignment": "JUSTIFIED" if justify else "CENTER" if edge == "center" else
                          "START" if (edge == "right") == rtl else "END",

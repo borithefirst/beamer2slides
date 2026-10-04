@@ -134,6 +134,35 @@ def raised_mark(text: str) -> str:
     return "".join(RAISED_MARKS.get(c, c) for c in text)
 
 
+# A prime is a mark of its own kind: CMSY's \prime is a stroke 0.56 em tall standing on the
+# baseline, made to be raised and shrunk as a superscript (x' is x^\prime), while the ′ Slides
+# draws (Arial's, its fallback: Lato has none; 0.186 em) is a tick 0.24 em tall already at the
+# height TeX raises the prime to: 0.48-0.72 em, TeX's s' 0.47-0.82 of a 10.91 pt line. Set as a
+# superscript it came out 2/3 the size and 0.37 em higher still: a speck over the letter
+# (big-o-for-weighted s5-s11, zds s85, defense s21).
+PRIMES = frozenset("′″‴")
+
+
+def primes_only(text: str) -> bool:
+    body = text.strip()
+    return bool(body) and all(c in PRIMES for c in body)
+
+
+def unscripted_mark(text: str) -> bool:
+    """A superscript of nothing but marks that Slides would shrink into a speck: a raised ring or
+    asterisk (RAISED_MARKS) or a prime, set unscripted at the line's size instead."""
+    return text.strip() in RAISED_MARKS or primes_only(text)
+
+
+def prime_size(text: str, script: Script | None, outer: Run | None, size: float) -> float:
+    """The size of a script run: a prime that is its script's own script (f_{s'}, `script_in_script`)
+    is as large as the script it is over, `outer`, not as small as TeX set it: ′'s tick is under half
+    the height of CMSY's prime, and at 6 pt it was a speck under the subscript's top."""
+    if outer is None or script is None or outer["script"] != script or not primes_only(text):
+        return size
+    return outer["size"]
+
+
 DOUBLE_STRUCK = {"C": "ℂ", "H": "ℍ", "N": "ℕ", "P": "ℙ", "Q": "ℚ", "R": "ℝ", "Z": "ℤ"}
 # \mathcal / \mathscr capitals as Unicode's script letters (the Letterlike Symbols ones where
 # Unicode has them there), \mathfrak as Fraktur. Slides draws them from its fallback font, as it
@@ -248,7 +277,9 @@ def compose_symbols(text: str) -> str:
 # Slides face has them at TeX's length: its fallback draws ⟶ about 0.75 em long where TeX's is
 # 1.64 em and mhchem's 2-3.3 em, so as one glyph the arrow came out short and tight, and an
 # \xrightarrow's labels printed over the formula (r1_sci_v3 s3, r1_math_v3 s6).
-LONG_ARROWS = set("⟶⟵⟷⟹⟸⟺⟼")
+# (and a hooked one: TeX's \hookrightarrow is a hook and a whole arrow, 1.4 em; Slides' ↪ half
+# that, the formula around it closed up, real_beamer-derived-cat s9)
+LONG_ARROWS = set("⟶⟵⟷⟹⟸⟺⟼↪↩")
 
 
 def long_arrow_groups(spans: list["Span"]) -> list[list["Span"]]:
@@ -450,8 +481,8 @@ def span_runs(spans: list[Span]) -> list[Run]:
         # (the largest span stands for the line)
         script = script_of(s, main) or \
             script_in_script(s, spans[i - 1] if i else None, runs[-1]["script"] if runs else None, main)
-        size = script_size(s, main) if script else s.size
-        if script == "super" and text.strip() in RAISED_MARKS:
+        size = prime_size(text, script, runs[-1] if runs else None, script_size(s, main)) if script else s.size
+        if script == "super" and unscripted_mark(text):
             pieces, script, size = [(raised_mark(text), False)], None, main.size
         for text, italic in pieces:
             run: Run = {"text": text, "font": s.font, "family": family, "size": round(size, 2),
@@ -781,18 +812,33 @@ def prose_share(spans: list[Span]) -> float:
     face, operator names (\\min, \\log) not counted. A display formula has few (a \\text{for all},
     "eigenvalues of" in a set), a line of prose with formulas in it mostly these."""
     total = sum(len(s.text.replace(" ", "")) for s in spans)
-    # (letters of a word may come as spans of their own: right-to-left text, letterspacing)
+    # (letters of a word may come as spans of their own: right-to-left text, letterspacing - but
+    # not a script on its letter: beamer's sans math sets "S_t", "k_j" as a CMSSBX letter and a
+    # CMSSI8 one touching it, and a display of vectors read as words of prose, its picture split
+    # into native letters and holes, real_linear-attention-a s42)
     text, prev = "", None
     for s in sorted(spans, key=lambda s: s.rect.x0):
         if s.info.family in ("math", "icon"):
             text += " "
         else:
-            text += ("" if prev is not None and s.rect.x0 - prev.rect.x1 <= 0.1 * s.size else " ") + s.text
+            joined = prev is not None and s.rect.x0 - prev.rect.x1 <= 0.1 * s.size and not scripted(prev, s)
+            text += ("" if joined else " ") + s.text
         prev = s
     # (a name right before its parenthesis is a function's, \operatorname{SSIM}(I_t, ...))
     words = sum(len(m.group()) for m in WORD_RE.finditer(text)
                 if m.group() not in OPERATOR_NAMES and text[m.end():m.end() + 1] != "(")
     return words / total if total else 0.0
+
+
+SCRIPT_SIZE = 0.85   # of its neighbour's size: a smaller glyph off its baseline is a script
+SCRIPT_SHIFT = 0.1   # em of the larger glyph: how far off its baseline
+
+
+def scripted(a: Span, b: Span) -> bool:
+    """Whether one of two touching spans is a script of the other: smaller and set off the
+    other's baseline (a word's letters, letterspaced or faked small caps, keep one baseline)."""
+    small, big = (a, b) if a.size < b.size else (b, a)
+    return small.size < SCRIPT_SIZE * big.size and abs(small.baseline - big.baseline) > SCRIPT_SHIFT * big.size
 
 
 def math_content(line: "Line") -> list[Span]:

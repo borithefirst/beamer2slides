@@ -57,6 +57,7 @@ from .deck_ir_types import TargetDeck, TargetImage, element_json, is_target, par
 from .ir_types import At, Box, box
 from .cjk_glue import as_tex
 from .mono_edges import EDGE_SPACE
+from .script_space import SCRIPT_SPACE
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, empty_visible,
                      frame_visible, line_of, locate_words, locate_words_in, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
@@ -111,7 +112,7 @@ def tex_env() -> dict[str, str]:
 
 ESCAPE = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_", "{": r"\{",
           "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}", "\u00a0": "~", "\u2008": "~", "\u200b": "", "\u2028": "", "\u2060": "", "\x0b": r"\\ ",
-          "\t": " "}
+          "\t": " ", SCRIPT_SPACE: ""}  # (the hair space closing a script: script_space; TeX has its own)
 
 
 # Set while adopt writes a source: its lengths are then rewritten from pt to bp afterwards

@@ -5439,3 +5439,63 @@ class on a fresh conversion before working on it.
   6794 -> 7625, PDF 7805). Not fixed: thesis s23's git-history panel is a raster image (980x743
   px): its 1-px rules are pixels, which Google's resampling thins like any box filter (PDFium's
   image downsampling keeps 5% more ink); no stroke to widen.
+- **Track M (r2), inline math runs: primes and the space after a script** (ledger r2 classes
+  prime-shrunk-detached-tick, prime-tiny-detached, inline-math-runs-spacing-comma-subscript,
+  inline-math-spacing-tight). (1) CMSY's \prime is a 0.56 em stroke standing on the baseline that
+  TeX raises and shrinks as a superscript; Slides draws ′ from Arial's fallback (0.186 em
+  advance), a tick already sitting 0.48-0.72 em high, so written SUPERSCRIPT it became a detached
+  speck (big-o s5-s11, zds s85, defense s21). Primes (′ ″ ‴, `classify_text.PRIMES`) are now
+  unscripted at the line's size like `RAISED_MARKS` (`unscripted_mark`, both in `span_runs` and
+  `runs_reaching`); a prime that is a script's own script (f_{s'}, `script_in_script`) takes the
+  outer script run's size (`prime_size`) so it is no smaller than its letter. (2) After a script
+  Slides' advance falls short of where TeX sets the next glyph (\scriptspace, 0.7 against 0.665
+  size, face widths): median 0.121 em of the line after subscripts (110 cases), 0.132 after
+  superscripts (92), so ',' and ')' ran into the script ('D_{k,i},', phylogenet s15; 'K_Y.', cat
+  s19; la12's v_jk_j). `classify_paragraphs.script_tail` closes the script run with U+200A hair
+  spaces (`script_space.script_fill`: the PDF distance from the script's first glyph to the next
+  glyph less `slides_width_of` the script, in `SCRIPT_SPACE_EM` 0.085 em of the drawn size, at
+  most `SCRIPT_SPACE_MAX` 4), only when a glyph follows directly on the same line (never before a
+  word space, in code, cells, labels or after a hole). They are emit's added spaces
+  (`emit_widths.ADDED_SPACE`: dropped with the line's others where Slides' line would pass the
+  PDF's by `SPACE_BUDGET`), measured by `SYMBOL_ADVANCE_EM`, and read as nothing by
+  `compare.NORMALISE`, `inverse.ESCAPE`, `merge.collapse_holes` and `texmap` (part of its word).
+  Scan (27 real PDFs and the built decks, offline plans): 94 real elements changed: 52 hair spaces
+  only (most kept by emit: cat 65/71, monodromy 150/151, big-o 55/67, phylogenet 16/16, linear 93/96),
+  29 primes unscripted or sized up (big-o, defense p20, postgres p12, zds p84, monodromy p60/66),
+  13 box widths or indentEnds moved by the added width (under +1%); built decks: only
+  27_text_fit p16's box (+0.4%). `tools/probe_script_space.py` live (2026-10-04): U+200A in a Lato
+  script run is 0.0560 em of the run's size (SUBSCRIPT) and 0.0552 (SUPERSCRIPT) against the
+  0.0567 emit assumes, and Slides breaks no line at one (Lato, PT Serif); PT Serif italic's rows
+  did not read (its H and o touch, no separate ink columns). But Slides decides whether a word
+  still fits its line only up to the hair spaces closing a script: 'x_t' + two hair spaces + '.'
+  stayed whole at the end of a line it ran 5.7 pt past, where 'x_t.' in the same box wrapped
+  (linear-attention s28, the box sized against the join with the '.'); a word joiner after the
+  hair spaces changed nothing, nor did sizing the box without them. `emit_widths.first_break`
+  measures the join to the first hair space, and `text_layout.wrap` lets the rest of the word go
+  along.
+  Not fixable through the API: a subscript's drop (0.371 em of its size against TeX's 0.15-0.25;
+  monodromy s3/s14/s17, biore s52 'cell', which is at the PDF's size) - only a hole picture would
+  place it - and a script's own script (cat s17): Slides has one script level. Left undiagnosed:
+  inline-math-letter-spacing-uneven, operator spacing.
+- **Track X, math drawings lost or broken** (beamer-derived-cat, linear-attention, decision-tree).
+  (1) cat s7's second `\xrightarrow` was in no picture and not in the background: the eraser
+  took every glyph inside a native line's band, its arrow too, though the arrow's span was
+  `left_in_background`. `_render_slides` now keeps a glyph such a span owns (`owned_by`) unless a
+  native element claims it. (2) linear-attention s42: a display formula under a horizontal brace
+  read as prose because `prose_share` joined a subscript to its nucleus into a "word" (W_Q); a
+  touching span much smaller and off the baseline is a script, never a word (`classify_text.scripted`,
+  0.85 size, 0.1 em shift), and `overlay()` refuses a figure over text whose box holds a math
+  line's spans (the brace stayed an overlay onto native words otherwise): formula and brace stay
+  one background drawing. `in_prose_flow` now also counts a bulleted neighbour starting at the
+  line's x as prose (monodromy p67's item lines, 0.33 prose, went into a picture without it).
+  (3) decision-tree s34: two boxes stacked with a gap made one table; `stacked_boxes` cuts a rule
+  group where uprights close the box above and open the one below at both ends, the gap at
+  least `BOX_GAP_EM` 0.4 em and wordless, no upright crossing it (africa's PDF page 10, rows
+  between their own rules with an interior column rule, stays one table). (4) decision-tree s30:
+  a box mixing a centred title with left items gave all its slack to the right, so the title sat
+  off centre; `_text_requests` puts half the slack on the left (`lead`) and a centred paragraph
+  gets indents centring it on its PDF middle (`centred_indents`). (5) cat s9's `\hookrightarrow`
+  (a hook and a whole arrow, 1.4 em) is a `LONG_ARROWS` hole at its PDF length. Over 27 real and
+  62 built PDFs only those pages changed. Open: decision-tree s27's eqnarray rows (a CMMI decimal
+  point splits digit runs, sized apart; emit run sizes) and cat s3/s17's blackboard-bold
+  superscripts sitting tight (script placement): both need live measurement.

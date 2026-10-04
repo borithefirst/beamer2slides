@@ -15,6 +15,7 @@ from .google_types import SlidesTextStyle
 from .gslides import pt_json as pt
 from .json_types import Json, JsonObject, JsonShapeError, as_object
 from .mono_edges import EDGE_SPACE, EDGE_SPACE_EM
+from .script_space import SCRIPT_SPACE, SCRIPT_SPACE_EM
 
 
 # Found through the package, never through the checkout: an installed wheel, a zip import and
@@ -48,6 +49,7 @@ SYMBOL_ADVANCE_EM = {
     "…": 0.724, " ": 0.19,
     "\u2008": 0.278,  # (the punctuation space a relation's thick space is written as: classify_text.THICK_SPACE)
     EDGE_SPACE: EDGE_SPACE_EM,  # (the six-per-em space at inline code's edges: mono_edges, tools/probe_mono_edges.py)
+    SCRIPT_SPACE: SCRIPT_SPACE_EM,  # (the hair space closing a script: script_space, tools/probe_mono_edges.py)
 }
 MATH_SPACE_EM = 0.278  # TeX's \thickmuskip (5 mu) around relations
 CMTT_ADVANCE_EM, ROBOTO_MONO_ADVANCE_EM = 0.525, 0.6

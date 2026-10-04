@@ -2,6 +2,7 @@
 from collections.abc import Sequence
 
 from beamer2slides import ir
+from beamer2slides.script_space import SCRIPT_SPACE
 
 from .test_charts_diagrams import Page, body_text, deck, images, raw_doc, run_texts, text_elements
 
@@ -173,7 +174,8 @@ def test_a_wrapped_formula_line_of_symbols_is_one_hole():
     body_text(p, 250)
     slide = deck(p)["slides"][0]
     pars = [par for e in slide["elements"] if e["kind"] == "text" for par in e["paragraphs"]]
-    said = ["".join(r["text"] for r in par["runs"]) for par in pars]
+    # (λ_2's run ends in the hair space bringing '.' to where TeX set it: script_space)
+    said = ["".join(r["text"] for r in par["runs"]).replace(SCRIPT_SPACE, "") for par in pars]
     [q] = [par for par in pars if any(r.get("hole") for r in par["runs"])]
     assert [r["text"].strip() for r in q["runs"] if not r.get("hole")] == [";"]
     assert not any(c in t for t in said for c in "⊔·")

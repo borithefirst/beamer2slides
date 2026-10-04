@@ -196,6 +196,13 @@ Google's renderer (advances as in `tools/probe_advances.py`, one reference row p
   editing it and for `deck_ir`), and the pitch between wrapped lines i and i+1 is
   0.227 z_i + 0.968 z_(i+1) + extra_below(r, z_i) + extra_above(r, z_(i+1)), z being each line's own
   largest run (`emit.line_sizes`, `inner_pitch`).
+  Primes are never scripts: Slides draws ′ ″ ‴ from Arial (0.186 em advance, the tick already
+  0.48-0.72 em high), so a SUPERSCRIPT prime is a detached speck; they are written unscripted at
+  the line's size (`classify_text.unscripted_mark`), a script's own prime at its script run's size
+  (`prime_size`). After a script Slides' advance falls 0.12-0.13 em of the line short of TeX's
+  (\scriptspace and the 0.7 script size): the script run ends in U+200A hair spaces making it up
+  (`script_space`, 0.085 em of the drawn size each, emit's added spaces; to be confirmed in script
+  runs by `tools/probe_script_space.py`).
 
 ## 2d. Math operators (`tools/probe_math_operators.py`, 2026-10-04)
 34 operators written in 11 served faces between Lato H's at 28 pt, measured on Google's

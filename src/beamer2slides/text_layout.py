@@ -31,6 +31,7 @@ from . import bidi, emit
 from .cjk_glue import CJK_GLUE
 from .emit_widths import HOLE_BREAKS, WORD_JOINER, breaks_before
 from .fonts import face_advance
+from .script_space import SCRIPT_SPACE
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object
 
 INSET_X = emit.PAD_X            # box edge -> text, left and right
@@ -282,13 +283,17 @@ def wrap(chars: str, styles: Sequence[JsonMap], width: float) -> list[tuple[int,
     Nor before a no-break space: Slides keeps a space and the no-break spaces after it together
     (UAX #14's old "× GL"), so a word before a formula hole goes down with it (visual hunt r8,
     r1_math_v2 s6: "pointwise, / but ∫..." in a box 54 pt wider than "... pointwise, but"). The
-    break emit writes before a hole (a LINE SEPARATOR, emit.HOLE_BREAK) breaks there."""
+    break emit writes before a hole (a LINE SEPARATOR, emit.HOLE_BREAK) breaks there.
+
+    Slides decides whether a word fits its line only up to the hair spaces closing a script
+    (`script_space`): the rest of the word goes along (`emit_widths.first_break`)."""
     lines: list[tuple[int, int, float]] = []
     start, n = 0, len(chars)
     while start <= n:
         w, last_break, i = 0.0, None, start
         ink_at_break = 0.0
         ink = 0.0
+        along = False  # (past the hair spaces closing a script: the rest of the word goes along)
         end: int | None = None
         nxt = n
         while i < n:
@@ -299,13 +304,19 @@ def wrap(chars: str, styles: Sequence[JsonMap], width: float) -> list[tuple[int,
             adv = advance(ch, styles[i], font_size(styles[i]))
             if ch == " " or ch in HOLE_BREAKS or ch == CJK_GLUE:  # (a six-per-em space breaks as one: cjk_glue)
                 w += adv
+                along = False
                 if ch in HOLE_BREAKS or chars[i + 1:i + 2] not in (NBSP, THICK_SPACE):
                     last_break, ink_at_break = i + 1, ink
                 i += 1
                 continue
+            if ch == SCRIPT_SPACE:
+                w += adv
+                along = True
+                i += 1
+                continue
             if i > start and breaks_before(chars, i):
                 last_break, ink_at_break = i, ink
-            if w + adv > width and i > start:
+            if w + adv > width and i > start and not along:
                 if last_break is not None and last_break > start:
                     end, nxt, ink = last_break, last_break, ink_at_break
                 else:

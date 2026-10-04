@@ -85,6 +85,41 @@ def upright_strokes(drawings: list[RawDrawing]) -> list[Rect]:
     return [r for r in boxes if r.w <= 1.2 and r.h >= 3.0]
 
 
+BOX_GAP_EM = 0.4  # of the body size: rules further apart with nothing between them close two boxes
+                  # (an \hline\hline's are \doublerulesep, 2 pt, apart)
+
+
+def stacked_boxes(group: list[Rule], uprights: list[Rect], words: list[Rect], body: float) -> list[list[Rule]]:
+    """Rules of one extent (a table's, `analyse_graphics`), cut where one framed box ends and
+    another starts below it: two rules a gap apart with no words between them, the upper box's
+    sides (an upright at each end of the rules) ending at the first and the lower one's starting
+    at the second, nothing upright running on across the gap. Two rows of \\fbox'ed cells (a
+    contingency grid of True/False Positive/Negative boxes) were one table, its rows closing up
+    over the gap between the boxes and the two rules one (real_decision-tree-lect-decision-analy
+    s34). (Rows each between two rules of their own, a column rule between each pair and none at
+    the ends, are one table: real_africa-remote-sens-30's PDF page 10.)"""
+    rules = sorted(group, key=lambda r: r.rect.cy)
+    x0, x1 = min(r.rect.x0 for r in rules), max(r.rect.x1 for r in rules)
+    inner = [v for v in uprights if x0 - 1 <= v.cx <= x1 + 1]
+    ends = [[v for v in inner if abs(v.cx - edge) <= 1] for edge in (x0, x1)]
+
+    def framed(top: float, bottom: float) -> bool:
+        return all(any(abs(v.y1 - top) <= 1 for v in side) and any(abs(v.y0 - bottom) <= 1 for v in side)
+                   for side in ends)
+
+    parts = [[rules[0]]]
+    for a, b in zip(rules, rules[1:]):
+        top, bottom = a.rect.cy, b.rect.cy
+        apart = bottom - top >= BOX_GAP_EM * body \
+            and not any(x0 <= w.cx <= x1 and top < w.cy < bottom for w in words) \
+            and framed(top, bottom) and not any(v.y0 < top + 1 and v.y1 > bottom - 1 for v in inner)
+        if apart:
+            parts.append([b])
+        else:
+            parts[-1].append(b)
+    return parts
+
+
 def box_edge(r: Rect, uprights: list[Rect]) -> bool:
     """A level rule both of whose ends meet an upright stroke (`upright_strokes`): the top or
     bottom edge of a box (\\boxed, \\fbox), however wide. As a hairline across half the page it
@@ -648,7 +683,8 @@ class GraphicsMixin(TablesMixin):
                     grown = True
         # Two or more horizontal rules of equal extent frame a table: the whole span is one
         # figure (or a native table, see table_from).
-        self.table_rules = [g for g in rules.values() if len(g) >= 2]
+        self.table_rules = [part for g in rules.values() for part in stacked_boxes(g, uprights, words, self.body)
+                            if len(part) >= 2]
         for group in self.table_rules:
             graphics.append(union_all(r.rect for r in group))
         # A short stroke touching other graphics is an arrow shaft or a tick, not a fraction bar.

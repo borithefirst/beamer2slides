@@ -269,10 +269,14 @@ class ReasonsMixin(FiguresMixin):
             if o is line or not o.spans[0].horizontal or o.reason in ("theme", "figure", "rotated") or \
                     abs(o.size - size) > 0.2 * size:
                 continue
-            # (any of its words: an item's first line starts with its label, "4. Let ...")
+            # (any of its words: an item's first line starts with its label, "4. Let ..."; such a
+            # line is the paragraph's however few words its formulas leave it: "7) If g · s = g′ ·
+            # s, then again g′g⁻¹ ∈ G_s = G_q([x]), so" is 0.33 prose once G_s is no word, and the
+            # item's next line, "g · q([x]) = g′ · q([x]). And transitivity implies surjectivity.",
+            # went into its picture, real_beamer-monodromy's PDF page 67)
             if 0.8 * size <= abs(o.baseline - line.baseline) <= 2.2 * size \
                     and any(abs(s.rect.x0 - line.x0) <= 1.5 for s in o.content) \
-                    and prose_share(o.content) >= DISPLAY_WORD_SHARE:
+                    and (o.bullet is not None or prose_share(o.content) >= DISPLAY_WORD_SHARE):
                 return True
         return False
 

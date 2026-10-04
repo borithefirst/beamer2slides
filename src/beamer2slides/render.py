@@ -944,11 +944,18 @@ def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_sha
             mine = set(native)
             pictured = owned_by([spans[sid] for el in figures for sid in _ids(el, "spans")
                                  if sid in spans and sid not in mine])
+            # So does a glyph classify left in the background: a long arrow's txsys pieces have
+            # boxes an em tall around a stroke at the math axis, and the box of the second of
+            # two `\xrightarrow{words}` reached its label's x-height band - the arrow went with
+            # the label, in neither the background nor the deck (real cat s7).
+            kept = owned_by([spans[sid] for left in _array_at(slide, "left_in_background")
+                             for sid in _ids(as_object(left, "left_in_background"), "spans")
+                             if sid in spans and sid not in mine])
             ours = owned_by([spans[sid] for sid in native])
 
             def in_line(ch: Char) -> bool:
                 return any(_intersects(ch.box, b) and _same_dir(ch.dir, d) for b, d in bands) \
-                    and not (pictured(ch) and not ours(ch))
+                    and not ((pictured(ch) or kept(ch)) and not ours(ch))
 
             eraser.remove_chars(in_line)
         for x0, y0, x1, y1 in (_json_box(st, "strokes") for el in texts for st in _array_at(el, "strokes")):
