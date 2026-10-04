@@ -5263,3 +5263,24 @@ class on a fresh conversion before working on it.
   0.58, thesis-defense s4 0.87 -> 0.92 ('sources' stays on its line), defense s33 0.74 -> 0.975
   (the architecture figure one picture), third-year-talk's mean 0.88 -> 0.92 (s17 'THE END'
   0.45 -> 0.61), africa s2's footline whole over the frame; no deck's mean went down.
+- **Track Q, furniture a figure holds** (africa-remote-sens): the footline author 'Леменкова П.
+  А.' was a label of a frame drawn down to the page foot on 4 of 48 frames, so it was not the same
+  on every slide and stayed in every background. Right after `assign_reasons`, a "figure" line
+  made only of furniture spans (`classify.furniture`) is "theme". And `promote_theme_text` takes
+  as one layout text a theme text on every slide once in the same words, baseline and colours
+  that moves at most half an em across (`shifted_theme_texts`: the centred author moved 2 pt once
+  the frame number had two digits), placed where most slides have it (`shifted_place`). Over 89
+  PDFs: africa, decision-tree's 'icl.pdf'/'collage.' (the PDF prints a missing logo file's name on
+  every frame: now layout text) and thesis-defense s12's footline.
+- **Track R, a caption the box holds** (third-year-talk p10 f1): the tree's leaves end on the
+  first of three caption lines, which the box held as labels with the second, so `stands_on` saw
+  one stroke on the last line. `classify_figures.caption_above` takes label lines stacked
+  straight up from a met line at its left edge as the caption's start; strokes ending on them or
+  half an em above count. One page changed in 89 PDFs. p14's 'iterations' is no loss: its
+  baseline is 3.6 pt below the page (the PDF cuts it).
+- **Track S, a tiny superscript** (third-year-talk p2): TeX's script sizes stop at 5 pt, so a
+  `$^*$` beside \tiny words is 0.92 of them and `script_of` (under 0.85) called it no script;
+  0.85-0.95 of the line raised 0.3 em or more is "super" too, and the opening ∗ is a raised mark
+  at line size (`RAISED_MARKS`). extract's font widths standing in for advances
+  (`_accent_overhang`, `_ligature_overhang`) are stretched like their text object
+  (`_drawn_stretches`): protective, no corpus page changed.

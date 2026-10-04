@@ -104,7 +104,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   ball keeps its label's parentheses unless they reach its rim, `BALL_RIM`; numbers after nested
   glyph items are literal, emit making one list per preset; a mark outlined in another colour is
   a picture),
-  inline math as runs with scripts (down from 0.10 em, up from 0.12 em; raised rings and asterisks
+  inline math as runs with scripts (down from 0.10 em, up from 0.12 em, beside \tiny words 0.85-0.95
+  of their size raised 0.3 em, `script_of`; raised rings and asterisks
   become `°`/`*` at line size) and Unicode,
   links, code. Frame titles use the layout's TITLE placeholder. Hanging labels are `label<TAB>text`.
   RTL (Hebrew/Arabic) is turned into logical order (`bidi.py`) and written `RIGHT_TO_LEFT` with
@@ -199,7 +200,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   is a hole (`render.others_glyphs`); icons grow to their ink, and every crop reaches the ink of the glyphs
   it takes from the background (`render.reach_held_ink`, `holds`: italic overhangs, hanging pieces); a line crossing a picture's edge keeps its
   crossing rows in the background (`picture_crossings`). A figure whose 3+ strokes end on words
-  beyond its box stands on its caption: a plain picture, no overlay (`classify_figures.stands_on`);
+  beyond its box stands on its caption: a plain picture, no overlay (`classify_figures.stands_on`;
+  caption lines its box holds count, `caption_above`);
   a diagram's segments inside a filled node are drawn after the nodes (`on_filled_node`); a smaller
   glyph raised 0.3 em over its words is a footnote mark, no label (`classify_reasons.footnote_mark`).
   A figure crop over words the layout carries (`on_layout`) is see-through where it paints
@@ -271,7 +273,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   Words on different theme artwork or logo boxes are different lines (`artwork_of`); footline
   boxes beside band artwork are theme; runs of words repeated whole at one place in the header
   or footer band on half the frames are the deck's furniture, theme whatever their size
-  (`classify.furniture`, a \tiny body). A stroked border framing the page (an outline or four
+  (`classify.furniture`, a \tiny body), even where a figure holds them; one moving at most half an
+  em across slides is one layout text (`shifted_theme_texts`). A stroked border framing the page (an outline or four
   edge lines within `PAGE_FRAME_INSET` of every edge, `classify_graphics.page_frame`) is taken
   out of the page classify reads, as its ground is (as a graphic every line became a figure
   label). A layout gets no decoration cut out over more than `render.DECORATION_HOLES` of the

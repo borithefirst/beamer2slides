@@ -173,17 +173,40 @@ def on_rim(rect: Rect, end: Sequence[float], other: Sequence[float]) -> bool:
 STANDING_STROKES = 3  # drawings ending on a caption's words from one side: a figure standing on it
 
 
+def caption_above(met: Sequence[Span], labels: Sequence[Span]) -> list[Span]:
+    """The caption's first lines when the figure's box holds them as its labels: label lines
+    starting where a met line starts, stacked straight up from it (a tree's leaves end on the
+    first line of a three-line caption, only its last line left as words)."""
+    out: list[Span] = []
+    for s in met:
+        top = s
+        while True:
+            up = [o for o in labels if o not in out and abs(o.rect.x0 - s.rect.x0) <= 0.1 * s.size
+                  and o.rect.y0 < top.rect.y0 and o.rect.y1 >= top.rect.y0 - 0.5 * s.size]
+            if not up:
+                break
+            top = max(up, key=lambda o: o.rect.y0)
+            out.append(top)
+    return out
+
+
 def stands_on(c: Rect, met: Sequence[tuple[Span, Line]], ends: Sequence[tuple[Sequence[float], RawDrawing]],
-              near: Callable[[Span, float, float], bool]) -> bool:
+              near: Callable[[Span, float, float], bool], caption: Sequence[Span]) -> bool:
     """A figure standing on its caption, not a graphic drawn for its words: the words it meets
     lie beyond its box (their middle below its foot or above its top), and several of its
     strokes end on them - a tree's leaves on the line under it. An arrow or a brace meets its
     words with one or two strokes. As an overlay, the figure was stretched after the caption
     Slides set while what it did not hold stayed in the background (a tree's nodes slid off
-    their outlines)."""
+    their outlines). `caption` are its first lines the box holds as labels (`caption_above`):
+    strokes ending on them, or half an em above them, count too."""
     if not all(s.rect.cy >= c.y1 or s.rect.cy <= c.y0 for s, _ in met):
         return False
-    meeting = {d["id"] for (x, y), d in ends if any(near(s, x, y) for s, _ in met)}
+
+    def on_caption(s: Span, x: float, y: float) -> bool:
+        return s.rect.x0 - 0.1 * s.size <= x <= s.rect.x1 + 0.1 * s.size and \
+            s.rect.y0 - 0.5 * s.size <= y <= s.rect.y1
+    meeting = {d["id"] for (x, y), d in ends if any(near(s, x, y) for s, _ in met)
+               or any(on_caption(s, x, y) for s in caption)}
     return len(meeting) >= STANDING_STROKES
 
 
@@ -456,7 +479,8 @@ class FiguresMixin(ParagraphsMixin):
         ends = [(p, d) for d in drawings for p in points(d)]
         met = [(s, l) for s, l in words if any(near(s, x, y) and (not rim_only(d) or self.graphic_drawings[d["id"]].contains(s.rect.cx, s.rect.cy))
                                                 for (x, y), d in ends)]
-        if met and stands_on(c, met, ends, near):
+        held = [s for s in label_spans if c.expand(0.5).contains_rect(s.rect, tol=0.5)]
+        if met and stands_on(c, met, ends, near, caption_above([s for s, _ in met], held)):
             return "standing"  # a figure on its caption: no overlay, whatever its strokes reach into
         if not met and over_text:
             met = [(s, l) for s, l in words if any(s.rect.intersects(self.graphic_drawings[d["id"]]) for d in drawings)]

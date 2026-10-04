@@ -20,6 +20,7 @@ element emit cannot take fails the checker. `ir.deck_json` is the same deck as J
 
 import re
 import statistics
+from collections import Counter
 from dataclasses import replace
 
 from . import ir
@@ -101,6 +102,13 @@ class PageClassifier(ReasonsMixin):
             self.join_hanging_operators(self.join_braces(self.build_lines(spans)))))
         self.read_lines(lines, spans)
         self.assign_reasons(lines)
+        # The deck's furniture is theme text even where a figure drawn down to the page foot
+        # holds it: claimed by the figure on a few frames, it was not the same on every slide
+        # and stayed in every background (real_africa-remote-sens-30's footline author).
+        for line in lines:
+            if line.reason == "figure" and line.text.strip() \
+                    and all(s.id in self.furniture for s in line.spans if s.text.strip()):
+                line.reason = "theme"
         plain_tables = self.plain_tables(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
         self.text_margin = min((l.rect.x0 for l in body_lines), default=0.08 * self.W)
@@ -362,12 +370,14 @@ def promote_theme_text(slides: list[ir.Slide]) -> list[ir.ThemeText]:
         return []
     keys = [{t["key"]: t for t in s["theme_texts"]} for s in slides]
     common = set(keys[0]).intersection(*keys[1:])
+    shifted = shifted_theme_texts(keys, common)
     for slide, by_key in zip(slides, keys):
-        moved = {sid for k in common for sid in by_key[k]["spans"]}
+        mine = {k for k in by_key if k in common or loose_key(k) in shifted}
+        moved = {sid for k in mine for sid in by_key[k]["spans"]}
         slide["on_layout"] = sorted(moved)
         # Frame counters ("3 / 9") differ per slide: a small text box on the slide. The rest
         # of the theme then often renders identically on every slide (one shared background).
-        counters = [t for k, t in by_key.items() if k not in common and FRAME_COUNTER_RE.match(t["key"][0])]
+        counters = [t for k, t in by_key.items() if k not in mine and FRAME_COUNTER_RE.match(t["key"][0])]
         for j, t in enumerate(counters):
             counter: ir.TextElement = {"kind": "text", "role": "footer", "bbox": t["bbox"], "panel": t["panel"],
                                        "code": t["code"], "paragraphs": t["paragraphs"], "spans": t["spans"],
@@ -379,8 +389,44 @@ def promote_theme_text(slides: list[ir.Slide]) -> list[ir.ThemeText]:
             left["spans"] = [left["spans"][i] for i in keep]
             left["bboxes"] = [left["bboxes"][i] for i in keep]
         slide["left_in_background"] = [l for l in slide["left_in_background"] if l["spans"]]
-        slide["stats"]["chars_native"] += sum(by_key[k]["chars"] for k in common) + sum(t["chars"] for t in counters)
-    return [keys[0][k] for k in sorted(common, key=lambda k: (k[2], k[1]))]
+        slide["stats"]["chars_native"] += sum(by_key[k]["chars"] for k in mine) + sum(t["chars"] for t in counters)
+    placed = [keys[0][k] for k in common] + [shifted_place(keys, lk) for lk in shifted]
+    return sorted(placed, key=lambda t: (t["key"][2], t["key"][1]))
+
+
+LooseKey = tuple[str, int, str]
+"""A theme text's key (`ir.ThemeText`) without its x: words, baseline, colours."""
+
+
+def loose_key(key: tuple[str, int, int, str]) -> LooseKey:
+    return (key[0], key[2], key[3])
+
+
+def shifted_theme_texts(keys: list[dict[tuple[str, int, int, str], ir.ThemeText]],
+                        common: set[tuple[str, int, int, str]]) -> set[LooseKey]:
+    """Theme texts on every slide in the same words, colours and baseline, once each, whose x
+    moves by no more than half an em: centred furniture shifts with what shares its box (the
+    footline author of real_africa-remote-sens-30 starts 2 pt further right once the frame
+    number has two digits), and is still the same text on the layout."""
+    loose = [Counter(loose_key(k) for k in by_key) for by_key in keys]
+    out: set[LooseKey] = set()
+    for lk in set(loose[0]).intersection(*loose[1:]):
+        if any(c[lk] != 1 for c in loose):
+            continue
+        found = [t for by_key in keys for k, t in by_key.items() if loose_key(k) == lk]
+        if any(t["key"] in common for t in found):
+            continue
+        xs = [t["key"][1] for t in found]
+        if max(xs) - min(xs) <= 0.5 * found[0]["paragraphs"][0]["size"]:
+            out.add(lk)
+    return out
+
+
+def shifted_place(keys: list[dict[tuple[str, int, int, str], ir.ThemeText]], lk: LooseKey) -> ir.ThemeText:
+    """The layout's copy of a shifted theme text (`shifted_theme_texts`): where most slides have it."""
+    found = [t for by_key in keys for k, t in by_key.items() if loose_key(k) == lk]
+    x = Counter(t["key"][1] for t in found).most_common(1)[0][0]
+    return next(t for t in found if t["key"][1] == x)
 
 
 def mark_big_headings(slides: list[ir.Slide], body: float) -> None:

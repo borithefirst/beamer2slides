@@ -12,7 +12,7 @@ from typing import Literal, Protocol
 from . import bidi, type3
 from .fonts import font_info
 from .pdf import NO_OBJECT, OBJ_IMAGE, Char, Document, Page, PdfDocument, char_box
-from .pdf.api import Drawing, Link
+from .pdf.api import Drawing, Link, stretch_across
 from .raw_types import (
     DrawingType, PathItem, RawColor, RawDoc, RawDrawing, RawImage, RawLink, RawMark, RawPage, RawSpan,
 )
@@ -619,6 +619,20 @@ def column_grid(chars: list[Char]) -> dict[int, Columns]:
     return {k: grid for glyphs, grid, _, _ in taken for k in glyphs}
 
 
+def _drawn_stretches(page: Page, chars: list[Char], ks: list[int]) -> dict[int, float]:
+    """How much wider than tall each of these characters' text objects draws them
+    (`pdf.api.stretch_across`): a font's width at a character's size is that much short of its
+    drawn advance in a picture scaled across, as the backends' own fallback widths are stretched."""
+    objects = page.objects()
+    out: dict[int, float] = {}
+    for k in ks:
+        obj = chars[k].obj
+        if obj not in out:
+            a, b, c, d, _, _ = objects[obj].matrix if 0 <= obj < len(objects) else (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            out[obj] = stretch_across(a, b, c, d)
+    return out
+
+
 def _accent_overhang(page: Page, chars: list[Char]) -> list[Char]:
     """An accented italic letter's accent can reach past its advance (Calibri Italic's ì), and
     PDFium's loose box - the advance the text page gives - reaches to the ink: the word space
@@ -628,8 +642,10 @@ def _accent_overhang(page: Page, chars: list[Char]) -> list[Char]:
     if not todo:
         return chars
     out = list(chars)
-    for k, width in zip(todo, page.glyph_widths([(chars[k].font_id, chars[k].c, chars[k].size) for k in todo])):
+    stretch = _drawn_stretches(page, chars, todo)
+    for k, font_width in zip(todo, page.glyph_widths([(chars[k].font_id, chars[k].c, chars[k].size) for k in todo])):
         ch = chars[k]
+        width = font_width * stretch[ch.obj] if font_width else font_width
         if width and 0.5 * ch.advance < width < ch.advance - 0.02 * ch.size:
             out[k] = dataclasses.replace(ch, advance=width, exact_advance=False, box=char_box(
                 ch.origin[0], ch.origin[1], ch.dir[0], ch.dir[1], width, ch.size, ch.ascent, ch.descent))
@@ -656,12 +672,13 @@ def _ligature_overhang(page: Page, chars: list[Char]) -> list[Char]:
         return chars
     widths = page.glyph_widths([(chars[k].font_id, c, chars[k].size) for k, letters in todo for c in letters])
     out = list(chars)
+    stretch = _drawn_stretches(page, chars, [k for k, _ in todo])
     at = 0
     for k, letters in todo:
         mine, at = widths[at:at + len(letters)], at + len(letters)
         ch = chars[k]
         known = [w for w in mine if w]
-        width = sum(known)
+        width = sum(known) * stretch[ch.obj]
         if len(known) == len(letters) and 0.5 * ch.advance < width <= ch.advance - LIGATURE_OVERHANG * ch.size:
             out[k] = dataclasses.replace(ch, advance=width, exact_advance=False, box=char_box(
                 ch.origin[0], ch.origin[1], ch.dir[0], ch.dir[1], width, ch.size, ch.ascent, ch.descent))

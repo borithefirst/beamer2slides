@@ -80,10 +80,14 @@ def script_of(span: Span, line: Row) -> Script | None:
     0.11 em; it raises a superscript 0.36-0.53 em, a keycap's small letters 0.09-0.11 em (not a
     script), so a subscript starts at 0.10 em and a superscript at 0.12. listings raises the
     underscore of an inline `_exit` into a span of its own font's words: that is code, not a
-    superscript."""
+    superscript. TeX's script sizes stop at 5 pt, so beside \\tiny words a superscript is nearly
+    their size (the 5.48 pt `$^*$` opening '* plus complicated models', 0.92 of 5.98 pt, raised
+    0.39 em): smaller and raised 0.3 em or more is a superscript too."""
+    shift = span.baseline - line.baseline
+    if 0.85 * line.size <= span.size < 0.95 * line.size and shift <= -0.3 * line.size:
+        return None if span.text.lstrip().startswith("_") else "super"
     if span.size >= 0.85 * line.size:
         return None
-    shift = span.baseline - line.baseline
     if shift < -0.12 * line.size:
         return None if span.text.lstrip().startswith("_") else "super"
     if shift > 0.10 * line.size:

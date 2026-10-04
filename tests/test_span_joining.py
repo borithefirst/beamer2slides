@@ -59,7 +59,7 @@ class Page:
         return (0.0, 0.0, self.width, self.height)
 
     def objects(self) -> list[PageObject]:
-        unasked("objects")
+        return []  # (a font width stands in unstretched: no text object scales its glyphs)
 
     def object_bounds(self) -> list[Box]:
         unasked("object bounds")
