@@ -386,6 +386,11 @@ def _advance(table: Mapping[str, float], ch: str) -> float | None:
     return w
 
 
+def unspaced(text: str) -> str:
+    """A text's letters alone: its spaces, which TeX stretches after a sentence, taken out."""
+    return text.replace(" ", "").replace("\xa0", "")
+
+
 def advance_widths(text: str, cm: CmFace, slides: Mapping[str, float]) -> tuple[float, float, int, int]:
     """(Slides em, PDF em, characters counted, characters skipped) of a text set in a Computer
     Modern face (`cm`, a CM_ADVANCES entry) and in its Slides substitute (`slides`, an ADVANCES
@@ -649,22 +654,30 @@ class FontMapper:
             return 1.0
         # sized by the title factor (CM's sans titles only)
         title = info.design_size is not None and run.family != "serif" and 11.5 <= design < 14
-        ratio = s_em / p_em / self.reference_ratio_in(key, face, slides, title)
-        return ratio if abs(ratio - 1) > SHAPE_TOL else 1.0
+        ratio = s_em / p_em / self.reference_ratio_in(key, face, slides, title, False)
+        if abs(ratio - 1) <= SHAPE_TOL:
+            return 1.0
+        # Its letters are what is sized, never its spaces: 'Query: “A ? C ? F ? E ? B ?”' is half
+        # spaces, TeX's wide ones after each '?', which made it 9% larger than its letters asked
+        # (real_linear-attention-a s39). Letters alike keep the deck's size.
+        ls_em, lp_em, _, _ = advance_widths(unspaced(text), face, slides)
+        letters = ls_em / lp_em / self.reference_ratio_in(key, face, slides, title, True) if lp_em > 0 else 1.0
+        return letters if abs(letters - 1) > SHAPE_TOL and (letters - 1) * (ratio - 1) > 0 else 1.0
 
     def reference_ratio(self, face: str, slides: Mapping[str, float], title: bool) -> float:
         """`reference_ratio_in` a CM_ADVANCES face, by its name."""
-        return self.reference_ratio_in(face, CM_ADVANCES[face], slides, title)
+        return self.reference_ratio_in(face, CM_ADVANCES[face], slides, title, False)
 
-    def reference_ratio_in(self, key: str, face: CmFace, slides: Mapping[str, float], title: bool) -> float:
+    def reference_ratio_in(self, key: str, face: CmFace, slides: Mapping[str, float], title: bool,
+                           letters: bool) -> float:
         """Slides em / PDF em of the calibration sentences in a face (`key` names it: a CM_ADVANCES
         name, or 'family/style' of TEXT_ADVANCES): where its size factor puts the widths of ordinary
-        text."""
-        cached = (key, id(slides), title)  # `slides` is one of ADVANCES' tables, which live as long
+        text; with `letters`, of their letters alone (`unspaced`)."""
+        cached = (key, id(slides), title, letters)  # `slides` is one of ADVANCES' tables, which live as long
         if cached not in self._reference:
             s_em = p_em = 0.0
             for sentence in SHAPE_TITLE_REFERENCE if title else SHAPE_REFERENCE:
-                s, p, _, _ = advance_widths(sentence, face, slides)
+                s, p, _, _ = advance_widths(unspaced(sentence) if letters else sentence, face, slides)
                 s_em, p_em = s_em + s, p_em + p
             self._reference[cached] = s_em / p_em
         return self._reference[cached]
@@ -681,8 +694,8 @@ class FontMapper:
         if own is None or regular is None:
             return None
         slides = ADVANCES[substitute]
-        return (self.reference_ratio_in(regular[0], regular[1], slides["regular"], False),
-                self.reference_ratio_in(own[0], own[1], slides[STYLE_KEY[(bold, italic)]], False))
+        return (self.reference_ratio_in(regular[0], regular[1], slides["regular"], False, False),
+                self.reference_ratio_in(own[0], own[1], slides[STYLE_KEY[(bold, italic)]], False, False))
 
 
 # A bullet dict (the tests, devtools.alignment, classify's reading of a page) reaches each bullet

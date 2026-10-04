@@ -68,8 +68,9 @@ decorations) is a picture, or baked into a per-slide background picture.
 - **Fidelity is measured on Google's own renderer** (`getThumbnail` vs the PDF page), never a local
   preview. Font substitutes are calibrated (`tools/calibrate.py`, `calibration/fonts.json`,
   per-character advances in `calibration/advances.json` via `tools/probe_advances.py`). A run of
-  15+ characters whose letters are unlike a sentence's (serif capitals, a line of w) is sized to
-  its PDF width when more than 7% off: Slides advances against Computer Modern's
+  15+ characters whose letters are unlike a sentence's (serif capitals) is sized to its PDF width
+  when more than 7% off, by its letters alone, never its spaces (`emit_metrics.unspaced`, Lato's
+  spaces are far narrower than CM's): Slides advances against Computer Modern's
   (`calibration/cm_advances.json` from `tools/cm_advances.py`, `FontMapper.shape_ratio`; numbers
   too). Small caps are a deliberate compromise at 1.13x (`SMALL_CAPS_WIDTH`). TeX text faces
   other than CM (Libertine, Bera, DejaVu, Palatino...) are sized by their own TFM advances
@@ -161,6 +162,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   a `\quad` is an em space at max(0.9, word space + 0.4) em; thin-spaced digits keep NBSP
   (`thin_span`). Code keeps its columns: spaces from glyph x over the column pitch (`code_pitch`),
   line numbers a right-aligned box of their own (`split_line_numbers`, Line `code_number`); a
+  mono listing on columns wider than its glyphs (listings' columns=fixed: 0.6 em over CMTT's
+  0.525) carries its block's column `pitch` (`classify_text.wide_columns`, `WIDE_COLUMNS`); a
   line's baseline is the one most of its letters stand on (`Line.main`); code lines are never
   formulas.
 - `image`: figure regions (TikZ, plots, raster images with their labels) as pictures. A bare

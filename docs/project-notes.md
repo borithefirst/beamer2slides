@@ -5063,3 +5063,29 @@ class on a fresh conversion before working on it.
   (`printed_over`). With furniture on it also freed the frame number an overfull line covered (5
   africa slides: 'закономерности7', a 'С' and a 'р.' lost into a picture). Corpus: 5 slides, all
   africa; no built deck changed. Left (page alone only): same-size captions on or near the footline.
+- A run is sized by its letters, never its spaces (`FontMapper.shape_ratio_of`). Lato's space is
+  far narrower against its letters than CM's: the calibration sentences give Slides/PDF 1.015
+  spaced and 1.085 unspaced in cmss10. So a run with fewer spaces than a sentence looked wide, one
+  with more (or with TeX's sentence spaces) narrow: 'Query: “A ? C ? F ? E ? B ?”' (linear s39)
+  was sized 20% up where its letters ask 12%; 'Geothermal reservoirs' was shrunk 7.6%,
+  citation keys and DOIs ('Lemenkova202515') grown 8%, and a line of w was 'unlike a sentence'
+  only by its spaces (its letters 3% off). The run is still judged on its whole width first; it
+  is sized only when its letters (`emit_metrics.unspaced`, against the sentences' letters,
+  `reference_ratio_in(letters=True)`) are off by SHAPE_TOL the same way, and then by their ratio.
+  Archived decks: 166 runs changed, 136 back to the deck's size, none newly shaped.
+- Code listings on wide columns in a monospaced face (track F). listings' `columns=fixed` sets each
+  token of n letters in n columns of `basewidth`, 0.6 em by default, whatever the face; CMTT's and
+  Latin Modern Mono's glyphs are 0.525 em, spread by equal glues before, between and after them.
+  `extract.column_grid` only gives proportional lines a grid, so these runs had no `pitch`, and
+  Roboto Mono was sized to the glyph: every line predicted 0.84 of its PDF width (28_frames_code,
+  real_ansible-meetup's CMTT12 listings, 127 lines). `classify_text.wide_columns` tells such a
+  block apart: its longer spans are wider per letter than its narrowest span (1.11-1.18, a
+  two-span block 1.036), while blocks whose glyphs fill their columns (verbatim, flexible
+  listings, minted, URLs) stay within 1.019 over the corpus and the test decks (`WIDE_COLUMNS`
+  1.03). Such a block's mono runs carry its `code_pitch` as run `pitch` (`on_columns`), which
+  `emit_metrics.mono_pitch` already sizes to: predicted widths 1.016 and 1.012, the rest the PDF's
+  glyph-to-glyph line measure. Scoring the face's advance on `code_pitch`'s column test was tried
+  first and failed: a flexible listing indents by 0.6 em columns but sets its words at 0.525, and
+  the compromise pitch 0.5475 made 11_research_talk 4% wide. Corpus: only ansible's listings and
+  28_frames_code changed. Left: a flexible listing's wider indent gives 5 spaces for 4
+  (`code_indent`); real_talks' visible-space mark is a rule in the background.

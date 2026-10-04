@@ -1006,6 +1006,43 @@ def code_pitch(spans: list[Span], x0: float) -> float | None:
     return statistics.median(fits)
 
 
+# How much wider per letter than its narrowest span a monospaced code block's longer spans are
+# when its glyphs are spread over wider columns: 1.11-1.18 on listings' columns=fixed (1.036 on a
+# block of two spans), at most 1.019 where glyphs fill their columns (verbatim, flexible
+# listings, minted; 27 corpus decks and the test decks).
+WIDE_COLUMNS = 1.03
+
+
+def wide_columns(spans: list[Span], pitch: float) -> float | None:
+    """A code block's column `pitch` (`code_pitch`, pt) when its monospaced glyphs do not fill
+    their columns, else None. listings' columns=fixed sets each token of n letters in n columns
+    of its `basewidth` (0.6 em by default), the glyphs spread by equal glues before, between and
+    after them, whatever the face's advance: CMTT's and Latin Modern Mono's are 0.525 em, and
+    Roboto Mono sized to the glyphs (emit_metrics.mono_pitch) left every line of such a listing
+    14-16% short of the PDF's (28_frames_code, real_ansible-meetup). Such a block's spans grow
+    wider per letter the longer they are (a single glyph is its advance, n letters span nearly n
+    columns), while glyphs that fill their columns (verbatim, a flexible listing, a URL) are one
+    advance per letter in every span: then emit sizes Roboto Mono to the face as before. A span
+    on a grid in a proportional face says its own pitch (`Span.grid`) and is not measured."""
+    mono = [s for s in spans if s.info.family == "mono" and s.grid is None and s.text
+            and s.text == s.text.strip() and s.size > 0]
+    longer = [s.rect.w / len(s.text) / s.size for s in mono if len(s.text) >= 2]
+    if not longer:
+        return None
+    glyph = min(s.rect.w / len(s.text) / s.size for s in mono)
+    size = statistics.median(s.size for s in mono)
+    wide = statistics.median(longer) > WIDE_COLUMNS * glyph and pitch / size > WIDE_COLUMNS * glyph
+    return pitch if wide else None
+
+
+def on_columns(runs: list[Run], pitch: float) -> list[Run]:
+    """A code paragraph's runs with its monospaced ones sized to columns of `pitch` pt
+    (`wide_columns`): run `pitch`, per em of the run's size (emit_metrics.mono_pitch)."""
+    return [{**r, "pitch": round(pitch / r["size"], 4)}
+            if r["family"] == "mono" and r.get("pitch") is None and not r.get("hole") and r["size"] > 0 else r
+            for r in runs]
+
+
 def code_indent(par: Paragraph, box_x0: float, pitch: float | None) -> str:
     """Leading spaces that reproduce a code line's indentation: the block's column `pitch`
     (`code_pitch`) per space, else (None) the line's monospace advance per char. (A span on a

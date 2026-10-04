@@ -12,9 +12,9 @@ from .classify_model import (
 from .classify_text import (
     COMPOSED, FRACTION_SLASH, NBSP, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
     family_of, first_word_width, formula_groups, gap_between, glued, is_code, is_mono, last_word_width,
-    line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, prose_spaces, raised_mark,
-    reading_order, script_in_script, script_of, script_size, stretched, thick_spaces, thin_span, with_accent,
-    with_text,
+    line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, on_columns, prose_spaces,
+    raised_mark, reading_order, script_in_script, script_of, script_size, stretched, thick_spaces, thin_span,
+    wide_columns, with_accent, with_text,
 )
 from .classify_lines import LinesMixin, ends_in_leader, leader_line, leader_pitch, overprint_word, prints_over
 from .fonts import serif_math_letters
@@ -511,6 +511,9 @@ class ParagraphsMixin(LinesMixin):
             return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0], False) <= room
                        for a, b in zip(p.lines, p.lines[1:]))
         runs = [self.runs(p, code_indent(p, rect.x0, pitch) if code else "", unbalanced(p), pitch) for p in box]
+        columns = wide_columns([s for p in box for s in p.spans], pitch) if pitch else None
+        if columns is not None:  # (listings' columns=fixed: Roboto Mono sized to the columns)
+            runs = [on_columns(r, columns) for r in runs]
         # (said only where it is known, on a left-aligned wrapped paragraph: line_starts)
         starts = [line_starts(p.lines, r) if p.align == "left" and not code and not p.direction else None
                   for p, r in zip(box, runs)]

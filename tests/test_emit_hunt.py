@@ -90,15 +90,17 @@ def test_dot_leaders_and_ellipses_keep_the_size_factor() -> None:
 
 def test_a_run_among_others_keeps_their_size() -> None:
     # ml v3 s10, control c2 s12, sci v3 s9: an author list or a journal abbreviation of 15+
-    # characters, sized to its own PDF width, came out 10% larger than the title beside it.
-    authors = text_run("J. Park, W. Zhang, et al. ", BODY)
+    # characters, sized to its own PDF width, came out 10% larger than the title beside it. (Their
+    # letters are ordinary: since runs are sized by their letters alone, never their spaces, such
+    # a list keeps the deck's size anyway; serif capitals still are sized.)
+    authors = text_run("SPEAKER NOTES AND CAPITALS: ", BODY, font="CMR10", family="serif")
     title = text_run("Graph networks for crystal property prediction", BODY, font="CMSSI10", italic=True)
-    prose = FONTS(text_run("Monitor", BODY), SCALE)[1]
+    prose = FONTS(text_run("Monitor", BODY, font="CMR10", family="serif"), SCALE)[1]
     assert FONTS(authors, SCALE)[1] != prose  # alone: sized to its width
-    el = text_element_of([[authors, title], [text_run("J. Park, W. Zhang, et al. ", BODY)]], None)
+    el = text_element_of([[authors, title], [text_run("SPEAKER NOTES AND CAPITALS: ", BODY, font="CMR10", family="serif")]], None)
     sizes = [(t, pt_of(s["fontSize"])) for t, s in styled(typed_text_requests(el, SCALE))]
-    assert sizes[0] == ("J. Park, W. Zhang, et al. ", prose)
-    assert sizes[-1] == ("J. Park, W. Zhang, et al. ", FONTS(authors, SCALE)[1])  # its own paragraph: as before
+    assert sizes[0] == ("SPEAKER NOTES AND CAPITALS: ", prose)
+    assert sizes[-1] == ("SPEAKER NOTES AND CAPITALS: ", FONTS(authors, SCALE)[1])  # its own paragraph: as before
     assert jobj(el, "paragraphs", 0, "runs", 0) is authors and "in_sentence" not in authors  # the IR is left alone
     # In a table cell too.
     table: JsonObject = {"id": "p0b0", "kind": "table", "frame": [100.0, 50.0, 400.0, 70.0], "size": 10.91,

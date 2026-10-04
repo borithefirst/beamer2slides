@@ -21,6 +21,7 @@ from beamer2slides.classify import HOLE_PAD, classify
 from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, FontMapper, find_marks, fit_holes,
                                 formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
                                 measure_jobs, overlay_boxes, pick_gap, slide_holes, space_shift)
+from beamer2slides.emit_metrics import unspaced
 from beamer2slides.emit_model import Place, PptxText, set_text, table_of, text_of
 from beamer2slides.emit_pptx import SHELL_CHAR
 from beamer2slides.emit_tables import pptx_table_of, table_requests_of
@@ -1458,14 +1459,29 @@ def test_a_run_whose_letters_are_unlike_a_sentence_is_set_at_its_pdf_width() -> 
         return em * emit.design_width(emit.DESIGN_WIDTH[jstr(run, "family")], 10) * jnum(run, "size") * SCALE
 
     for run in (text_run("SPEAKER NOTES AND CAPITALS: WHY NOT?", BODY, font="CMR10", family="serif"),
-                text_run("THE QUICK BROWN FOX JUMPS OVER", BODY, font="CMBX10", family="serif", bold=True),
-                text_run("wwwwwwww wwwwwwww wwwwwwww", BODY, font="CMSS10")):
+                text_run("THE QUICK BROWN FOX JUMPS OVER", BODY, font="CMBX10", family="serif", bold=True)):
         assert abs(shape_of(run) - 1) > emit.SHAPE_TOL, run["text"]
-        # as wide against the PDF as the sentences the size factor was calibrated on (bold keeps
-        # its half correction)
-        sentences: JsonObject = {**run, "text": " ".join(emit.SHAPE_REFERENCE)}
+        # its letters as wide against the PDF as the letters of the sentences the size factor was
+        # calibrated on (bold keeps its half correction); its spaces are Slides' own
+        letters: JsonObject = {**run, "text": unspaced(jstr(run, "text"))}
+        assert shape_of(letters) == shape_of(run), run["text"]
+        sentences: JsonObject = {**run, "text": unspaced(" ".join(emit.SHAPE_REFERENCE))}
         ordinary = slides_w([sentences], SCALE) / pdf_width(sentences)
-        assert slides_w([run], SCALE) / pdf_width(run) == pytest.approx(ordinary, rel=0.01), run["text"]
+        assert slides_w([letters], SCALE) / pdf_width(letters) == pytest.approx(ordinary, rel=0.01), run["text"]
+
+
+def test_a_run_is_sized_by_its_letters_never_its_spaces() -> None:
+    # real_linear-attention-a s39: half of it TeX's wide spaces after each '?', it was sized 20%
+    # up; its letters (capitals, '?', quotes) are 12% narrower in Lato, and that is all it takes.
+    query = text_run("Query: “A ? C ? F ? E ? B ?”", 7.97, font="CMSS8")
+    slides = emit.ADVANCES["Lato"]["regular"]
+    face = emit.CM_ADVANCES["cmss10"]
+    letters = emit.advance_widths(unspaced(jstr(query, "text")), face, slides)
+    sentence = emit.advance_widths(unspaced(" ".join(emit.SHAPE_REFERENCE)), face, slides)
+    assert shape_of(query) == pytest.approx(letters[0] / letters[1] / (sentence[0] / sentence[1]))
+    assert 0.85 < shape_of(query) < 0.9
+    # spaces alone never size a run: TeX's after a sentence are wider than Lato's
+    assert shape_of(text_run("Done. Next. Then? Yes! Fine. Good. Over.", BODY)) == 1.0
 
 
 def test_ordinary_text_keeps_the_size_factor() -> None:
@@ -1473,13 +1489,20 @@ def test_ordinary_text_keeps_the_size_factor() -> None:
     prose = FONTS(text_run("Monitor", BODY), SCALE)[1]
     for run in (text_run("SPEAKER NOTES AND CAPITALS: WHY NOT?", BODY),  # Lato's capitals: 0.945, ordinary
                 text_run("WWWW MMMM", BODY), text_run("wwwwwwww", BODY),  # short: a word's own spread
+                # Lato's w is 3% wider than its sentence letters: this line was 8% off only by
+                # having fewer spaces than a sentence, and Lato's spaces are narrower than CM's
+                text_run("wwwwwwww wwwwwwww wwwwwwww", BODY),
                 text_run("Wide letters: WWWWWWWW MMMMMMMM mmmmmmmm wwwwwwww", BODY),  # 1.024 over the paragraph
                 text_run("The quick brown fox jumps over the lazy dog, twice", BODY),
                 text_run("SPEAKER NOTES AND CAPITALS", BODY, script="super")):
         assert shape_of(run) == 1.0, run["text"]
         if not run.get("script"):
             assert FONTS(run, SCALE)[1] == prose, run["text"]
-    fira = text_run("SPEAKER NOTES AND CAPITALS: WHY NOT?", BODY, font="FiraSans-Regular")
+    # real_linear-attention-a s39: half of it TeX's wide spaces after each '?', its letters alike;
+    # it came out 9% larger than its neighbours.
+    query = text_run('Query: "A ? C ? F ? E ? B ?"', BODY)
+    assert shape_of(query) == 1.0 and FONTS(query, SCALE)[1] == prose
+    fira =text_run("SPEAKER NOTES AND CAPITALS: WHY NOT?", BODY, font="FiraSans-Regular")
     assert FONTS(fira, SCALE)[1] == round(10.91 * SCALE, 1)
 
 
