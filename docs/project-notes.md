@@ -5319,8 +5319,8 @@ class on a fresh conversion before working on it.
   \hfill line) as U+2008 + space in a Lato run (`widened`), and only where the line has room
   before its paragraph's widest line (`THICK_SPACE_EM`, `WIDE_ROOM_EM`; at a block body's colon
   a line 3 pt from the edge ran 9 pt past the slide, 27_text_fit p8). pull and adopt read it back
-  as one TeX space (`inverse.latex_escape`), never `~ `. Open: a mono run's edges lose about
-  0.14 em each (needs a measured narrow space in emit); LinLibertineTI math (monodromy) is not
+  as one TeX space (`inverse.latex_escape`), never `~ `. (A mono run's edges: Track B below.)
+  Open: LinLibertineTI math (monodromy) is not
   read as a formula. Live: ansible s26's gap after 'Questions?' is the PDF's (was half).
 - **Track Y, operators in a math face** (after the operator probe, docs/calibration.md 2d): 27
   operators a math font's run sets in Lato's fallback are written in the served face nearest
@@ -5352,3 +5352,24 @@ class on a fresh conversion before working on it.
   and thesis-defense p35/36's reach out, so their footline words stay layout text. Whether the
   holding figure repeats is not known a page at a time, and over 89 PDFs the band alone told
   every case apart; only decision-tree's deck.json changed (`tests/test_logo_words.py`).
+- **Track B, a mono run's edge spaces and emit's width budget** (gittalk s13 'cvsimport,git',
+  talksx s13-s38 'LambdaCase,ViewPatterns'; Track U's open line): TeX sets the space beside a
+  \texttt word in the prose font (0.31-0.33 em of CM Sans over 366 edges; talksx's \code macro
+  adds one, 0.63 em), Slides draws Lato's 0.19 em, and inline code sized by its columns makes
+  nothing up. `tools/probe_mono_edges.py` measured Slides' spaces in a Lato run (plain 0.193,
+  U+2009 0.201, U+200A 0.085, U+2006 0.169, U+2008 0.280, U+2004 0.333 em; all 0.537 in Roboto
+  Mono), so classify writes `mono_edges.edge_fill` SIX-PER-EM SPACEs before the prose run's space
+  at a code edge (`classify_paragraphs.code_edge`, `edge_reach`), at most `EDGE_MAX` 3; readers take
+  them and the space for one space (`inverse.latex_escape`, `compare.NORMALISE`,
+  `merge.collapse_holes`, `emit_widths.ADDED_SPACE`). The thick spaces of Track U widened
+  centred talksx titles past the PDF (-0.07 to -0.15 on 6 slides), so emit now keeps a line's
+  added spaces (U+2008 and the edge spaces, all of a line's or none) only when Slides would set
+  the line no wider than the PDF's plus `SPACE_BUDGET` 1% (`emit_text.within_budget`,
+  `line_bounds`, `line_fits`; Courier New at its 0.6 em grid, `FIXED_ADVANCE_EM`; a line it cannot
+  measure keeps none). Live (b1 against r011, words' ink overlap): talksx titles back (s34 0.442
+  -> 0.578, s47 0.466 -> 0.613), 10 of talksx's 11 changed slides up, means ansible 0.575 -> 0.583,
+  gittalk 0.643 -> 0.649, talks 0.551 -> 0.554, talksx 0.638 -> 0.642, zds 0.686 -> 0.688,
+  linear-attention 0.629 -> 0.630, rxjs and postgres flat. Open: talksx s5 'Intro:  pick your
+  battles' 0.660 -> 0.389: without its thick space Slides' line is 612 px against the PDF's 613
+  (with it 2.8% wider), but the PDF sets wide spaces all along that line and 'pick' had landed on
+  the PDF's 'pick' only with the gap. Table cells get no edge spaces (`span_runs`).

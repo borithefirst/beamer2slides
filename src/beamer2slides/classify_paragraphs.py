@@ -15,18 +15,37 @@ from .classify_text import (
     family_of, first_word_width, formula_groups, gap_between, glued, is_code, is_mono, last_word_width,
     line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, on_columns, prose_spaces,
     raised_mark, reading_order, script_in_script, script_of, script_size, stretched, thick_spaces, thin_span,
-    wide_columns, wide_gap, widened, widens_after, with_accent, with_text, word_gap,
+    WORD_GAP_MIN_EM, wide_columns, wide_gap, widened, widens_after, with_accent, with_text, word_gap,
 )
 from .classify_lines import LinesMixin, ends_in_leader, leader_line, leader_pitch, overprint_word, prints_over
-from .fonts import serif_math_letters
+from .fonts import google_font, serif_math_letters
 from .ir import Align, BeforeWord, Run, TextElement
 from .ir import Paragraph as ParagraphJson
+from .mono_edges import edge_fill, edge_width
 
 
 EM_SPACE = chr(0x2003)
 FURNITURE_BAND = 0.13  # of the page's height: the header or footer band furniture is drawn in
+QUAD_EM = 0.9  # a word gap this wide or wider is a \quad's, written as em spaces (`runs_reaching`)
 TRAILING_PUNCT = re.compile(r"(?<=\w)[,.;:!?)\]]+\s*$")
 BOX_PAD = " "   # a padded \colorbox's \fboxsep, highlighted (a no-break space: the box never breaks)
+
+
+def code_edge(a: Span, b: Span) -> bool:
+    """`a` then `b` on a line is an edge of inline code: one monospaced, the other prose Slides
+    sets in Lato (a sans run in no Google font of the PDF's own, as `classify_text.widened`), and
+    neither underlined, struck or highlighted (a \\colorbox's padding is its own: BOX_PAD)."""
+    mono = sum(s.info.family == "mono" for s in (a, b))
+    lato = sum(s.info.family == "sans" and google_font(s.font) is None for s in (a, b))
+    return mono == 1 and lato == 1 and all(s.highlight is None and not s.underline and not s.strike for s in (a, b))
+
+
+def code_edges_width(spans: list[Span], size: float) -> float:
+    """What writing every inline code edge between these neighbours (a line's spans in reading
+    order) as wide as the PDF's adds to the line in Slides, em of `size` (`edge_fill`): a line takes
+    all its edges or none, so that the code words on it stand alike."""
+    gaps = [gap_between(a, b) / size for a, b in zip(spans, spans[1:]) if code_edge(a, b)]
+    return sum(edge_width(edge_fill(g)) for g in gaps if WORD_GAP_MIN_EM < g < QUAD_EM)
 
 
 class ParagraphsMixin(LinesMixin):
@@ -72,6 +91,28 @@ class ParagraphsMixin(LinesMixin):
         between the text margins (or the panel it is on) and whatever stands beside it - taken
         evenly about its centre for centred text, up to its right edge for right-aligned text."""
         r = par.rect
+        lb, rb = self.room_of(par)
+        if par.align == "center":
+            return max(0.0, 2 * min(r.cx - lb, rb - r.cx))
+        return max(0.0, r.x1 - lb)
+
+    def edge_reach(self, par: Paragraph) -> float:
+        """How far right a line of `par` may run once the gaps at the edges of its inline code are
+        written wider (`mono_edges`): its widest line or the room it stands in (`room_of`), the
+        right end of a centred line as it grows both ways; none for right-aligned or right-to-left
+        text, which grows to its left."""
+        if par.align == "right" or par.direction:
+            return -math.inf
+        widest = max(l.x1 for l in par.lines)
+        lb, rb = self.room_of(par)
+        if par.align == "center":
+            return max(widest, par.rect.cx + min(par.rect.cx - lb, rb - par.rect.cx))
+        return max(widest, rb)
+
+    def room_of(self, par: Paragraph) -> tuple[float, float]:
+        """The left and right ends of the room `par` stands in: the text margins (or the page's
+        edges), the panel it is on, and whatever stands beside it."""
+        r = par.rect
         # (the text margin bounds the paragraph only where the paragraph stays within it and other
         # text keeps to it, or the paragraph runs from it to where it mirrors - a full measure: a
         # margin only its own lines set, or one they cross, says nothing of its room. Two centred
@@ -98,9 +139,7 @@ class ParagraphsMixin(LinesMixin):
                     lb = max(lb, o.x1)
                 elif o.x0 >= r.x1 - 0.5:
                     rb = min(rb, o.x0)
-        if par.align == "center":
-            return max(0.0, 2 * min(r.cx - lb, rb - r.cx))
-        return max(0.0, r.x1 - lb)
+        return lb, rb
 
     @staticmethod
     def links_apart(a: Line, b: Line) -> bool:
@@ -599,7 +638,8 @@ class ParagraphsMixin(LinesMixin):
             room = max(widest + 0.5 * p.size, self.free_width(p) - 0.5 * p.size)
             return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0], False) <= room
                        for a, b in zip(p.lines, p.lines[1:]))
-        runs = [self.runs(p, code_indent(p, rect.x0, pitch) if code else "", unbalanced(p), pitch) for p in box]
+        runs = [self.runs_reaching(p, code_indent(p, rect.x0, pitch) if code else "", unbalanced(p), pitch,
+                                   self.edge_reach(p)) for p in box]
         columns = wide_columns([s for p in box for s in p.spans], pitch) if pitch else None
         if columns is not None:  # (listings' columns=fixed: Roboto Mono sized to the columns)
             runs = [on_columns(r, columns) for r in runs]
@@ -652,9 +692,16 @@ class ParagraphsMixin(LinesMixin):
 
     @staticmethod
     def runs(par: Paragraph, indent: str, soft_breaks: bool, pitch: float | None) -> list[Run]:
+        """`runs_reaching` with no room for the wider gaps at inline code's edges (a layout text's
+        runs: they stay as the PDF's words are)."""
+        return ParagraphsMixin.runs_reaching(par, indent, soft_breaks, pitch, -math.inf)
+
+    @staticmethod
+    def runs_reaching(par: Paragraph, indent: str, soft_breaks: bool, pitch: float | None, reach: float) -> list[Run]:
         """`indent`: spaces a code line starts with (`code_indent`, else ""); `soft_breaks`: its
         lines keep their breaks (a title's); `pitch`: a code block's column pitch (`code_pitch`),
-        which its spaces keep, else None."""
+        which its spaces keep, else None; `reach`: how far right a line may run once the gaps at
+        its inline code's edges are written as wide as the PDF's (`edge_reach`, `mono_edges`)."""
         runs: list[Run] = []
         prev: Span | None = None
         hole_x1 = 0.0
@@ -668,9 +715,13 @@ class ParagraphsMixin(LinesMixin):
             own_space = math.inf if par.justified and li < len(par.lines) - 1 else word_gap(gaps)
             widest = max(l.x1 for l in par.lines)
             widenings = 0  # (thick spaces this line gained: each needs its room, THICK_SPACE_EM)
+            edged = 0.0  # (em this line gained at its inline code's edges: mono_edges)
             order = reading_order(line)
             # (not in code, whose spaces are columns)
             formulas: dict[int, int] = {} if pitch else formula_groups(line, max(l.x1 - l.x0 for l in par.lines))
+            # (where the line has room for all its inline code's wider edges: mono_edges)
+            edges = code_edges_width([s for s, _ in order if isinstance(s, Span) and s.info.family != "icon"], line.size)
+            edges_fit = line.x1 + (edges * (0.5 if par.align == "center" else 1.0) + WIDE_ROOM_EM) * line.size <= reach
             accent = ""  # an accent at the end of a span, for the letter under it in the next one
             for si, (span, forced) in enumerate(order):
                 if isinstance(span, str):  # (FRACTION_SLASH, the only string)
@@ -802,7 +853,7 @@ class ParagraphsMixin(LinesMixin):
                                 wide_gap(gap / line.size, own_space) and prev.highlight is None and \
                                 widens_after(prev, bool(runs[-1]["script"])) and \
                                 span.highlight is None and (par.align == "center" or line.x1 + (
-                                    THICK_SPACE_EM * (widenings + 1) + WIDE_ROOM_EM) * line.size <= widest) and \
+                                    THICK_SPACE_EM * (widenings + 1) + edged + WIDE_ROOM_EM) * line.size <= widest) and \
                                 (id(prev) not in formulas or formulas.get(id(span)) != formulas[id(prev)]):
                             # a sentence's end, a script's or a formula letter's wider space: a
                             # thick space before it (in the run it goes into, below); not beside a
@@ -816,6 +867,28 @@ class ParagraphsMixin(LinesMixin):
                             else:
                                 into_next = bool(runs[-1]["script"]) or prev.size < 0.85 * span.size
                                 sep = widened(span if into_next else prev)
+                        elif sep == " " and edges_fit and not pitch and not math.isinf(own_space) and \
+                                code_edge(prev, span) and not runs[-1].get("hole") and not runs[-1]["script"] and \
+                                id(prev) not in formulas and id(span) not in formulas:
+                            # Inline code's edge: TeX's word space there is the prose font's, which
+                            # Slides' Lato space falls short of by 0.145 em (mono_edges) - thin spaces
+                            # before the space, in the prose run, where the line has the room
+                            fill = edge_fill(gap / line.size)
+                            grows = THICK_SPACE_EM * widenings + edged + edge_width(fill)
+                            if fill and line.x1 + (grows * (0.5 if par.align == "center" else 1.0) +
+                                                   WIDE_ROOM_EM) * line.size <= reach:
+                                edged += edge_width(fill)
+                                if prev.info.family == "mono":  # (code, then prose: the space goes over)
+                                    if runs[-1]["text"].endswith(" "):
+                                        runs[-1]["text"] = runs[-1]["text"][:-1]
+                                    text = fill + " " + text.lstrip(" ")
+                                elif runs[-1]["text"].endswith(" "):  # (prose, then code)
+                                    runs[-1]["text"] = runs[-1]["text"][:-1] + fill + " "
+                                elif text.startswith(" "):  # (prose_spaces brings the code's space over)
+                                    runs[-1]["text"] += fill
+                                else:
+                                    runs[-1]["text"] += fill + " "
+                                sep = ""
                     hole_w = runs[-1].get("hole")
                     if si and sep == " " and hole_w:
                         # The space after a formula becomes part of its gap: TeX's space there

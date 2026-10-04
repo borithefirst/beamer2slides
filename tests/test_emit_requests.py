@@ -24,7 +24,7 @@ from beamer2slides.emit_metrics import unspaced
 from beamer2slides.emit_model import Place, PptxText, set_text, table_of, text_of
 from beamer2slides.emit_pptx import SHELL_CHAR
 from beamer2slides.emit_tables import pptx_table_of, table_requests_of
-from beamer2slides.emit_widths import HOLE_BREAKS
+from beamer2slides.emit_widths import ADDED_SPACE, HOLE_BREAKS
 from beamer2slides.emit_text import text_box_requests_of, words_right
 from beamer2slides.fonts import font_info
 from beamer2slides.google_types import SlidesRequest, part_json, slides_json, slides_request_kind
@@ -72,7 +72,8 @@ def pt_of(dim: Json) -> float:
 
 
 def collapse(text: str) -> str:
-    return re.sub(NBSP + "+", NBSP, "".join(ch for ch in text if ch not in HOLE_BREAKS))  # (emit.HOLE_BREAK)
+    # (emit.HOLE_BREAK; the spaces classify added, kept or not by emit_text.within_budget)
+    return re.sub(NBSP + "+", NBSP, ADDED_SPACE.sub("", "".join(ch for ch in text if ch not in HOLE_BREAKS)))
 
 
 def run_text(runs: Sequence[Mapping[str, Json]]) -> str:

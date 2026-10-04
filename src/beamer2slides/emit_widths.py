@@ -19,12 +19,18 @@ from .emit_metrics import (
 )
 from .emit_model import JsonMap, SetParagraph, SetRun, paragraph_of, run_of, runs_of
 from .fonts import font_info, written_advance
+from .mono_edges import EDGE_SPACE
 
 
 ZWSP = "​"
 LINE_SEPARATOR = " "   # no width; Slides may end a line after it, before no-break spaces too (emit_text.HOLE_BREAK)
 HOLE_BREAKS = ZWSP + LINE_SEPARATOR  # what emit writes (or wrote) in front of a hole: no character of the text
 WORD_JOINER = "⁠"       # no break here, no width (tools/probe_script_break.py); emit writes it: joined_runs
+# What classify adds before a word space where TeX's is wider than Lato's: U+2008 after a
+# sentence, a script or a formula letter (`classify_text.widened`), EDGE_SPACEs at an edge of
+# inline code (`mono_edges.edge_fill`). emit keeps them only on a line they leave no wider than the
+# PDF's (`emit_text.within_budget`); readers take them and their space for one space.
+ADDED_SPACE = re.compile("(?: |" + EDGE_SPACE + "+)(?= )")
 SCRIPT_SIZE = 2 / 3          # super- and subscripts in Slides (measured 0.665: tools/probe_text_fit_fonts.py)
 WRAP_MARGIN = 1.0            # Slides pt kept free in a cell so kerning or rounding cannot wrap it
 SMALL_CAPS_SIZE = 0.70       # Slides draws a small capital at 70% of its capital (tools/probe_text_fit_fonts.py)

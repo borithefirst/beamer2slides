@@ -21,7 +21,7 @@ from difflib import SequenceMatcher
 from typing import Literal, TypedDict, TypeVar
 
 from . import identity, snapshot
-from .emit_widths import HOLE_BREAKS, WORD_JOINER
+from .emit_widths import ADDED_SPACE, HOLE_BREAKS, WORD_JOINER
 from .google_types import SlidesRange, SlidesRequest, SlidesTableCellLocation
 from .ir_types import Box
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str, as_str
@@ -852,8 +852,9 @@ def collapse_holes(text: str) -> str:
     """Hole runs (no-break spaces sized to a formula) as one no-break space: their count follows the formula width.
     The break emit writes in front of a hole (emit.HOLE_BREAK, HOLE_BREAKS) is no character of the
     text either: a deck converted before it and one after say the same; nor is a word joiner
-    (emit_widths.joined_runs: π, U+2060, [γ])."""
-    text = "".join(ch for ch in text if ch not in HOLE_BREAKS and ch != WORD_JOINER)
+    (emit_widths.joined_runs: π, U+2060, [γ]); nor the spaces classify adds before a word space,
+    which emit writes only where the line has room (ADDED_SPACE, emit_text.within_budget)."""
+    text = ADDED_SPACE.sub("", "".join(ch for ch in text if ch not in HOLE_BREAKS and ch != WORD_JOINER))
     return re.sub(" +", " ", text)
 
 

@@ -36,6 +36,7 @@ from .classify import FRAME_COUNTER_RE
 from .emit import FontMapper, merge_blocks
 from .emit_model import run_of
 from .fonts import google_font, metrics_family
+from .mono_edges import EDGE_SPACE
 from .deck_ir_types import TargetDeck, target_json
 from .ir_types import At, Box, Deck, Parse, RenderedDeck, box, deck_json, integer, number, one_of, pair, point, string
 from .json_types import Json, JsonArray, JsonObject, JsonShapeError, as_array, as_object, as_objects, as_str
@@ -54,7 +55,8 @@ TOL: dict[str, float] = {
 }
 IGNORED_ROLES = frozenset({"footer", "math", "icon", "overlay", "highlight"})
 NORMALISE = str.maketrans({" ": " ", " ": " ", " ": " ", "\t": " ", "\x0b": " ", "“": '"', "”": '"',
-                           "‘": "'", "’": "'", "…": "...", "−": "-", "​": "", "\u2008": " ", "\u2028": ""})
+                           "‘": "'", "’": "'", "…": "...", "−": "-", "​": "", "\u2008": " ", "\u2028": "",
+                           EDGE_SPACE: " "})  # (inline code's edges: mono_edges)
 HOLE = ""
 
 T = TypeVar("T")

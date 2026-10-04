@@ -24,8 +24,8 @@ from .emit_model import (
     json_number, number_box, number_box_of, run_of, set_text, text_of,
 )
 from .emit_widths import (
-    LINE_SEPARATOR, SCRIPT_SIZE, SMALL_CAPS_SIZE, WORD_JOINER, guessed_chars, held_starts, joined_runs, paragraph_dict, runs_between,
-    set_runs_of, slides_lines_of, slides_width_of,
+    ADDED_SPACE, LINE_SEPARATOR, SCRIPT_SIZE, SMALL_CAPS_SIZE, WORD_JOINER, guessed_chars, held_starts, held_width_of, joined_runs,
+    paragraph_dict, pdf_line_breaks_of, recorded_starts, runs_between, set_runs_of, slides_lines_of, slides_width_of,
 )
 from .fonts import cjk_font, font_info, google_font
 from .google_types import (
@@ -340,12 +340,107 @@ def hole_runs_of(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> lis
 
 
 def held_paragraph(p: SetParagraph, scale: float, fonts: FontMapper) -> SetParagraph:
-    """A paragraph as its text box holds it: runs in sentences, each hole its no-break spaces, a
+    """A paragraph as its text box holds it: runs in sentences, the spaces classify added kept only
+    on lines they leave no wider than the PDF's (`within_budget`), each hole its no-break spaces, a
     word joiner where Slides would break inside a word (`joined_runs`), and the line starts
     classify recorded moved to that text (`held_starts`)."""
-    ir = in_sentence_of(p.runs)
+    budgeted = within_budget(replace(p, runs=tuple(in_sentence_of(p.runs))), scale, fonts)
+    ir = list(budgeted.runs)
     held = joined_runs(hole_runs_of(ir, scale, fonts))
-    return replace(p, runs=kept_bullet(held, p.bullet is not None), line_starts=held_starts(ir, held, p.line_starts))
+    return replace(budgeted, runs=kept_bullet(held, p.bullet is not None),
+                   line_starts=held_starts(ir, held, budgeted.line_starts))
+
+
+# The spaces classify adds (`emit_widths.ADDED_SPACE`) are each right for their gap, but a line is
+# right only as a whole: Lato's wider letters already make up for its narrower spaces, and a
+# centred title 'Mistake:  string types' with its thick space came out 3.5% wider than the PDF's,
+# every word on it shifted (real_talksx s17, s23, s34, s41, s47, s74).
+# How much wider than the PDF's line Slides may set it with its added spaces (of the PDF line's
+# extent): a line wider than that is written with plain spaces.
+SPACE_BUDGET = 0.01
+
+
+def within_budget(p: SetParagraph, scale: float, fonts: FontMapper) -> SetParagraph:
+    """The paragraph with the spaces classify added (ADDED_SPACE) taken out of every line that
+    Slides would set wider than the PDF's line (plus SPACE_BUDGET of it) with them: all of a line's
+    or none, so that its code words and sentences stand alike. A line Slides cannot measure, or
+    whose words cannot be told (`line_bounds`), keeps none. Its `line_starts` follow the text."""
+    text = "".join(r.text for r in p.runs)
+    added = [(m.start(), m.end()) for m in ADDED_SPACE.finditer(text)]
+    if not added:
+        return p
+    bounds = line_bounds(p, text, scale, fonts)
+    drop: set[int] = set()
+    for k, (a, b) in enumerate(bounds or []):
+        mine = [(s, e) for s, e in added if a <= s < b]
+        if mine and not line_fits(p, k, text, a, b, scale, fonts):
+            drop.update(i for s, e in mine for i in range(s, e))
+    if bounds is None:
+        drop = {i for s, e in added for i in range(s, e)}
+    if not drop:
+        return p
+    runs: list[SetRun] = []
+    at = 0
+    for r in p.runs:
+        kept = "".join(ch for i, ch in enumerate(r.text, at) if i not in drop)
+        at += len(r.text)
+        if kept or not r.text:
+            runs.append(replace(r, text=kept))
+    starts = None if p.line_starts is None else \
+        tuple(s - sum(1 for i in drop if i < s) for s in p.line_starts)
+    return replace(p, runs=tuple(runs), line_starts=starts)
+
+
+def line_bounds(p: SetParagraph, text: str, scale: float, fonts: FontMapper) -> list[tuple[int, int]] | None:
+    """Each PDF line's characters in the paragraph's text: the whole of a one-line paragraph, a
+    title's lines between its soft breaks, a wrapped paragraph's between the starts classify
+    recorded (`recorded_starts`) or that TeX's widths find (`pdf_line_breaks_of`); None when
+    they are not known."""
+    if not p.lines:
+        return None
+    cuts = [i for i, ch in enumerate(text) if ch == SOFT_BREAK]
+    if cuts:
+        return list(zip([0, *(c + 1 for c in cuts)], [*cuts, len(text)])) if len(cuts) + 1 == len(p.lines) else None
+    if len(p.lines) == 1:
+        return [(0, len(text))]
+    starts = recorded_starts(p, text) or pdf_line_breaks_of(p, scale, fonts)
+    return None if starts is None else list(zip([0, *starts], [*starts, len(text)]))
+
+
+def line_fits(p: SetParagraph, k: int, text: str, a: int, b: int, scale: float, fonts: FontMapper) -> bool:
+    """Whether Slides sets line k (the characters a to b, as they are) no wider than the PDF's
+    line plus SPACE_BUDGET of it: a hanging label's line from its start to the tab stop and its
+    text from there (`p.tab_x0`), holes as wide as their no-break spaces (`held_width_of`)."""
+    a += len(text[a:b]) - len(text[a:b].lstrip(" "))
+    b = a + len(text[a:b].rstrip())
+    line = p.lines[k]
+    tab = text.find("\t", a, b)
+    if tab >= 0:
+        rest = _budget_width(runs_between(p.runs, tab + 1, b), scale, fonts)
+        w = None if rest is None or p.tab_x0 is None else (p.tab_x0 - line.x0) * scale + rest
+    else:
+        w = _budget_width(runs_between(p.runs, a, b), scale, fonts)
+    return w is not None and w <= (line.x1 - line.x0) * scale * (1 + SPACE_BUDGET)
+
+
+# Monospaced faces a PDF names and Slides draws as they are (`fonts.google_font`), at their one
+# advance (em): Courier New's every glyph is 1229/2048. Nobody probed them for `slides_width`, but
+# a column grid needs no probe (real_talksx's \code words, Nimbus Mono -> Courier New).
+FIXED_ADVANCE_EM = {"Courier New": 0.6}
+
+
+def _budget_width(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> float | None:
+    """`held_width_of` the runs, a run in a FIXED_ADVANCE_EM face at its advance; None where a run
+    is in a face nobody measured."""
+    total = 0.0
+    for r in runs:
+        family, size = fonts.size_of(r, scale)
+        w = held_width_of([r], scale, fonts) if r.hole or family not in FIXED_ADVANCE_EM else \
+            len(r.text) * FIXED_ADVANCE_EM[family] * size * (SCRIPT_SIZE if r.script else 1.0)
+        if w is None:
+            return None
+        total += w
+    return total
 
 
 def kept_bullet(runs: Sequence[SetRun], bulleted: bool) -> tuple[SetRun, ...]:
