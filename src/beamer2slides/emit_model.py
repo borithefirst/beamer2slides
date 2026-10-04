@@ -751,6 +751,10 @@ class HoleParagraph:
     runs: tuple[SetRun, ...]
     gaps: tuple[Gap | None, ...]
     """Per run: where the PDF has its hole; None for words."""
+    setting: SetParagraph | None
+    """The paragraph as its text box sets it (its lines' x0, tab stop and recorded line starts),
+    from which Slides' place of a hole is measured (`emit_holes.slides_hole_x`); None for an
+    overlay mark's probe."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -788,8 +792,9 @@ def _gap(r: AnyRun) -> Gap | None:
 
 def hole_paragraph(p: Paragraph) -> HoleParagraph:
     """A parsed paragraph as its holes' pictures are placed from it."""
-    return HoleParagraph(align=p.align, baselines=tuple(ln.baseline for ln in p.lines), runs=set_runs(p.runs),
-                         gaps=tuple(_gap(r) for r in p.runs))
+    runs = set_runs(p.runs)
+    return HoleParagraph(align=p.align, baselines=tuple(ln.baseline for ln in p.lines), runs=runs,
+                         gaps=tuple(_gap(r) for r in p.runs), setting=set_paragraph(p, runs))
 
 
 def hole_text(el: TextElement) -> HoleText:
@@ -828,9 +833,10 @@ def hole_paragraph_of(d: JsonMap) -> HoleParagraph:
     """A paragraph dict as its holes' pictures have always been placed from it: its runs always,
     `align` and `lines` as `.get`, each line's `baseline` always."""
     runs = objects_of(d["runs"], "runs")
+    set_runs_ = tuple(run_of(r) for r in runs)
     return HoleParagraph(align=_align(d.get("align", "left")),
                          baselines=tuple(_num(ln["baseline"], "baseline") for ln in objects_of(d.get("lines", []), "lines")),
-                         runs=tuple(run_of(r) for r in runs), gaps=tuple(gap_of(r) for r in runs))
+                         runs=set_runs_, gaps=tuple(gap_of(r) for r in runs), setting=paragraph_of(d, set_runs_))
 
 
 def hole_text_of(d: JsonMap) -> HoleText:

@@ -472,8 +472,10 @@ class ReasonsMixin(FiguresMixin):
             if g.h > 2.2 * size or not line.baseline - size <= g.cy <= line.baseline + 0.4 * size:
                 continue
             touched = [s for s in spans if min(s.rect.x1, g.x1) - max(s.rect.x0, g.x0) > 0.3 * s.rect.w]
-            # (a frame closed around its words may be wider: \framebox[2.5cm])
-            framed = touched and g.contains_rect(union_all(s.rect for s in touched), tol=0.5) and g.w <= 0.5 * self.W
+            # (a frame closed around its words may be wider: \framebox[2.5cm]; one hugging them
+            # as wide as it needs, a \boxed formula over half the page: real_beamer-monodromy s12)
+            held = union_all(s.rect for s in touched) if touched else None
+            framed = held is not None and g.contains_rect(held, tol=0.5) and (g.w <= 0.5 * self.W or g.w <= held.w + size)
             if not touched or (g.w > sum(s.rect.w for s in touched) + 2 * size and not framed):
                 continue  # nothing on it, or a rule or frame reaching well past the words
             if touched == (spans[-1:] if reads_rtl(line) else spans[:1]):
@@ -490,7 +492,9 @@ class ReasonsMixin(FiguresMixin):
                         min(a.rect.x1, b.rect.x1) - max(a.rect.x0, b.rect.x0) > 0.5 * min(a.rect.w, b.rect.w) > 0:
                     groups.append(([a, b], union_all([a.rect, b.rect])))
         outside = [s for s in spans if not any(s in t for t, _ in groups)]
-        if not groups or sum(sum(ch.isalpha() for ch in s.text) >= 2 for s in outside) < 2:
+        # Words of prose beside it, not spans: one span can carry the whole rest of the line ("by
+        # Galois correspondence." after a framed formula stayed text beside a frame of PDF width).
+        if not groups or sum(sum(ch.isalpha() for ch in w) >= 2 for s in outside for w in s.text.split()) < 2:
             return False
         line.hole_pads = [g for _, g in groups]
         line.add_holes([t for t, _ in groups])

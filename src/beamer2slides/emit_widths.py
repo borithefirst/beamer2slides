@@ -25,6 +25,8 @@ ZWSP = "​"
 SCRIPT_SIZE = 2 / 3          # super- and subscripts in Slides (measured 0.665: tools/probe_text_fit_fonts.py)
 WRAP_MARGIN = 1.0            # Slides pt kept free in a cell so kerning or rounding cannot wrap it
 SMALL_CAPS_SIZE = 0.70       # Slides draws a small capital at 70% of its capital (tools/probe_text_fit_fonts.py)
+LABEL_ROOM = 2.5             # Slides pt a hanging label keeps before its tab stop (as emit_text._own_lines)
+LINE_RATIO = (0.6, 1.5)      # a line with holes or a label as Slides sets it, to its PDF extent: else not that line
 
 
 def set_runs_of(runs: Sequence[JsonMap]) -> tuple[SetRun, ...]:
@@ -340,16 +342,32 @@ def guessed_chars(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> in
     return count
 
 
+OPENING_BRACKETS = frozenset("([{")
+
+
+def breaks_before(text: str, i: int) -> bool:
+    """Whether Slides may end a line just before `text[i]`, inside a word: at an opening bracket
+    after a letter of East Asian width 'ambiguous' (Greek: π[γ], π([x])), which UAX #14 LB30 would
+    keep together and Slides does not; after a Latin letter or a digit it does
+    (tools/probe_script_break.py; real_beamer-monodromy s17 ended a line on π and set its
+    subscript [γ] on the next)."""
+    return 0 < i < len(text) and text[i] in OPENING_BRACKETS and text[i - 1].isalpha() and \
+        unicodedata.east_asian_width(text[i - 1]) == "A"
+
+
 def first_break(text: str, a: int, end: int) -> int:
     """Where Slides may first end a line that has taken the words from `a` on: at the next
-    space, or after a hyphen inside the word before it (not a leading one, nor one before a
-    digit: UAX #14 LB25), as `text_layout.wrap` breaks. Taken to its space, the next line's
-    first word was 'Санкт-Петербургский', and the box left room for 'Санкт-', which Slides
-    pulled up onto the line above (r3_scripts_ruxe s1)."""
+    space, after a hyphen inside the word before it (not a leading one, nor one before a
+    digit: UAX #14 LB25), or before a bracket opening after a Greek letter (`breaks_before`), as
+    `text_layout.wrap` breaks. Taken to its space, the next line's first word was
+    'Санкт-Петербургский', and the box left room for 'Санкт-', which Slides pulled up onto the
+    line above (r3_scripts_ruxe s1)."""
     space = text.find(" ", a)
     space = end if space < 0 or space > end else space
-    for i in range(a + 1, space - 1):
-        if text[i] == "-" and not text[i - 1].isspace() and not text[i + 1].isdigit():
+    for i in range(a + 1, space):
+        if breaks_before(text, i):
+            return i
+        if i < space - 1 and text[i] == "-" and not text[i - 1].isspace() and not text[i + 1].isdigit():
             return i + 1
     return space
 
@@ -358,15 +376,52 @@ def slides_lines(p: JsonMap, scale: float, fonts: FontMapper) -> tuple[float, fl
     return slides_lines_of(paragraph_dict(p), scale, fonts)
 
 
+def held_width_of(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> float | None:
+    """`slides_width_of` runs a text box holds, a hole among them as wide as its no-break spaces
+    are made (`emit_text.hole_spaces`: exactly the hole's width)."""
+    words = slides_width_of([r for r in runs if not r.hole], scale, fonts)
+    return None if words is None else words + sum((r.hole or 0.0) * scale for r in runs)
+
+
+def held_index(ir: Sequence[SetRun], held: Sequence[SetRun], at: int) -> int:
+    """Where character `at` of the IR runs' joined text lies in the text a box holds (`held`: the
+    same runs, each hole its no-break spaces: `emit_text.hole_runs_of`), before a hole starting
+    there."""
+    a = b = 0
+    for r, s in zip(ir, held):
+        if at <= a + len(r.text):
+            return b + min(at - a, len(s.text))
+        a, b = a + len(r.text), b + len(s.text)
+    return b
+
+
+def held_starts(ir: Sequence[SetRun], held: Sequence[SetRun], starts: tuple[int, ...] | None) -> tuple[int, ...] | None:
+    """classify's `line_starts` (into the IR runs' text) in the text a box holds; None when the
+    runs do not pair up. (The last, the text's end, stays its end: past a hole ending it.)"""
+    if starts is None or len(ir) != len(held):
+        return None
+    end, held_end = sum(len(r.text) for r in ir), sum(len(s.text) for s in held)
+    return tuple(held_end if s >= end else held_index(ir, held, s) for s in starts)
+
+
 def slides_lines_of(p: SetParagraph, scale: float, fonts: FontMapper) -> tuple[float, float] | None:
     """(right edge of the widest line, the least right edge at which a line's next word would
     join it) in Slides pt, of a left-aligned paragraph's PDF lines as Slides sets their words
     (measured advances: slides_width); None when that is not known. A text box whose text ends
-    between the two breaks the paragraph where TeX did."""
+    between the two breaks the paragraph where TeX did.
+
+    A hole is as wide as its no-break spaces (the paragraph as its box holds it), and a hanging
+    label's line ("label<TAB>text") is measured from the tab stop (`p.tab_x0`) on, its label
+    from where the paragraph starts (`text_x0`; None where it would reach the stop). Left out,
+    an enumerated item ending on a framed formula went unmeasured: its box kept the PDF's extent,
+    Lato's words took a little more, and the formula wrapped onto a line of its own, pushing the
+    items under it down over the next picture (real_beamer-monodromy s17)."""
     runs, lines = p.runs, p.lines
     text = "".join(r.text for r in runs)
-    if any(r.hole or SOFT_BREAK in r.text or "\t" in r.text for r in runs) or not text.strip():
-        return None
+    tab = text.find("\t")
+    if any((r.hole and r.hole_size is None) or SOFT_BREAK in r.text for r in runs) or not text.strip() or \
+            tab >= 0 and (text.count("\t") > 1 or p.tab_x0 is None):
+        return None  # (a hole still the IR's: its text is not what the box holds)
     # (a justified paragraph TeX's widths cannot measure keeps its own edge, flowed into it:
     # flowed_justified_right; measured by its lines, one set a hair wider in Slides than TeX's
     # shrunk line gave up JUSTIFIED for START)
@@ -376,19 +431,40 @@ def slides_lines_of(p: SetParagraph, scale: float, fonts: FontMapper) -> tuple[f
     if starts is None:
         return None
     end = len(text.rstrip())
-    bounds = [len(text) - len(text.lstrip()), *starts, end]
+    # (a hole opening the paragraph is its no-break spaces: they take their room)
+    bounds = [len(text) - len(text.lstrip(" ")), *starts, end]
+    if tab >= 0 and not bounds[0] <= tab < bounds[1]:
+        return None  # (a tab past the first line is no hanging label)
+
+    def right(k: int, a: int, b: int) -> float | None:
+        """Where line k ends in Slides when it holds the characters a to b."""
+        if a <= tab < b and p.tab_x0 is not None:
+            label = held_width_of(runs_between(runs, a, tab), scale, fonts)
+            rest = held_width_of(runs_between(runs, tab + 1, b), scale, fonts)
+            stop = p.tab_x0 * scale
+            if label is None or rest is None or p.text_x0 * scale + label + LABEL_ROOM > stop:
+                return None
+            return stop + rest
+        w = held_width_of(runs_between(runs, a, b), scale, fonts)
+        return None if w is None else lines[k].x0 * scale + w
+
+    # (a line of holes or a label is no wider in Slides than half as much again: starts classify
+    # recorded before a framed formula became one hole put 106 letters on a 300 pt line, and the
+    # caption's box ran 250 pt past the slide, real_beamer-monodromy s15)
+    checked = tab >= 0 or any(r.hole for r in runs)
     widest, joins = 0.0, math.inf
     for k, (a, b) in enumerate(zip(bounds, bounds[1:])):
-        x0 = lines[k].x0 * scale
         b = a + len(text[a:b].rstrip())  # (Slides lets a line's last space hang past the edge)
-        w = slides_width_of(runs_between(runs, a, b), scale, fonts)
+        w = right(k, a, b)
         if w is None:
             return None
-        widest = max(widest, x0 + w)
+        extent = (lines[k].x1 - lines[k].x0) * scale
+        if checked and not LINE_RATIO[0] * extent <= w - lines[k].x0 * scale <= LINE_RATIO[1] * extent + 2:
+            return None
+        widest = max(widest, w)
         if k + 1 < len(lines):
-            nxt = first_break(text, bounds[k + 1], end)
-            j = slides_width_of(runs_between(runs, a, nxt), scale, fonts)
+            j = right(k, a, first_break(text, bounds[k + 1], end))
             if j is None:
                 return None
-            joins = min(joins, x0 + j)
+            joins = min(joins, j)
     return widest, joins

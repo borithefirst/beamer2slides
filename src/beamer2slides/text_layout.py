@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 
 from . import bidi, emit
+from .emit_widths import breaks_before
 from .fonts import LETTER_FACE_ADVANCE_EM, script_capital
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object
 
@@ -272,8 +273,9 @@ def upright(rb: JsonMap) -> bool:
 
 
 def wrap(chars: str, styles: Sequence[JsonMap], width: float) -> list[tuple[int, int, float]]:
-    """Greedy line breaks of one paragraph: (start, end, ink width) per line. Breaks at spaces and
-    after hyphens, never at a no-break space; a soft break ends a line; a word wider than the line
+    """Greedy line breaks of one paragraph: (start, end, ink width) per line. Breaks at spaces,
+    after hyphens and before a bracket opening after a Greek letter (`emit_widths.breaks_before`),
+    never at a no-break space; a soft break ends a line; a word wider than the line
     is cut where it no longer fits, as Slides does.
 
     Nor before a no-break space: Slides keeps a space and the no-break spaces after it together
@@ -300,6 +302,8 @@ def wrap(chars: str, styles: Sequence[JsonMap], width: float) -> list[tuple[int,
                     last_break, ink_at_break = i + 1, ink
                 i += 1
                 continue
+            if i > start and breaks_before(chars, i):
+                last_break, ink_at_break = i, ink
             if w + adv > width and i > start:
                 if last_break is not None and last_break > start:
                     end, nxt, ink = last_break, last_break, ink_at_break

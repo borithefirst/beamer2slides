@@ -4946,3 +4946,37 @@ relation came out as a no-break space, 0.194 em in Lato against TeX's 0.278.
   script's run (`script_in_script`); bold tx/px blackboard and script cuts are named.
 - Live: big-o s14, defense s21 draw STIX capitals like the PDF's; text_overlap means held or rose
   (derived-cat 0.579 -> 0.59, big-o 0.606 -> 0.611, phylogenet 0.759 -> 0.76, others equal).
+
+## Where formula pictures land (real-deck review, 2026-10-04)
+Inline formula pictures sat beside their gaps: `formula_shift` added word by word what each word
+before a hole would gain or lose in Slides, and missed what TeX's math spacing and scripts add up
+to (real_linear-attention-a s35/s38: a `k_t^⊤` 23 pt right of its gap, one after a hanging
+"SGD update:" 63 pt). measure_places then refused the true place as too far from the guess.
+- `emit_holes.slides_hole_x`: where Slides starts a hole, by the measured advances of what the box
+  holds before it on its PDF line, from that line's x0 (or the tab stop after a hanging label);
+  the same line model the boxes are sized by. Only a left-aligned, unstretched, recorded line whose
+  words match the gap's (`_same_words`) in measured fonts; else the old estimate.
+- `emit_text.held_paragraph`: a paragraph as its box holds it (runs in sentences, holes as their
+  no-break spaces, classify's `line_starts` moved to that text by `emit_widths.held_starts`);
+  `_prepared` and `grown_panels` use it. `slides_lines_of` measures a paragraph with holes and a
+  hanging label (`LABEL_ROOM` before its tab stop), refusing a line with either that Slides would
+  set far from its PDF extent (`LINE_RATIO`).
+- A `\boxed` formula over half the page: its top and bottom rules were theme hairlines and the box
+  came apart (monodromy s12). A level rule whose both ends meet upright strokes is a box edge
+  (`classify_graphics.box_edge`), and a frame hugging its words is a frame at any width
+  (`graphic_holes`); prose beside it is counted by words, not spans.
+- txfonts set a radical from an origin 0.65 em above the formula's baseline: the sign went with
+  the line above. A glyph of a span's own text inside the span's box (`render.RAISED_SLACK`) is
+  the span's (`owned_by`).
+- Slides breaks before an opening bracket after a letter of East Asian width "A" (Greek): "π[γ]"
+  wraps as "π" / "[γ]", never after a Latin letter or a digit, scripts or not
+  (`tools/probe_script_break.py`). `emit_widths.breaks_before`, in `first_break` and
+  `text_layout.wrap` (monodromy s17 item 5).
+- A literal list number (`classify.literal_list_numbers`, "5)<TAB>") was put before the text
+  without moving the recorded `line_starts`: three short, so the item went unmeasured. They move
+  with it now.
+- With every paragraph measured, the box took half the room to the nearest next word of any
+  paragraph: one beside a picture (monodromy s14, joins at 415 pt, lines below to 641) left the
+  others LINE_MARGIN, and two math lines Slides set 2-3 pt wider than measured wrapped. A
+  paragraph joining short of the widest line ends at its own edge (`paragraph_ends`, indentEnd);
+  the box's room is to the others' next words, or to the PDF's edge when none has one.

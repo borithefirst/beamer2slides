@@ -202,6 +202,37 @@ def test_a_full_line_keeps_its_margin_when_a_neighbours_next_word_is_close() -> 
     assert box_right(el, scale) >= need + emit.LINE_MARGIN - 0.01
 
 
+def test_a_paragraph_ending_at_its_own_edge_leaves_the_others_their_room() -> None:
+    # real_beamer-monodromy s14: the first paragraph, beside a picture, would join its next word
+    # far left of a longer line below, so that line kept only LINE_MARGIN; the math in it ran
+    # 2-3 pt wider in Slides than measured and "homotopy." wrapped. The short paragraph ends at
+    # its own edge (indentEnd); the box goes on to the PDF's edge.
+    scale = SLIDE_W / 362.83
+    line = "Mass bleaching in 2016 and 2017 across the reef"
+    w = slides_w([text_run(line, BODY)], scale)
+
+    def with_line_ending_at(right: float) -> tuple[JsonObject, float]:
+        """The two items and the line, ending at `right` as Slides sets it; and its PDF edge."""
+        el = column_list_of()
+        paras = jobjs(el, "paragraphs")
+        x0 = (right - w) / scale
+        x1 = x0 + w / scale + 8.0  # (TeX set it 8 pt wider than Lato does)
+        jarr(el, "paragraphs").append({**paras[0], "bullet": None, "text_x0": x0, "wrap_limit": None,
+                                       "runs": [text_run(line, BODY)], "lines": [{"baseline": 170.0, "x0": x0, "x1": x1}]})
+        return el, x1 * scale
+
+    (_, first), (_, second) = [measured(p, scale) for p in jobjs(column_list_of(), "paragraphs")]
+    assert second < first
+    # Past the second item's next word: the box has room to the first's.
+    widest = second + 6.0
+    el, _ = with_line_ending_at(widest)
+    assert widest + 2 * emit.LINE_MARGIN < box_right(el, scale) < first
+    # Past both: to the PDF's edge.
+    widest = first + 6.0
+    el, edge = with_line_ending_at(widest)
+    assert box_right(el, scale) >= edge - 0.01 > widest + emit.LINE_MARGIN
+
+
 def test_an_unmeasured_paragraph_leaves_the_box_as_wide_as_the_measured_lines_need() -> None:
     # figures v1 s2 (r6): one item could not be measured, so the box came from the PDF's
     # extents and ended 0.01 pt short of a one-line item's words as Slides sets them: it wrapped.

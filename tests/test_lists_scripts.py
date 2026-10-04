@@ -56,6 +56,21 @@ def test_numbers_continue_after_a_nested_glyph_list():
     assert all(p["bullet"] is DOT for p in paras if p["level"] == 1)
 
 
+def test_a_literal_number_moves_the_recorded_line_starts():
+    """real_beamer-monodromy s17 item 5: classify's line starts counted the text without its
+    literal '5)<TAB>' label, three short, so emit could not measure where the item wraps."""
+    paras = [item("one", 0, number("1.")), item("sub", 1, DOT), item("is Galois because", 0, number("2."))]
+    paras[2]["line_starts"] = [0, 3, 17]
+    slides = slide_of(paras)
+    literal_list_numbers(slides)
+    p = paragraphs_of(slides)[2]
+    text = "".join(r["text"] for r in p["runs"])
+    assert text == "2.\tis Galois because"
+    starts = p.get("line_starts")
+    assert starts is not None
+    assert [text[s:s + 1] for s in starts[:2]] == ["i", "G"] and starts[2] == len(text)
+
+
 def test_a_plain_numbered_list_stays_a_slides_list():
     slides = slide_of([item("one", 0, number("1.")), item("two", 0, number("2.")), item("three", 0, number("3."))])
     literal_list_numbers(slides)

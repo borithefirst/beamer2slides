@@ -26,7 +26,7 @@ from .emit_holes import (
 from .emit_metrics import LINE_EM, PAD_X, SYMBOL_ADVANCE_EM, FontMapper, u16
 from .emit_model import Anchored, JsonMap, Place, SetText, block_of, box_of, json_number, objects_of, point_of, text_of
 from .emit_pptx import api_error, batch, template_key
-from .emit_text import box_lines_of, hole_runs_of, hugs_of, in_sentence_of, text_box_requests_of
+from .emit_text import box_lines_of, held_paragraph, hole_runs_of, hugs_of, text_box_requests_of
 from .emit_widths import paragraph_dict, set_runs_of
 from .gapi import HttpError
 from .google_auth import credentials_for_threads, fetcher_for_threads, shared_service, slides_service
@@ -252,8 +252,7 @@ def grown_panels(slide: SlideDict, scale: float, fonts: FontMapper) -> SlideDict
             pads[group[i]] = min(pads.get(group[i], math.inf), pad)
     over: dict[int, float] = {}
     for i, el in homes:
-        paras = [replace(p, runs=tuple(hole_runs_of(in_sentence_of(p.runs), scale, fonts)))
-                 for p in map(paragraph_dict, objects_of(el["paragraphs"], "paragraphs"))]
+        paras = [held_paragraph(p, scale, fonts) for p in map(paragraph_dict, objects_of(el["paragraphs"], "paragraphs"))]
         measured = box_lines_of(paras, [hugs_of(p) for p in paras], scale, fonts)
         if not measured or any(g is None for g in measured):
             continue  # (every paragraph measured: an unmeasured one could be the widest)

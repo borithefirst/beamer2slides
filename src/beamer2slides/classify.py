@@ -323,6 +323,8 @@ def literal_list_numbers(slides: list[ir.Slide]) -> None:
                 "bold": label["bold"], "italic": label["italic"], "smallcaps": False, "color": label["color"],
                 "link": None, "script": None, "underline": False, "highlight": None})
             p["tab_x0"], p["text_x0"], p["bullet"] = p["text_x0"], label["x0"], None
+            if "line_starts" in p:  # counted in the text the label now stands before
+                p["line_starts"] = [s + len(b["text"]) + 1 for s in p["line_starts"]]
         if pictures:  # below the text
             first_text = next(i for i, e in enumerate(slide["elements"]) if e["kind"] == "text")
             slide["elements"][first_text:first_text] = pictures

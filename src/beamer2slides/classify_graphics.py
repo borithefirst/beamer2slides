@@ -79,6 +79,22 @@ def without_page_frame(page: RawPage) -> RawPage:
     return out
 
 
+def upright_strokes(drawings: list[RawDrawing]) -> list[Rect]:
+    """The boxes of upright stroked lines 3 pt or taller: the sides a box_edge meets."""
+    boxes = [Rect.of(d["bbox"]) for d in drawings if d["type"] != "f"]
+    return [r for r in boxes if r.w <= 1.2 and r.h >= 3.0]
+
+
+def box_edge(r: Rect, uprights: list[Rect]) -> bool:
+    """A level rule both of whose ends meet an upright stroke (`upright_strokes`): the top or
+    bottom edge of a box (\\boxed, \\fbox), however wide. As a hairline across half the page it
+    was theme decoration and the box came apart: its sides stayed graphics (one joined a glyph
+    above into a figure), its formula a hole without its frame, the frame's top and bottom left
+    in the background (real_beamer-monodromy s12)."""
+    return r.h <= 1.2 and all(any(abs(v.cx - x) <= 1.0 and min(abs(v.y0 - r.cy), abs(v.y1 - r.cy)) <= 1.0
+                                  for v in uprights) for x in (r.x0, r.x1))
+
+
 def arrow_shaft(d: RawDrawing, drawings: list[RawDrawing]) -> bool:
     """A straight stroke ending in an arrow head: a small path of lines and curves (as
     `diagram_from` reads tips) around one of its ends. A message across a sequence diagram runs
@@ -549,6 +565,7 @@ class GraphicsMixin(TablesMixin):
         self.graphic_paths = {}
         table_rules = self.table_hairlines()
         drawings, tiles_of = self.panel_frames()
+        uprights = upright_strokes(drawings)
         for d in drawings:
             r = Rect.of(d["bbox"])
             if r.w * r.h >= 0.95 * self.W * self.H:
@@ -556,7 +573,7 @@ class GraphicsMixin(TablesMixin):
             fill_only = d["type"] == "f" and set(d["items"]) <= set("relcq")
             panel = fill_only and r.w >= 0.25 * self.W and r.h >= 3
             if self.is_decoration(r) and not (panel and box_outline(d, r)) and d["id"] not in table_rules \
-                    and not arrow_shaft(d, drawings):
+                    and not arrow_shaft(d, drawings) and not box_edge(r, uprights):
                 self.decorations.append(r)
                 continue
             if panel and box_outline(d, r):

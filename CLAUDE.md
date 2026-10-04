@@ -131,7 +131,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   more, a no-break space between letters) and accent overhang; a Type 3 font of only codes above
   0x7F tries TS1/T2A before T1; U+2010/U+2011 are read as `-` (`extract.HYPHENS`, faces lack them);
   Slides breaks after a hyphen, so line sizing takes the next word only to it (`hyphen_cut`,
-  `emit.first_break`); a short inline formula (≤ `FORMULA_GLUE_SHARE` of its line) keeps no-break
+  `emit.first_break`), and before an opening bracket after a Greek letter, π / [γ]
+  (`emit_widths.breaks_before`, `tools/probe_script_break.py`); a short inline formula (≤ `FORMULA_GLUE_SHARE` of its line) keeps no-break
   spaces (`formula_groups`); math letters are styled per piece (`classify.math_pieces`: italic
   per glyph, NFKC, script capitals as Unicode, written in STIX Two Math / Libertinus Math by
   `fonts.letter_face` and read back as their run, `deck_ir.capitals_as_their_runs`; a relation's
@@ -142,7 +143,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   joined to the next, its run's dot `pitch` met by Slides' measured one
   (`emit_metrics.LEADER_PITCH_EM`, `tools/probe_leaders.py`). A multi-line box is sized from where Slides breaks its lines
   (`emit.slides_lines`, `box_lines` per paragraph), keeping `emit.LINE_MARGIN` (2.5 pt) past its
-  widest line; an unmeasured paragraph never makes it narrower than the measured ones. A glyph the
+  widest line; an unmeasured paragraph never makes it narrower than the measured ones, nor one
+  whose next word joins short of the widest line (it ends at its own edge) leaves the others only
+  that margin. A glyph the
   page edge cuts stays text (only samples on the page are judged). Justified prose (`is_justified`,
   `stretched`: word spaces compared font by font, the last line never the longest, no hanging
   label) is written JUSTIFIED with a `\parindent` first line, and never ends past its PDF lines
@@ -228,7 +231,11 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   its line is a panel, inside a line a highlight padded by no-break spaces.
 - Decorations on words: underline/strike/highlight runs; words on small graphics and complex inline
   formulas become **holes** (no-break Roboto Mono spaces) with the picture placed over them by
-  measurement on scratch slides (`emit.measure_places`); graphics drawn at words (tikzmark arrows,
+  measurement on scratch slides (`emit.measure_places`), predicted from the measured advances
+  before the hole on its PDF line (`emit_holes.slides_hole_x`, the paragraph as its box holds it
+  `emit_text.held_paragraph`); a `\boxed` formula's rules are a box (`classify_graphics.box_edge`),
+  a raised radical its span's (`render.RAISED_SLACK`); a literal list number moves the recorded
+  `line_starts` with it (`literal_list_numbers`); graphics drawn at words (tikzmark arrows,
   braces) are **overlays** anchored to their text and stretched to the words Slides sets.
 - Theme: the most common background goes on the master, shared decoration onto layout pictures,
   layouts' placeholders get the deck's title/body style, frame counters become per-slide text.

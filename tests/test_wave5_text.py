@@ -55,6 +55,21 @@ def test_slides_lines_joins_the_next_line_up_to_its_hyphen():
     assert emit.first_break("a b-c d", 2, 7) == 4 and emit.first_break("a b-5 d", 2, 7) == 5
 
 
+def test_slides_breaks_before_a_bracket_after_a_greek_letter():
+    """tools/probe_script_break.py, live: 'and π[γ]([x])' and 'and π([x])' end a narrow line on π;
+    'πy([x])' and 'π2([x])' stay whole (real_beamer-monodromy s17 item 5 set π's subscript [γ]
+    on the next line, the box sized as if the word could not break)."""
+    from beamer2slides.emit_widths import breaks_before
+    from beamer2slides.text_layout import wrap
+    text = "and π[γ]([x])"
+    assert emit.first_break(text, 4, len(text)) == 5 and emit.first_break("and πy([x])", 4, 11) == 11
+    assert emit.first_break("and π2([x])", 4, 11) == 11 and emit.first_break("and x([x])", 4, 10) == 10
+    assert not breaks_before("[x]", 0) and breaks_before("π(x)", 1)
+    style: JsonObject = {"fontFamily": "Lato", "fontSize": 20.0}
+    lines = wrap(text, [style] * len(text), 60.0)
+    assert [text[a:b] for a, b, _ in lines][:2] == ["and π", "[γ]([x])"], lines
+
+
 # -- a short inline formula is not broken by Slides ---------------------------------------------
 
 MI, SY, RM = "LMMathItalic10-Regular", "LMMathSymbols10-Regular", "LMRoman10-Regular"

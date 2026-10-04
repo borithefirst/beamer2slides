@@ -13,13 +13,15 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from .classify_model import HOLE_PAD
-from .emit_metrics import MATH_SPACE_EM, SYMBOL_ADVANCE_EM, FontMapper
+from .emit_metrics import MATH_SPACE_EM, SOFT_BREAK, SYMBOL_ADVANCE_EM, FontMapper
 from .emit_model import (
     Anchored, Gap, HoleParagraph, HoleText, JsonMap, SetRun, anchored_of, box_of, gap_of, hole_paragraph_of,
     hole_text_of, json_number, mark_of, objects_of, point_of, run_of,
 )
+from .emit_text import held_paragraph
+from .emit_widths import GUESSED_RUN_CHARS, guessed_chars, held_index, held_width_of, recorded_starts, runs_between
 from .fonts import google_font
-from .ir_types import Box, Color, Mark
+from .ir_types import BeforeWord, Box, Color, Mark
 from .json_types import Json, JsonObject
 
 SlideDict = TypeVar("SlideDict", bound=JsonObject)
@@ -273,11 +275,69 @@ def hole_offset(p: JsonMap, run: JsonMap, pic: JsonMap, scale: float, z: float) 
     return hole_offset_of(hole_paragraph_of(p), at, box_of(pic["bbox"], "bbox"), scale, z)
 
 
+def _same_words(before: Sequence[BeforeWord], head: str) -> bool:
+    """Whether the words classify found before a hole on its PDF line (`Gap.before`) are about
+    the text from that line's start to the hole: line starts recorded at the wrong words put a
+    hole that opens its line after the forty letters before it."""
+    got = sum(not ch.isspace() for b in before for ch in b[5])
+    want = sum(not ch.isspace() for ch in head)
+    return abs(got - want) <= max(2.0, 0.2 * want)
+
+
+def slides_hole_x(h: Hole, scale: float, fonts: FontMapper) -> float | None:
+    """Where Slides starts a hole's no-break spaces (slide pt), by the measured advances of what
+    its text box holds before it on its PDF line, from where that line starts (its x0, or the
+    tab stop after a hanging label): the line model the boxes are sized by (slides_lines_of).
+    None where that is not known: another alignment, a stretched (justified) line, a line not
+    recorded, a font the probe did not measure.
+
+    The word-by-word estimate (formula_shift's) missed what TeX's math spacing and scripts add up
+    to: a `k_t^⊤` after `S_t = S_{t-1} + v_t k` was put 23 pt right of the gap Slides left it,
+    one at the end of a hanging "SGD update:" line 63 pt (real_linear-attention-a s35, s38). Both
+    end their paragraphs, where Slides paints no highlight on the hole's spaces, and the measure
+    by the line's ink (measure_places) accepts only a place near the predicted one: they stayed."""
+    p = h.paragraph.setting
+    if p is None or p.align != "left" or p.direction is not None or not p.lines:
+        return None
+    held = held_paragraph(p, scale, fonts)
+    if len(held.runs) != len(p.runs):
+        return None
+    text = "".join(r.text for r in held.runs)
+    at = held_index(p.runs, held.runs, sum(len(r.text) for r in p.runs[:h.where[2]]))
+    starts: list[int] | None = [] if len(p.lines) == 1 else recorded_starts(held, text)
+    if starts is None:
+        return None
+    k = sum(s <= at for s in starts)
+    if p.justified and k < len(p.lines) - 1:
+        return None  # (Slides stretches the line's spaces)
+    begin = 0 if k == 0 else starts[k - 1]
+    head = text[begin:at]
+    if SOFT_BREAK in head or not _same_words(h.gap.before, head):
+        return None
+    x0 = p.lines[k].x0
+    if "\t" in head:
+        if p.tab_x0 is None:
+            return None
+        begin, x0 = begin + head.rindex("\t") + 1, p.tab_x0
+    before = runs_between(held.runs, begin, at)
+    if guessed_chars([r for r in before if not r.hole], scale, fonts) > GUESSED_RUN_CHARS:
+        return None
+    width = held_width_of(before, scale, fonts)
+    return None if width is None else x0 * scale + width
+
+
 def formula_shift(h: Hole, pic: Anchored, scale: float, fonts: FontMapper) -> float:
     """How far (PDF pt) the picture of a hole in a left-aligned paragraph moves to sit over the
-    gap where Slides will put it: the words before it on its line come out a little narrower or
-    wider."""
+    gap where Slides will put it: where Slides starts the hole (slides_hole_x), the picture
+    keeping its place in the hole; else as the words before it on its line come out a little
+    narrower or wider."""
     em = fonts.size_of(h.run, scale)[1] / scale  # the line's Slides font size, in PDF points
+    at = h.where[2]
+    offset = hole_offset_of(h.paragraph, at, pic.bbox, scale, em * scale) / scale
+    x = slides_hole_x(h, scale, fonts)
+    if x is not None:
+        # (the hole starts HOLE_PAD left of its ink, gap.x0)
+        return x / scale + offset - (h.gap.x0 - HOLE_PAD)
     shift = HOLE_PAD  # the gap has room for the picture's padding on its left too
     for w, font, family, bold, italic, text, _ in h.gap.before:
         if family == "math":
@@ -289,10 +349,7 @@ def formula_shift(h: Hole, pic: Anchored, scale: float, fonts: FontMapper) -> fl
             pdf_spaces = spaces * MATH_SPACE_EM * h.run.size
             shift += (w - pdf_spaces) * (fonts.width_ratio(font, family, bold, italic) - 1) + \
                 spaces * SYMBOL_ADVANCE_EM[" "] * em - pdf_spaces
-    at = h.where[2]
-    shift += space_shift_of(h.run, h.gap, em, earlier_holes_of(h.paragraph, at)) + \
-        hole_offset_of(h.paragraph, at, pic.bbox, scale, em * scale) / scale
-    return shift
+    return shift + space_shift_of(h.run, h.gap, em, earlier_holes_of(h.paragraph, at)) + offset
 
 
 def formula_shifts_of(slide: HoleSlide, scale: float, fonts: FontMapper) -> dict[str, float]:
@@ -327,7 +384,7 @@ def mark_drift(m: Mark, scale: float, fonts: FontMapper) -> float:
     gap = Gap(width=1.0, x0=m.hole_x0, before=m.before, next_x0=None)
     probe = HoleSlide(
         texts=(HoleText(id="mark", paragraphs=(
-            HoleParagraph(align="left", baselines=(0.35 * m.size,), runs=(run,), gaps=(gap,)),)),),
+            HoleParagraph(align="left", baselines=(0.35 * m.size,), runs=(run,), gaps=(gap,), setting=None),)),),
         pictures=(Anchored(id="gap", bbox=(m.hole_x0 - HOLE_PAD, 0.0, m.hole_x0, 0.0), anchor="mark", marks=()),))
     # (the gap's picture starts HOLE_PAD before the gap; shifts under 0.2 pt are not reported)
     return formula_shifts_of(probe, scale, fonts).get("gap", HOLE_PAD) - HOLE_PAD + m.pads

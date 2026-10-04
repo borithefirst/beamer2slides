@@ -30,6 +30,7 @@ SMALL_FIGURE_PX_PER_PT = 12.0  # inline formulas and other small pictures: crisp
 FIGURE_MAX_PX = 3000
 GLYPH_MARGIN = 0.15        # em around a removed glyph's box that its ink may reach (accents, italics)
 PAGE_GROUND = 0.95         # share of the page an image or shading covers to be its ground (classify's too)
+RAISED_SLACK = 0.5         # pt a glyph raised off its span's baseline may reach past the span's box
 
 Box = tuple[float, float, float, float]
 GlyphTest = Callable[[Char], bool]
@@ -204,7 +205,10 @@ def _same_dir(a: Sequence[float], b: Sequence[float]) -> bool:
 def owned_by(spans: list[RawSpan]) -> GlyphTest:
     """A test of whether a drawn glyph is one of these raw spans' own: same font and size, on the
     span's baseline, between its start and its end along the baseline. (Glyph boxes say nothing
-    of the kind: a hanging radical's box lies in the line above.)"""
+    of the kind: a hanging radical's box lies in the line above.) A glyph of the span's own text
+    raised off its baseline is the span's when its box lies inside the span's: txfonts set a
+    radical sign from an origin 0.65 em above the formula's baseline (`\\pm\\sqrt{z_0}`), and the
+    sign went with the words of the line above, in neither the hole's crop nor the background."""
     by_font: dict[tuple[str, float], list[RawSpan]] = {}
     for s in spans:
         by_font.setdefault((s["font"], round(s["size"], 2)), []).append(s)
@@ -216,6 +220,8 @@ def owned_by(spans: list[RawSpan]) -> GlyphTest:
             dx, dy = s["dir"]
             rx, ry = ch.origin[0] - s["origin"][0], ch.origin[1] - s["origin"][1]
             if abs(rx * dy - ry * dx) > 0.05 * s["size"]:
+                if ch.c and ch.c in s["text"] and _inside(ch.box, _grow(s["bbox"], RAISED_SLACK)):
+                    return True
                 continue  # another baseline
             x0, y0, x1, y1 = s["bbox"]
             reach = max((cx - s["origin"][0]) * dx + (cy - s["origin"][1]) * dy for cx in (x0, x1) for cy in (y0, y1))

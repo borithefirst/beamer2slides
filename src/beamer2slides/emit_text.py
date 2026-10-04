@@ -24,8 +24,8 @@ from .emit_model import (
     json_number, number_box, number_box_of, run_of, set_text, text_of,
 )
 from .emit_widths import (
-    SCRIPT_SIZE, SMALL_CAPS_SIZE, guessed_chars, paragraph_dict, runs_between, set_runs_of, slides_lines_of,
-    slides_width_of,
+    SCRIPT_SIZE, SMALL_CAPS_SIZE, guessed_chars, held_starts, paragraph_dict, runs_between, set_runs_of,
+    slides_lines_of, slides_width_of,
 )
 from .fonts import cjk_font, font_info, google_font
 from .google_types import (
@@ -317,6 +317,14 @@ def hole_runs_of(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> lis
         else:
             out.append(r)
     return out
+
+
+def held_paragraph(p: SetParagraph, scale: float, fonts: FontMapper) -> SetParagraph:
+    """A paragraph as its text box holds it: runs in sentences, each hole its no-break spaces,
+    and the line starts classify recorded moved to that text (`held_starts`)."""
+    ir = in_sentence_of(p.runs)
+    held = hole_runs_of(ir, scale, fonts)
+    return replace(p, runs=tuple(held), line_starts=held_starts(ir, held, p.line_starts))
 
 
 LineSizes = Sequence[Sequence[float] | float]
@@ -834,7 +842,7 @@ def _prepared(text: SetText, scale: float, fonts: FontMapper
               ) -> tuple[list[SetParagraph], list[list[float]], list[float], list[float]]:
     """A text's paragraphs as a box writes them (runs in sentences, holes), with their runs' sizes,
     each paragraph's largest and the size its bullet may take."""
-    paras = [replace(p, runs=tuple(hole_runs_of(in_sentence_of(p.runs), scale, fonts))) for p in text.paragraphs]
+    paras = [held_paragraph(p, scale, fonts) for p in text.paragraphs]
     # A line is as tall as its largest run, as Slides lays it out (line_size: small caps), and a
     # subscript is no larger than its text (run_sizes).
     sized = [run_sizes_of(p.runs, scale, fonts) for p in paras]
@@ -1082,6 +1090,13 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
         # one and the box grows over what is under it.
         widest, joins = max(g[0] for g in known), min(g[1] for g in known)
         inner_w = widest - left_pdf * scale
+        # A paragraph whose next word joins short of the widest line ends at its own edge
+        # (paragraph_ends): the others' room is to their own next words, or for lines with none
+        # to the PDF's edge. (One beside a picture left every other line LINE_MARGIN, and Slides
+        # wrapped two whose math ran 2-3 pt wider than measured: real_beamer-monodromy s14.)
+        beyond = [g[1] for g in known if widest + 2 * LINE_MARGIN <= g[1] < math.inf]
+        if joins < widest + 2 * LINE_MARGIN:
+            joins = min(beyond) if beyond else max(widest + 2 * LINE_MARGIN, 2 * right_pdf * scale - widest)
         room = joins - widest
         slack = max(room / 2, LINE_MARGIN)
         right = justified_right(paras, scale, widest, joins)
