@@ -5331,15 +5331,24 @@ class on a fresh conversion before working on it.
   of a math font with no Google face of its own (`math_operator_faces`): a footline's 'A · B' or
   a T2A Ч read as × stays, and Fira Math's operators were never measured. ∂, →, ⟶, ℝℕℤℂ stay in
   Lato (as near or nearer). Offline over 43 decks, 8 changed, only on elements gaining a face.
-  Open: `classify_text.unmeasured_symbols` and `emit_widths.guessed_chars` still treat these
-  operators as unmeasured; a bold run asks weight 700 of faces with no bold cut, as capitals do.
+  Since 2026-10-04 `classify_text.unmeasured_symbols` and `emit_widths.guessed_chars` count a
+  character with a `written_advance` for its run's font as measured (only ⊤ ≡ ↦ ⊙ ⊗ ⊕ were not
+  in SYMBOL_ADVANCE_EM already; a text font's × and Fira Math's operators stay unmeasured). Over
+  589 PDFs no hole became runs (the six formula-only lines it frees are displays, never
+  `wrapped_formula`); four boxes moved to their measured width (big-o-for-weighted s4 -30.4 pt
+  still breaking where TeX did, big-o s13 +7.1, r1_math_v4 s0 now ending at the page edge,
+  `tests/test_measured_operators.py`). Open: a bold run asks weight 700 of faces with no bold
+  cut, as capitals do.
   Live: linear-attention s38's hole 0.52 pt from its PDF gap (the re-predicted pin holds); demo
   p3's hole moves 16.7 slide pt with Lato's line and sits 0.34 pt from its words, so
   test_emit_requests' MAX_SHIFT is 18.
-- **Open, from the live check of U/Y**: decision-tree's graphicx draft placeholders ('icl.pdf',
-  'collage' in CMTT8 framed boxes in the footline, repeated on every frame) became layout text
-  with Track Q (5e36355: a figure line of only furniture is theme). The width is right by advance
-  but Roboto Mono's x-height is 9% over CMTT's, -0.016 ink on five slides against the PDF's own
-  pixels before. A fix: keep the figure-to-theme change only when the holding figure reaches out
-  of the header/footer band or is not itself repeated on the frames (a logo's words are the
-  logo's); africa's footline author must stay layout text.
+- **A logo's words stay the logo's** (from the live check of U/Y): decision-tree's graphicx
+  draft placeholders ('icl.pdf', 'collage' in CMTT8 framed boxes in the footline, repeated on
+  every frame) became layout text with Track Q (5e36355: a figure line of only furniture is
+  theme). The width was right by advance but Roboto Mono's x-height is 9% over CMTT's, -0.016 ink
+  on five slides against the PDF's own pixels before. Now the change skips a line every figure
+  region holding it lies wholly in the header/footer band (`PageClassifier.logo_words`: regions
+  holding a word's centre, else within 0.8 em; `FURNITURE_BAND`): africa's region (y 30.7-271.2)
+  and thesis-defense p35/36's reach out, so their footline words stay layout text. Whether the
+  holding figure repeats is not known a page at a time, and over 89 PDFs the band alone told
+  every case apart; only decision-tree's deck.json changed (`tests/test_logo_words.py`).

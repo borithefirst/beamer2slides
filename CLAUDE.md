@@ -196,7 +196,8 @@ after a sentence, a script or a formula letter is U+2008 + space where the line 
   one symbol (`compose_symbols`); an accent over a Greek letter is a hole (`accent_beside`);
   adjacent holes are one; icons are never formulas; an item's formula wrapped alone is the item's
   (`wrapped_formula`) but its own paragraph (`wrapped_formulas_apart`), one hole when it has no
-  prose and holds symbols Slides was never measured on (`unmeasured_symbols`); a long arrow
+  prose and holds symbols Slides was never measured on (`unmeasured_symbols`; an operator
+  written in its measured face, `fonts.written_advance`, is measured, as in `guessed_chars`); a long arrow
   (⟶ ⟹ ⟺, mhchem) is a hole at its PDF length, its labels in its picture (`long_arrow_groups`);
   a figure label beside a column is no line (`figure_label_apart`), nor one of a row of like
   labels a plot title (`in_label_row`). A list's balls and a photo under a hole stay whole
@@ -279,7 +280,8 @@ after a sentence, a script or a formula letter is U+2008 + space where the line 
   Words on different theme artwork or logo boxes are different lines (`artwork_of`); footline
   boxes beside band artwork are theme; runs of words repeated whole at one place in the header
   or footer band on half the frames are the deck's furniture, theme whatever their size
-  (`classify.furniture`, a \tiny body), even where a figure holds them; one moving at most half an
+  (`classify.furniture`, a \tiny body), even where a figure holds them, unless every figure
+  holding them lies in the band (a logo's words, `logo_words`); one moving at most half an
   em across slides is one layout text (`shifted_theme_texts`). A stroked border framing the page (an outline or four
   edge lines within `PAGE_FRAME_INSET` of every edge, `classify_graphics.page_frame`) is taken
   out of the page classify reads, as its ground is (as a graphic every line became a figure

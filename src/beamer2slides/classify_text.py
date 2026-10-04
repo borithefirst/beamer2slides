@@ -10,7 +10,7 @@ from typing import Literal, Protocol, TypedDict
 
 from . import bidi
 from .classify_model import ACCENTS, OUTLINE_MIN, Line, Paragraph, Rect, Span, column_x0
-from .fonts import MATH_ITALIC_RE, font_info, google_font
+from .fonts import MATH_ITALIC_RE, font_info, google_font, written_advance
 from .ir import BulletShape, CardBox, Family, Label, Script
 from .ir import Paragraph as ParagraphJson
 from .ir import Run
@@ -275,16 +275,20 @@ def unmeasured_symbols(spans: list["Span"]) -> set[str]:
     """Symbols of math spans Slides was never seen to set in line with its text faces
     (`emit.SYMBOL_ADVANCE_EM`, tools/probe_symbols.py): a fallback face draws them at its own
     size and height (\\sqcup's ⊔ half as tall and raised, r1_math_v3 s6). A raised ring or
-    asterisk is not one: it is written ° or * at the line's size (300 °C, r3_scripts_ruxe s4)."""
+    asterisk is not one: it is written ° or * at the line's size (300 °C, r3_scripts_ruxe s4).
+    Nor is an operator emit writes in a served math face of its own with a measured advance
+    (`fonts.written_advance`: ⊤ ⊙ ⊗ ↦ ≡ of a TeX math font's run, fonts.OPERATOR_FACES), which
+    keeps its height and axis near TeX's; a math font set in a Google face of its own (Fira
+    Math) gets none, so its operators stay unmeasured."""
     from .emit import SYMBOL_ADVANCE_EM  # (emit imports this module)
 
-    out = set()
+    out: set[str] = set()
     for s in spans:
         if s.info.family != "math":
             continue
         for c in math_text(s.font, s.text)[0]:
             if not (c.isascii() or c.isalnum() or c.isspace() or c in SYMBOL_ADVANCE_EM or unicodedata.combining(c)
-                    or c in "◦∘∗°"):
+                    or c in "◦∘∗°" or written_advance(c, s.font) is not None):
                 out.add(c)
     return out
 

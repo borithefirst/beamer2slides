@@ -331,7 +331,9 @@ def guessed_chars(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> in
     """How many of the runs' characters slides_width guesses (no measured advance: polytonic
     Greek in PT Serif). Where TeX's widths did not confirm the lines (recorded_starts), a box
     measured from guesses is no better than the PDF's extents: Greek at 0.6 em came out wider
-    than Slides sets it (r1_lang_v1 s4, 4 lines of 5 either way)."""
+    than Slides sets it (r1_lang_v1 s4, 4 lines of 5 either way). A character written in a face
+    of its own with a measured advance (`fonts.written_advance`: a script capital, an operator of
+    a TeX math font's run) is measured, as slides_width counts it; a text font's × is not."""
     count = 0
     for run in runs:
         family, _ = fonts.size_of(run, scale)
@@ -341,6 +343,7 @@ def guessed_chars(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> in
             return len(run.text)
         table = face_advances(family, fonts.face_of(run))
         count += sum(1 for ch in run.text if (ch.upper() if run.smallcaps else ch) not in table
+                     and written_advance(ch, run.font) is None
                      and ch not in " " and not unicodedata.combining(ch) and ch not in bidi.MARKS
                      and ch not in HOLE_BREAKS and ch != WORD_JOINER and unicodedata.east_asian_width(ch) not in "WF")
     return count

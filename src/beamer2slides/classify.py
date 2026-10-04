@@ -90,6 +90,23 @@ class PageClassifier(ReasonsMixin):
         x, y = self.raw_spans[s.id]["origin"]
         return x, y
 
+    def logo_words(self, line: Line) -> bool:
+        """Whether a figure line's words are a logo's: every figure region holding them (their
+        centres in it, else within 0.8 em of the line) lies wholly in the header or footer band.
+        graphicx's draft placeholder for a missing logo file prints the file's name in CMTT in
+        its framed box on every frame (real_decision-tree-lect-decision-analy's 'icl.pdf' in the
+        top corner, 'collage.' in the footline): the words repeat, so they are furniture, but
+        they belong to the logo's picture - as layout text in Roboto Mono, 9% taller than CMTT,
+        five slides lost ink. A figure reaching out of the band (a frame drawn down to the page
+        foot, over the footline author of real_africa-remote-sens-30) holds the deck's furniture
+        only by overreach. (Whether the holding figure is itself repeated is not known here, a
+        page at a time; over 89 PDFs the band alone told every case apart.)"""
+        top, foot = FURNITURE_BAND * self.H, (1 - FURNITURE_BAND) * self.H
+        words = [s for s in line.spans if s.text.strip()]
+        holders = [r for r in self.regions if any(r.expand(1).contains(s.rect.cx, s.rect.cy) for s in words)] or \
+            [r for r in self.regions if r.distance(line.rect) <= 0.8 * line.size]
+        return bool(holders) and all(r.y1 <= top or r.y0 >= foot for r in holders)
+
     def classify(self) -> ir.Slide:
         self.raw = without_page_frame(self.raw)  # (background, as the page's own fill is)
         spans = self.spans()
@@ -104,10 +121,12 @@ class PageClassifier(ReasonsMixin):
         self.assign_reasons(lines)
         # The deck's furniture is theme text even where a figure drawn down to the page foot
         # holds it: claimed by the figure on a few frames, it was not the same on every slide
-        # and stayed in every background (real_africa-remote-sens-30's footline author).
+        # and stayed in every background (real_africa-remote-sens-30's footline author). A
+        # logo's words stay the logo's (`logo_words`).
         for line in lines:
             if line.reason == "figure" and line.text.strip() \
-                    and all(s.id in self.furniture for s in line.spans if s.text.strip()):
+                    and all(s.id in self.furniture for s in line.spans if s.text.strip()) \
+                    and not self.logo_words(line):
                 line.reason = "theme"
         plain_tables = self.plain_tables(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
