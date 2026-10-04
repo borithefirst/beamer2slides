@@ -1024,7 +1024,10 @@ def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_sha
                 b = p["bullet"]
                 if not isinstance(b, dict) or not b:
                     continue
-                if b["kind"] == "glyph" and "ink" not in b:
+                # (a ball's image box is rounded out to whole points around a transparent margin:
+                # emit sizes the Slides disc by the ball's ink, a numbered ball by its label)
+                ball = b["kind"] == "image" and not as_str(b.get("text", ""), "bullet.text").strip()
+                if (b["kind"] == "glyph" or ball) and "ink" not in b:
                     measured = glyph_ink(original[index], _numbers(b["bbox"], "bullet.bbox"))
                     if measured:  # (emit sizes and shapes the Slides bullet by it)
                         ink, fill = measured

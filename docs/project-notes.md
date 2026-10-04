@@ -5284,3 +5284,16 @@ class on a fresh conversion before working on it.
   at line size (`RAISED_MARKS`). extract's font widths standing in for advances
   (`_accent_overhang`, `_ligature_overhang`) are stretched like their text object
   (`_drawn_stretches`): protective, no corpus page changed.
+- **Track T, ball bullets by their ink** (ansible-meetup p23): beamer's ball is an image whose
+  box is rounded out to whole points around a transparent margin (a 6 pt box, 4.8-5.0 pt of
+  ink), and emit matched that box against the disc preset's live-measured 0.413 em of *ink*
+  (`tools/probe_bullets.py`), so every ball came out about 18% large. render now measures an
+  unnumbered ball's ink like a glyph bullet's (image bullet `ink`/`fill`, optional: an old
+  deck.json emits as before), and `bullet_size_of`/`bullet_extent_of` size and place the disc by
+  it. A bullet's cap is the largest size holding 30% of its item's letters
+  (`emit_text.bullet_cap`, `BULLET_CAP_SHARE`), not the size most use: `\texttt` words
+  outnumbering the prose made one ball 25% smaller than its neighbours.
+- **Live check of Q-T** (2026-10-04): ansible s13's six balls the PDF's size and all alike;
+  third-year-talk s11 0.81 -> 0.92 (mean 0.918 -> 0.924); africa's author native layout text on
+  every slide (s13/s47 0.95 -> 0.93: Lato Regular for the PDF's heavier footline face, the
+  small-cut compromise, where the background picture showed the PDF's own glyphs).

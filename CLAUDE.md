@@ -99,7 +99,8 @@ decorations) is a picture, or baked into a per-slide background picture.
 Details, measurements and edge cases: docs/project-notes.md "What becomes native".
 - `text`: paragraphs, bullet lists (glyph, number, ball and vector bullets with their PDF colour and
   size, `emit.BULLET_SHAPES`, `emit.bullet_level`; glyph bullets sized and shaped by their PDF ink,
-  `render.glyph_ink` -> bullet `ink`/`fill`, `emit.ink_sized`, capped at the item's body size, a
+  `render.glyph_ink` -> bullet `ink`/`fill`, `emit.ink_sized`, an unnumbered ball image by its ink
+  too; capped at the largest size of 30% of the item's letters, `emit_text.bullet_cap`; a
   dingbat label always by its ink, `SetBullet.label_icon`; a
   ball keeps its label's parentheses unless they reach its rim, `BALL_RIM`; numbers after nested
   glyph items are literal, emit making one list per preset; a mark outlined in another colour is

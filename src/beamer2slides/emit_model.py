@@ -296,7 +296,7 @@ def set_bullet(b: Bullet | RenderedBullet) -> SetBullet:
                              label_icon=False, ink=None, shape=None)
         case RenderedImageBullet():
             return SetBullet(kind="image", text=b.text, bbox=b.bbox, color=b.color,
-                             label_size=None if b.label is None else b.label.size, label_icon=False, ink=None,
+                             label_size=None if b.label is None else b.label.size, label_icon=False, ink=b.ink,
                              shape=None)
         case ImageBullet():
             return SetBullet(kind="image", text=b.text, bbox=b.bbox, color=None,

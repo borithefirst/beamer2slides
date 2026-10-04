@@ -809,7 +809,11 @@ def bullet_size_of(bullet: SetBullet, size: float, scale: float, char: bool) -> 
         return round(inked, 1)
     if bullet.kind in ("glyph", "number") or shape is None:
         return round(_label_size(bullet, size, scale), 1)
-    height = (bullet.bbox[3] - bullet.bbox[1]) * scale
+    # A ball's image box is rounded out to whole points around a transparent margin (a 5 pt ball
+    # in a 6 pt box, real_ansible-meetup-201-beamer 23): its ink is the height the preset's
+    # (BULLET_SHAPES, Slides' own ink per em) is to match.
+    box = bullet.bbox if bullet.ink is None else bullet.ink.box
+    height = (box[3] - box[1]) * scale
     return round(max(0.3 * size, min(size, height / face_ems(shape, char)[0])), 1)
 
 
@@ -830,7 +834,8 @@ def bullet_extent_of(bullet: SetBullet, size: float, scale: float, char: bool) -
     ink of a glyph sized by its ink (then placed as a vector bullet is), else the bullet's box."""
     z = bullet_size_of(bullet, size, scale, char)
     shape = bullet_shape_of(bullet)
-    if bullet.ink is not None and shape is not None and ink_sized(bullet, size, scale, char) is not None:
+    if bullet.ink is not None and shape is not None and (
+            bullet.kind == "image" or ink_sized(bullet, size, scale, char) is not None):
         return bullet.ink.box[0], bullet.ink.box[2], face_ems(shape, char)[1] * z
     return bullet.bbox[0], bullet.bbox[2], bullet_gap(bullet, z, char)
 

@@ -70,6 +70,25 @@ def body_size(runs: Sequence[SetRun], sizes: Sequence[float]) -> float | None:
     return max(count, key=lambda z: (count[z], z)) if count else None
 
 
+# A size holding this share of an item's characters is its text's, for the bullet's cap: one
+# {\Large} word is not, but the prose between \texttt words is (real_ansible-meetup-201-beamer 23:
+# "Keys DOCUMENTATION and RETURN are YAML" is 19 mono letters to 15 sans, and its ball came out
+# at the mono size, 25% smaller than its neighbours').
+BULLET_CAP_SHARE = 0.3
+
+
+def bullet_cap(runs: Sequence[SetRun], sizes: Sequence[float]) -> float | None:
+    """The largest Slides size at least BULLET_CAP_SHARE of a paragraph's characters are set at
+    (scripts and holes aside), which its bullet may reach; None with no such characters."""
+    count: dict[float, int] = {}
+    for run, z in zip(runs, sizes):
+        if not run.script and not run.hole and not run.hole_size and run.text.strip():
+            count[z] = count.get(z, 0) + len(run.text.strip())
+    total = sum(count.values())
+    held = [z for z, n in count.items() if n >= BULLET_CAP_SHARE * total]
+    return max(held) if held else None
+
+
 def run_sizes(runs: Sequence[JsonMap], scale: float, fonts: FontMapper) -> list[float]:
     return run_sizes_of(set_runs_of(runs), scale, fonts)
 
@@ -897,8 +916,9 @@ def _prepared(text: SetText, scale: float, fonts: FontMapper
     sized = [run_sizes_of(p.runs, scale, fonts) for p in paras]
     base_sizes = [max(zs) if p.runs else p.size * scale for p, zs in zip(paras, sized)]
     # A bullet is no larger than its item's text (`body_size`), not its largest run: one {\Large}
-    # word or a superscript's optical cut grew that item's bullet over its neighbours'.
-    bullet_caps = [body_size(p.runs, zs) or base for p, zs, base in zip(paras, sized, base_sizes)]
+    # word or a superscript's optical cut grew that item's bullet over its neighbours'; nor smaller
+    # than its prose when \texttt words outnumber it (`bullet_cap`).
+    bullet_caps = [bullet_cap(p.runs, zs) or base for p, zs, base in zip(paras, sized, base_sizes)]
     return paras, sized, base_sizes, bullet_caps
 
 

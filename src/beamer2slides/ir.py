@@ -212,6 +212,10 @@ class ImageBullet(_ImageBulletKeys, total=False):
     label: Label | None
     color: Color | None
     """Added by render (`render.ink_colour`): the ball's colour, None when it cannot be read."""
+    ink: Box
+    """Added by render (`render.glyph_ink`) for a ball with no number: its ink box (the image's
+    box is rounded out to whole points around a transparent margin), and in `fill` its share."""
+    fill: float
 
 
 class _ShapeBulletKeys(_BulletKeys):

@@ -211,6 +211,9 @@ class ImageBullet:
 class RenderedImageBullet(ImageBullet):
     color: Color | None
     """The ball's colour (render.ink_colour); None when it cannot be read (nullable)."""
+    ink: GlyphInk | None
+    """A ball's ink (render.glyph_ink: the image's box is rounded out around a transparent
+    margin); None when not measured, as for a numbered ball or an older deck (absent)."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -949,7 +952,8 @@ def _bullet(v: object, at: At, stage: Stage) -> Bullet | RenderedBullet:
         case "image":
             image, lab2 = f.req("image", string), f.nullable("label", label)
             out = ImageBullet(text=text, bbox=bbox, image=image, label=lab2) if stage == "classified" else \
-                RenderedImageBullet(text=text, bbox=bbox, image=image, label=lab2, color=f.nullable("color", color))
+                RenderedImageBullet(text=text, bbox=bbox, image=image, label=lab2, color=f.nullable("color", color),
+                                    ink=_glyph_ink(f))
         case "shape":
             out = ShapeBullet(text=text, bbox=bbox, shape=f.req("shape", one_of(BULLET_SHAPES)),
                               color=f.req("color", color), patch=f.req("patch", boolean))
@@ -1537,6 +1541,7 @@ def bullet_json(b: Bullet | RenderedBullet) -> JsonObject:
                    "label": _opt(b.label, label_json)}
             if isinstance(b, RenderedImageBullet):
                 out["color"] = b.color
+                _ink(out, b.ink)
             return out
         case ShapeBullet():
             return {"kind": "shape", "text": b.text, "bbox": _box(b.bbox), "patch": b.patch, "shape": b.shape,
