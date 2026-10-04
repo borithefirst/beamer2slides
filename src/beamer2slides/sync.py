@@ -559,16 +559,13 @@ def build_ours_of(pdf: Path, work: Path, base: JsonObject, overlays: str, page_w
     from . import adopt_sync
     from .classify import classify
     from .ir import deck_json
-    from .extract import extract, select_overlays
+    from .extract import select_overlays
     from .marked import shape_marks
-    from .notes import prepare
+    from .notes import read_with_notes
     from .render import render_backgrounds
 
     work.mkdir(parents=True, exist_ok=True)
-    prepared = prepare(pdf, work)
-    raw = extract(prepared.pdf, prepared.labels)
-    for page in raw["pages"]:
-        page["notes"] = prepared.notes.get(page["index"])
+    prepared, raw = read_with_notes(pdf, work)
     raw = select_overlays(raw, overlays)
     deck = deck_json(classify(raw))
     render_backgrounds(prepared.pdf, raw, deck, work, shape_marks(base))

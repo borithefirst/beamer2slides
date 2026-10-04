@@ -36,9 +36,11 @@ from pathlib import Path
 from typing import Literal
 
 from .classify_text import BULLET_GLYPHS, ENUM_RE, RAISED_MARKS, compose_accents, math_text
-from .extract import JOIN_GAP, PageSpan, Reading, _label, page_chars, page_marks, readable, shown_spans
+from .extract import (JOIN_GAP, PageSpan, Reading, _label, extract, extract_read, page_chars, page_marks, readable,
+                      shown_spans)
 from .fonts import font_info
 from .pdf import Char, Document, Drawing, Page, PdfDocument
+from .raw_types import RawDoc
 
 Box = tuple[float, float, float, float]
 NotesMode = Literal["note pages", "second screen", "carried"]
@@ -503,6 +505,17 @@ def prepare_read(reading: Reading, out: Path) -> Prepared:
     """`prepare` of the PDF `reading` holds open: when its `pdf` is the one read (no note pages),
     `extract.extract_read` reads it on from where this left it."""
     return _prepare(reading, reading.pdf, out)
+
+
+def read_with_notes(pdf: Path, out: Path) -> tuple[Prepared, RawDoc]:
+    """`prepare` then `extract` of what it prepared, each page carrying its notes: the PDF opened
+    once when it has no note pages (`Reading`)."""
+    with Reading(pdf) as reading:
+        prepared = prepare_read(reading, out)
+        raw = extract_read(reading, prepared.labels) if prepared.pdf == pdf else extract(prepared.pdf, prepared.labels)
+    for page in raw["pages"]:
+        page["notes"] = prepared.notes.get(page["index"])
+    return prepared, raw
 
 
 def _frame_view(shown: list[PageSpan], page: Page, area: Box) -> tuple[str, list[str]]:

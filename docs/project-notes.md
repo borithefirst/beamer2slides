@@ -5225,8 +5225,9 @@ class on a fresh conversion before working on it.
   against the line's spans by identity and each span's size, baseline, text and font, all
   `_find_main` reads. Left: the rehearsal's `slide_parts` depends on Google's answers (template
   ids, measured moves), so build_deck cannot reuse it; `plan_theme_of`'s background re-reads
-  would hold 9 MB per background; sync, adopt_sync, inverse and deck_tools still open the PDF
-  twice (`Reading` + `prepare_read`/`extract_read`).
+  would hold 9 MB per background. sync, adopt_sync and inverse read through
+  `notes.read_with_notes` (prepare, extract on one Reading, notes on each page); deck_tools'
+  halves and the devtools scorers still open the PDF twice.
 - **Layout words under a figure's crop** (track O, real_africa-remote-sens-30 s2, 13, 43, 47): a
   frame drawn down to the page foot, cropped opaque, hid the footline words `promote_theme_text`
   had moved onto the layouts (Slides stacks a layout under every slide element, and the crop had

@@ -739,9 +739,9 @@ class Workspace:
         else to do (`converge` reads the deck meanwhile). Taken only when this workspace stood at
         the same options then, so a caller cannot hand over a PDF of another document."""
         from .classify import classify
-        from .extract import extract, select_overlays
+        from .extract import select_overlays
         from .ir import deck_json
-        from .notes import prepare as prepare_notes
+        from .notes import read_with_notes
 
         reuse = compiled is not None and self.notes == target_has_notes
         self.notes = target_has_notes
@@ -749,10 +749,7 @@ class Workspace:
         if pdf is None:
             return err
         out.mkdir(parents=True, exist_ok=True)
-        prepared = prepare_notes(pdf, out)
-        raw = extract(prepared.pdf, prepared.labels)
-        for page in raw["pages"]:
-            page["notes"] = prepared.notes.get(page["index"])
+        prepared, raw = read_with_notes(pdf, out)
         kept_original = original_pages(pdf, prepared)
         selected = select_overlays(raw, "last")
         classified = classify(selected)

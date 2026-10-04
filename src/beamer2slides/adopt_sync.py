@@ -649,9 +649,9 @@ def convert_source_of(tex: Path, work: Path, engine: str | None, page_width: flo
     Returns (the conversion, "") or (None, the compile error)."""
     from .classify import classify
     from .ir import deck_json
-    from .extract import extract, select_overlays
+    from .extract import select_overlays
     from .inverse import Workspace
-    from .notes import prepare
+    from .notes import read_with_notes
     from .render import render_backgrounds
     from .sync import planned
 
@@ -661,10 +661,7 @@ def convert_source_of(tex: Path, work: Path, engine: str | None, page_width: flo
         return None, err
     out = work / "ours"
     out.mkdir(parents=True, exist_ok=True)
-    prepared = prepare(pdf, out)
-    raw = extract(prepared.pdf, prepared.labels)
-    for page in raw["pages"]:
-        page["notes"] = prepared.notes.get(page["index"])
+    prepared, raw = read_with_notes(pdf, out)
     raw = select_overlays(raw, "last")
     deck = deck_json(classify(raw))
     render_backgrounds(prepared.pdf, raw, deck, out, frozenset())
