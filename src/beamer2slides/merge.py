@@ -1901,6 +1901,25 @@ def report_label_moves(moves: Sequence[JsonMap], report: JsonObject, held: bool)
     as_array(report["warnings"], "report.warnings").extend(found.warnings)
 
 
+@dataclass(frozen=True, kw_only=True)
+class LabelRenames:
+    """Labels the source's frames carry that no base slide does (`fresh`), and base labels no
+    frame carries any more (`lost`)."""
+    fresh: frozenset[str]
+    lost: frozenset[str]
+
+
+def label_renames(base: Iterable[str | None], ours: Iterable[str | None]) -> LabelRenames:
+    """A label is a name, and a name that changes is two facts at once: one the deck knows is
+    carried by nothing now, and one nothing here has seen has appeared. Either alone says little
+    (a dropped label has its own warning; `beamer2slides label --apply` makes new names by the
+    dozen), but together they are a rename, which no PDF can tell from a name pasted onto the
+    frame next door. `plan_merge_of` warns on it; `fuzz_labels` counts it as warned."""
+    had = {x for x in base if x}
+    has = {x for x in ours if x}
+    return LabelRenames(fresh=frozenset(has - had), lost=frozenset(had - has))
+
+
 def label_move_report(moves: Sequence[ReportedMove], report: Report, held: bool) -> None:
     r"""Conflicts for the labels `identity.label_moves` found somewhere else than it left them.
 
@@ -1994,6 +2013,7 @@ def plan_merge_of(base: Base, ours: Ours, theirs: DeckRead, adopt: Adopter | Non
     held = set() if follow_labels else {m.ours for m in moves if m.verdict == "unsure"}
 
     weak = ours.weak
+    renamed = label_renames([s.label for s in base_slides], [s.label for s in ours.slides])
     for j, o in enumerate(ours.slides):
         i = pairs.get(j)
         b = base_slides[i] if i is not None else None
@@ -2047,6 +2067,18 @@ def plan_merge_of(base: Base, ours: Ours, theirs: DeckRead, adopt: Adopter | Non
                 f"slide {b.key}: the frame's label is {now} now, not `{b.label}`; this slide was "
                 f"matched by what it says instead. A label is what makes a slide's identity survive "
                 f"an edit the content alone cannot explain - see docs/labels.md.")
+        if b is not None and not b.label and o.label in renamed.fresh and renamed.lost:
+            # The mirror of the warning above: the slide carries no label, so that one is silent,
+            # while the frame carries a name no slide of this deck was made from and a name the
+            # deck knows is on no frame any more. From the PDF that is a rename, and it reads
+            # exactly like the name pasted onto the frame next door; the words settled the pairing.
+            gone = ", ".join(f"`{x}`" for x in sorted(renamed.lost)[:3])
+            report.warnings.append(
+                f"slide {b.key}: this frame's label `{o.label}` is one this deck has never seen, "
+                f"and nothing carries {gone} any more, which it does know - a label renamed, as far as "
+                f"the PDF can say. This slide was matched by what the frame says instead, the label "
+                f"telling it nothing. If `{o.label}` was put on another frame rather than renamed, "
+                f"this is the slide to look at - see docs/labels.md, \"If a label does change\".")
         read = live.get(b.object_id) if b is not None and b.object_id else None
         if b is None or i is None:
             report.created.append(o.key)

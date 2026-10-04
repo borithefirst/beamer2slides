@@ -63,7 +63,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from beamer2slides import identity
+from beamer2slides import identity, merge
 from beamer2slides.identity import SlideInfo, WeakHow
 from beamer2slides.json_types import JsonObject, as_int
 
@@ -219,7 +219,8 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int, shape: W.S
         # A frame the report warns about is not a frame the sync moved in silence, whatever the
         # label verdict says. `merge.plan_merge` warns on two things besides the label moves: a
         # pairing `weak` marks (matched by content, by place, or between twins) and a slide whose
-        # label the frame no longer carries (`b["label"] and o["label"] != b["label"]`).
+        # label the frame no longer carries (`b["label"] and o["label"] != b["label"]`), or an
+        # unlabelled slide whose frame now carries a name in a rename (`merge.label_renames`).
         wrong_now = _wrong_frames(pairings["now"], ours_truth, base_truth)
 
         # A frame no pass would pair, named beside the slide it says much of the same thing as,
@@ -227,11 +228,19 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int, shape: W.S
         # asked whether the new slide and the old one are one frame (docs/sync.md).
         near = {m.ours for m in identity.near_misses_of(base_infos, infos, pairings["now"])}
 
+        renamed = merge.label_renames([b.label for b in base_infos], [o.label for o in infos])
+
         def warned(j: int) -> bool:
             i = pairings["now"].get(j)
             if j in weak or j in near:
                 return True
-            return i is not None and bool(base_infos[i].label) and infos[j].label != base_infos[i].label
+            if i is None:
+                return False
+            if base_infos[i].label:
+                return infos[j].label != base_infos[i].label
+            # A frame carrying a name this deck has never seen while a name it knows is on no
+            # frame any more: a rename, which `merge.plan_merge_of` names beside that slide.
+            return bool(renamed.lost) and infos[j].label in renamed.fresh
         # A slide `merge.plan_merge` holds back is a slide nothing is written to, so a frame paired
         # with it lands nowhere: the pairing is wrong and the person is asked, but their edits are
         # not merged with another frame's sentences. `written` is what is left of `costly` once the

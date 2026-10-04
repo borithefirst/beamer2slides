@@ -634,6 +634,41 @@ def test_a_label_that_was_renamed_is_a_warning_not_a_conflict():
     assert "`introduction` now" in w and "`intro`" in w
 
 
+def slide_of(key: str, label: str | None, oid: str | None) -> JsonObject:
+    """The least a `plan_merge` slide needs; a base slide also has its `oid`."""
+    s: JsonObject = {"key": key, "label": label, "elements": [], "title": key.title(),
+                     "background": None, "notes": "", "layout": "TITLE_ONLY"}
+    if oid:
+        s["objectId"] = oid
+    return s
+
+
+def renaming_report(base_labels: tuple[str | None, str | None], ours_labels: tuple[str | None, str | None]) -> JsonObject:
+    """Two slides, `intro` and `results`, paired in order, with these labels before and after."""
+    base: JsonObject = {"slides": [slide_of("intro", base_labels[0], "s1"), slide_of("results", base_labels[1], "s2")]}
+    ours: JsonObject = {"slides": [slide_of("intro", ours_labels[0], None), slide_of("results", ours_labels[1], None)],
+                        "pairs": {"0": 0, "1": 1}}
+    theirs: JsonObject = {"slides": [{"objectId": oid, "objects": {}, "notes": "", "background": None}
+                                     for oid in ("s1", "s2")]}
+    return jobj(merge.plan_merge(base, ours, theirs), "report")
+
+
+def test_a_label_the_deck_has_never_seen_beside_one_no_frame_carries_is_a_rename():
+    """The warning above is gated on the *base* slide's label, so the half of a rename where the
+    new name lands on a slide that never had one was said to nobody."""
+    report = renaming_report((None, "q3"), ("q3-again", None))
+    (w,) = [jstr(x) for x in jarr(report, "warnings") if "has never seen" in jstr(x)]
+    assert w.startswith("slide intro:") and "`q3-again`" in w
+    assert "`q3`" in w.split("`q3-again`", 1)[1] and "docs/labels.md" in w
+
+
+def test_a_source_that_labels_its_unlabelled_frames_is_no_rename():
+    """`beamer2slides label --apply` gives every unlabelled frame a name of its own: new labels
+    by the dozen and none taken away - one warning per frame would drown the report."""
+    report = renaming_report((None, None), ("intro", "results"))
+    assert [w for w in jarr(report, "warnings") if "has never seen" in jstr(w)] == []
+
+
 # ---------------------------------------------------------------- what is written
 
 def three_way(unsure_slide: int | None) -> tuple[JsonObject, JsonObject, JsonObject]:
