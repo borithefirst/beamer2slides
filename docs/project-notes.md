@@ -5242,6 +5242,22 @@ class on a fresh conversion before working on it.
   would hold 9 MB per background. sync, adopt_sync and inverse read through
   `notes.read_with_notes` (prepare, extract on one Reading, notes on each page); deck_tools'
   halves and the devtools scorers still open the PDF twice.
+- **CJK glue and stacked labels** (r2 track J). luatexja's xkanjiskip between kana/kanji and a Latin
+  letter or digit is a pen move, 2.4 pt whatever the size in slide-20250221: 0.168 em of the
+  14.3 pt body (over JOIN_GAP, a plain space) but 0.139 em of a frame title and 0.116 em of the
+  title page, under it: 'HVCAN上のIP電話', titles 1-2.6% short. `cjk_glue.py`: a gap of
+  `GLUE_MIN`-`GLUE_MAX` (0.08-0.21) em of the Latin side's size at a CJK/Latin `boundary` is
+  CJK_GLUE (U+2006, 1/6 em; the same character as `mono_edges.EDGE_SPACE`) in the Latin side's
+  run, by `extract._cjk_glue`, classify's span joins, and a line join between a CJK and a Latin
+  letter or digit (`line_glue`). Readers: `inverse.latex_escape` drops it at a boundary
+  (`as_tex`: TeX sets its glue again), compare reads a space, `text_layout.wrap` breaks after it.
+  Corpus and built decks: only slide-20250221 changed (30 elements). Not measured live: U+2006 in
+  Fira Sans and Noto Sans JP runs. Defense s52/s55's STASE / EUPHONY (labels alone on their lines
+  ending together, starting apart, short of the margin) were left-aligned, ragged in Slides:
+  `single_line_align` right-aligns a lone line ending within `FLUSH_RIGHT` (0.5 pt) of a lone,
+  unbulleted, same-size line within 2 em that starts over an em elsewhere. Corpus: those two
+  pages, thesis-defense s29's \text labels of an align, a cases' '0'. The serif capitals stay
+  narrow: a run under SHAPE_MIN_CHARS in a sentence keeps shape_ratio 1.0 (emit run sizes).
 - **Layout words under a figure's crop** (track O, real_africa-remote-sens-30 s2, 13, 43, 47): a
   frame drawn down to the page foot, cropped opaque, hid the footline words `promote_theme_text`
   had moved onto the layouts (Slides stacks a layout under every slide element, and the crop had
@@ -5406,3 +5422,20 @@ class on a fresh conversion before working on it.
   paragraph in MSAM is Slides' 0.45 em fallback (writing ► changes the text: an
   `OPERATOR_FACES`-like face for ▶ is the way, probe section C); ball bullets lose their shading
   by design, and a level's smaller ball is held at the text-size cap like its parent's (defense).
+- Hairlines in pictures (track H, figure-hairlines-washed-out: thesis-defense s7, s14-s18,
+  phylogenet s31). The loss was ours, not Google's: on the archived thumbnails Slides' ink over each
+  figure equals a box filter of our crop to 1600 px within 1-3% (8 figures). A viewer draws no
+  stroke thinner than one of its pixels (PDFium: the page at 3.53 px/pt has the network maps'
+  0.1 pt lines 1 px wide, full colour); our 8 px/pt crop drew them 1 px of 8, and shown at slide
+  size they averaged to 40% of the PDF's ink, pale and broken (thesis s14: 5283 against 8521).
+  The contract gained `PdfPage.set_hairline(width)`: `render` draws every stroked path at least
+  that wide, page space with a form's scale (pdfium: `FPDFPageObj_SetStrokeWidth` for the render
+  and back; pure: the parsed `line_width`, byte-identical; sandbox: an op), drawings and bounds
+  unchanged. `render.hairline` sets one pixel of the slide 1600 px wide (`HAIRLINE_SLIDE_PX`) on
+  every page render_backgrounds and crop_region draw; a render at that scale or coarser is
+  unchanged. Thesis s14 8153, s15 16029 (PDF 16860), s16 11351 (12055), s7 34650 (34797),
+  phylogenet s31 46264 (46754). Corpus: no rendered.json changed; 33 of 1,820 pictures changed,
+  all toward the PDF's ink at thumbnail size (dstalk p0f3 5462 -> 6451, PDF 6395; defense p45f0
+  6794 -> 7625, PDF 7805). Not fixed: thesis s23's git-history panel is a raster image (980x743
+  px): its 1-px rules are pixels, which Google's resampling thins like any box filter (PDFium's
+  image downsampling keeps 5% more ink); no stroke to widen.

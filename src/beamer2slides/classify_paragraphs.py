@@ -18,6 +18,7 @@ from .classify_text import (
     WORD_GAP_MIN_EM, wide_columns, wide_gap, widened, widens_after, with_accent, with_text, word_gap,
 )
 from .classify_lines import LinesMixin, ends_in_leader, leader_line, leader_pitch, overprint_word, prints_over
+from .cjk_glue import CJK_GLUE, boundary, in_glue, line_glue
 from .fonts import google_font, serif_math_letters
 from .ir import Align, BeforeWord, Run, TextElement
 from .ir import Paragraph as ParagraphJson
@@ -31,6 +32,7 @@ TRAILING_PUNCT = re.compile(r"(?<=\w)[,.;:!?)\]]+\s*$")
 # An item whose baseline is this many of its sizes or fewer from another item's is next to it in
 # one list (`single_line_align`): an item's pitch, itemsep and a level's change.
 LIST_NEIGHBOUR_EM = 2.5
+FLUSH_RIGHT = 0.5  # pt: lone lines ending this near a line beside them end with it (`single_line_align`)
 BOX_PAD = " "   # a padded \colorbox's \fboxsep, highlighted (a no-break space: the box never breaks)
 
 
@@ -450,6 +452,16 @@ class ParagraphsMixin(LinesMixin):
                 any(0 < abs(l.baseline - line.baseline) <= 2 * line.size and abs(l.x1 - line.x1) <= 1 for l in p.lines)
                 for p in neighbours if p.first is not line):
             return "right"
+        # (ending where a line alone beside it ends that starts elsewhere: a tabular's r column,
+        # labels stacked flush right - left-aligned, Slides' narrower capitals left their ends
+        # ragged, real_defense-defense s28-s56's STASE / EUPHONY / AP-GRAPH. A wrapped paragraph's
+        # line, an item's or a smaller one's ending there says nothing: a heading over a justified
+        # item, real_africa-remote-sens-30 s26)
+        if any(len(p.lines) == 1 and p.first.bullet is None and abs(p.size - line.size) <= FLUSH_RIGHT
+               and 0 < abs(l.baseline - line.baseline) <= 2 * line.size
+               and abs(l.x1 - line.x1) <= FLUSH_RIGHT and abs(l.x0 - line.x0) > line.size
+               for p in neighbours if p.first is not line for l in p.lines):
+            return "right"
         if abs(line.rect.cx - self.W / 2) <= 2 and line.x0 > 0.12 * self.W:
             return "center"
         if abs(line.x1 - (self.W - margin)) <= 2 and line.x0 > self.W / 2:
@@ -834,6 +846,15 @@ class ParagraphsMixin(LinesMixin):
                             sep = chr(11)  # titles keep their line breaks (a soft break in Slides)
                         elif cjk(tail.rstrip()[-1:]) and cjk(text.lstrip()[:1]):
                             sep = ""  # Chinese and Japanese break lines between characters, no space
+                        elif line_glue(tail.rstrip()[-1:], text.lstrip()[:1]) and tail == tail.rstrip() \
+                                and text == text.lstrip():
+                            # TeX broke the line at its glue between CJK and Latin text: written
+                            # as it sets it unbroken (cjk_glue), in the Latin side's run
+                            if cjk(tail[-1:]):
+                                text = CJK_GLUE + text
+                                sep = ""
+                            else:
+                                sep = CJK_GLUE
                         else:
                             sep = " "
                     elif span is line.tab and not pitch:
@@ -842,7 +863,15 @@ class ParagraphsMixin(LinesMixin):
                         # (after a hole, from the end of its graphic: a frame wider than its words)
                         gap = (span.rect.x0 - hole_x1) if runs[-1].get("hole") else gap_between(prev, span)
                         sep = " " if gap > 0.15 * line.size else ""
-                        mono = prev.info.family == "mono" and span.info.family == "mono" and span.text.strip()
+                        tail = runs[-1]["text"]
+                        if not runs[-1].get("hole") and tail == tail.rstrip() and text == text.lstrip() and \
+                                boundary(tail[-1:], text[:1]) and \
+                                in_glue(gap / (span.size if cjk(tail[-1:]) else prev.size)):
+                            # TeX's glue between CJK and Latin text (cjk_glue), in the Latin side's run
+                            sep = CJK_GLUE
+                            if cjk(tail[-1:]):
+                                text, sep = CJK_GLUE + text, ""
+                        mono =prev.info.family == "mono" and span.info.family == "mono" and span.text.strip()
                         if (mono or span is line.tab) and pitch and not runs[-1].get("hole") and not runs[-1]["script"]:
                             # (a diff's "+" before its code is no hanging label: spaces too)
                             # In a monospaced face every space is one advance (Roboto Mono: 0.600 em,

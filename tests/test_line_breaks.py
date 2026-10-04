@@ -129,6 +129,22 @@ def test_an_attribution_flush_with_the_right_aligned_quote_above_is_right_aligne
     assert got["Body text starts at the left margin"] == "left"
 
 
+def test_labels_stacked_flush_right_are_right_aligned():
+    """Labels alone on their lines, ending together but starting apart (real_defense-defense
+    s52's STASE over EUPHONY, a tabular's r column): right-aligned, or Slides' narrower capitals
+    leave their ends ragged. A smaller line ending there by chance says nothing."""
+    from .test_columns import paragraphs, span, text
+    size, right = 10.9, 250.0  # (short of the right margin: not right-aligned for ending there)
+    spans = [span(t, right - w, y, size, w, "SFBX1095") for t, w, y in
+             (("STASE", 34.5, 69.0), ("EUPHONY", 55.7, 90.0))]  # (paragraphs apart)
+    spans += [span("Classes of the corpus, from the left margin", 30.0, 120.0, size, 300.0, "SFRM1095"),
+              span("Heading:", 30.0, 150.0, 8.0, 109.3, "SFSS0800"),
+              span("an item below it", 46.0, 160.0, 7.0, 93.3, "SFSS0700")]
+    got = {text(p): p["align"] for p in paragraphs(spans, size)}
+    assert got.get("STASE") == "right" and got.get("EUPHONY") == "right", got
+    assert got["Heading:"] == "left", got
+
+
 def test_a_word_set_in_two_spans_is_one_word_when_it_would_end_the_line_above():
     """\\textsc{Goldbach}: its capital in one span, its small letters in the next. The capital
     alone would have fitted at the end of the line above, so the line was taken for one TeX

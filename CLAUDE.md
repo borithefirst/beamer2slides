@@ -62,8 +62,10 @@ decorations) is a picture, or baked into a per-slide background picture.
   (`State` has no defaults), a different one being its `dataclasses.replace`. The render
   tortures share `torture_kit`: `compare_renders`/`compare_clipped` return `Compared`,
   `compare_refusing` `Compared | Refused` read through `outcome()`; a page's geometry is
-  `render_torture.Geometry` (`PLAIN`). **PDFium is not thread-safe**: every PDF read stays on the
-  main thread.
+  `render_torture.Geometry` (`PLAIN`). `PdfPage.set_hairline` draws every stroke at least one
+  pixel of the slide shown 1600 px wide (`render.hairline`, `HAIRLINE_SLIDE_PX`): our 8 px/pt
+  crops drew 0.1 pt lines that Slides' downscale washed out. **PDFium is not thread-safe**: every
+  PDF read stays on the main thread.
 - **No public links**: pictures reach Slides inside the imported .pptx, never as shared Drive files.
 - **Fidelity is measured on Google's own renderer** (`getThumbnail` vs the PDF page), never a local
   preview. Font substitutes are calibrated (`tools/calibrate.py`, `calibration/fonts.json`,
@@ -126,13 +128,16 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   separate lines (`overprinted_rows`), and smaller words at the page foot well under or printed
   over a box join no box (`joins_box`, `printed_over`); a lone line starting where its neighbours
   (a bulleted one's: its siblings anywhere; a bulleted line by a list's lines, never page-centred,
-  `LIST_NEIGHBOUR_EM`) start is left-aligned (`single_line_align`), a lone line flush with a right-aligned paragraph beside it right-aligned;
+  `LIST_NEIGHBOUR_EM`) start is left-aligned (`single_line_align`), a lone line flush with a right-aligned paragraph, or with a lone unbulleted line starting
+  elsewhere (`FLUSH_RIGHT`), beside it right-aligned;
   lines broken by hand never join (`hand_broken`; beside other content a column is measured by
   its mates, `column_mates`; two lines ending together are a measure only with several words and
   no longer known line; a lettered 'label' set off by a word space is a word, `label_is_word`;
   the gutter veto looks only at its rows' block, `block_of`); classify records where wrapped lines start
   (`line_starts`: the whole first span, a space only where the page leaves one, a line opening on
-  a hole at that hole) so emit measures a paragraph without TeX widths; CJK breaks anywhere and joins with no space (`classify.cjk`). Font names
+  a hole at that hole) so emit measures a paragraph without TeX widths; CJK breaks anywhere and joins with no space (`classify.cjk`), but luatexja's xkanjiskip
+  between CJK and Latin (0.08-0.21 em) is a U+2006 in the Latin run (`cjk_glue.py`; inverse drops
+  it, TeX sets it again). Font names
   map through family tables (`fonts.font_info`: `SANS_FAMILIES`, `TEX_TT_RE`, `LIBERTINE_RE`;
   0.6 em monos -> Roboto Mono; CJK faces -> Noto Sans/Serif JP/SC/TC/KR, `fonts.cjk_font`; a CM sans
   cut of 6 pt or less is written at weight 600 (`FontMapper.optical_weight`), drawn Regular: Lato

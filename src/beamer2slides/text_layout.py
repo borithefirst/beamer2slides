@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 
 from . import bidi, emit
+from .cjk_glue import CJK_GLUE
 from .emit_widths import HOLE_BREAKS, WORD_JOINER, breaks_before
 from .fonts import face_advance
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object
@@ -296,7 +297,7 @@ def wrap(chars: str, styles: Sequence[JsonMap], width: float) -> list[tuple[int,
                 end, nxt = i, i + 1
                 break
             adv = advance(ch, styles[i], font_size(styles[i]))
-            if ch == " " or ch in HOLE_BREAKS:
+            if ch == " " or ch in HOLE_BREAKS or ch == CJK_GLUE:  # (a six-per-em space breaks as one: cjk_glue)
                 w += adv
                 if ch in HOLE_BREAKS or chars[i + 1:i + 2] not in (NBSP, THICK_SPACE):
                     last_break, ink_at_break = i + 1, ink

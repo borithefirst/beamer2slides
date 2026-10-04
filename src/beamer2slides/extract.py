@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from . import bidi, type3
+from .cjk_glue import CJK_GLUE, boundary, chinese_or_japanese, in_glue
 from .fonts import font_info
 from .pdf import NO_OBJECT, OBJ_IMAGE, Char, Document, Page, PdfDocument, char_box
 from .pdf.api import Drawing, Link, stretch_across
@@ -250,6 +251,25 @@ def tracked_gaps(chars: list[Char], tracks: dict[int, float]) -> dict[int, bool]
             out[k] = g >= track + TRACK_WORD
             tracks[k] = track
     return out
+
+
+def _cjk_glue(prev: Char, ch: Char) -> Char | None:
+    """TeX's glue between a CJK character and a Latin one standing next on its line (`cjk_glue`):
+    a synthetic CJK_GLUE as wide as the gap, in the Latin side's font, size and colour; None where
+    the two are no `boundary` or the gap is no such glue (`in_glue`, in em of the Latin side)."""
+    if ch.dir != prev.dir or not boundary(prev.c, ch.c):
+        return None
+    ux, uy = ch.dir
+    px, py = prev.origin[0] + ux * prev.advance, prev.origin[1] + uy * prev.advance
+    width = (ch.origin[0] - px) * ux + (ch.origin[1] - py) * uy
+    latin = ch if chinese_or_japanese(prev.c) else prev
+    size = max(latin.size, 0.01)
+    if abs((ch.origin[0] - px) * uy - (ch.origin[1] - py) * ux) / size >= SAME_BASELINE or not in_glue(width / size):
+        return None
+    return Char(c=CJK_GLUE, font=latin.font, size=latin.size, color=latin.color, alpha=latin.alpha, origin=(px, py),
+                box=char_box(px, py, ux, uy, width, latin.size, latin.ascent, latin.descent),
+                dir=ch.dir, obj=NO_OBJECT, font_id=latin.font_id, advance=width, synthetic=True,
+                ascent=latin.ascent, descent=latin.descent, exact_advance=True)
 
 
 def narrow_spaces(chars: list[Char]) -> set[int]:
@@ -1126,6 +1146,20 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
                 run.append(letter_space(prev, tracks[k] * ch.size if tracked[k] else max(0.0, gap)))
             if tracked[k]:
                 flush()
+            run.append(ch)
+            prev = ch
+            continue
+        if prev is not None and (glue := _cjk_glue(prev, ch)) is not None:
+            # TeX's glue between CJK and Latin text (cjk_glue): a six-per-em space in the Latin
+            # side's span, whichever comes first
+            if (ch.font, round(ch.size, 3), ch.color, ch.alpha) == (prev.font, round(prev.size, 3), prev.color, prev.alpha):
+                run.append(glue)
+            elif not chinese_or_japanese(prev.c):  # (Latin, then CJK: the glue ends the Latin span)
+                run.append(glue)
+                flush()
+            else:
+                flush()
+                run.append(glue)
             run.append(ch)
             prev = ch
             continue

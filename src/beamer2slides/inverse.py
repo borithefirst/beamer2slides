@@ -55,6 +55,7 @@ from .compare import (HOLE, TOL, AlignResidual, BackgroundResidual, BoxExtra, Bo
                       target_slide_of, text_anchor, word_op_json)
 from .deck_ir_types import TargetDeck, TargetImage, element_json, is_target, parse_target, recolor_json, target_json
 from .ir_types import At, Box, box
+from .cjk_glue import as_tex
 from .mono_edges import EDGE_SPACE
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, empty_visible,
@@ -121,8 +122,9 @@ GUARD_UNITS: bool = False
 def latex_escape(text: str) -> str:
     # (a gap TeX widens - after a sentence, a script - is written U+2008 then a space,
     # classify_text.wide_gap: one space in TeX, which widens it again; never `~ `; nor are the
-    # thin spaces before the space at inline code's edges, mono_edges)
-    text = re.sub(EDGE_SPACE + "+ ", " ", text.replace("\u2008 ", " "))
+    # thin spaces before the space at inline code's edges, mono_edges; the same character alone
+    # between CJK and Latin text is TeX's own glue there, cjk_glue)
+    text = as_tex(re.sub(EDGE_SPACE + "+ ", " ", text.replace("\u2008 ", " ")))
     out = "".join(ESCAPE.get(c, c) for c in text)
     return re.sub(r"(\d)(?=pt)", r"\1{}", out) if GUARD_UNITS else out
 
