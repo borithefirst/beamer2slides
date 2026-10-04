@@ -96,7 +96,8 @@ class PageClassifier(ReasonsMixin):
         self.spans_by_id = {s.id: s for s in spans}
         self.analyse_graphics()
         # (after the braces: a brace's CMEX pieces go with their label, see join_braces)
-        lines = self.split_line_numbers(self.join_hanging_operators(self.join_braces(self.build_lines(spans))))
+        lines = self.split_line_numbers(self.join_turned_glyphs(
+            self.join_hanging_operators(self.join_braces(self.build_lines(spans)))))
         self.read_lines(lines, spans)
         self.assign_reasons(lines)
         plain_tables = self.plain_tables(lines)

@@ -4981,6 +4981,13 @@ to (real_linear-attention-a s35/s38: a `k_t^⊤` 23 pt right of its gap, one aft
   joiner like the person's read-back; the source's predicted text meets them through
   `merge.collapse_holes`, which drops it, and deck_ir and inverse read it as nothing.
   `text_edit_requests` keeps the raw live text, joiner included, so its indices stay Google's.
+- txfonts' `\circlearrowleft` is ⟳ drawn turned 120° (dir -0.5, 0.866), its origin 10 pt above the
+  line's baseline: line building left it a line of its own, `rotated`, so it stayed in the
+  background at its PDF place while its words reflowed and its slot read as a `\quad` (monodromy
+  s17 item 7: the arrow over "(x)" one formula right of its gap). A lone turned glyph centred on a
+  level line's words with words on both sides within 1.5 em of its centre joins that line as a hole
+  (`LinesMixin.join_turned_glyphs`), its box the turned box cut to the gap; its picture grows to
+  its ink, and `render.owned_by` already keeps a turned span's glyph by its direction.
 - A literal list number (`classify.literal_list_numbers`, "5)<TAB>") was put before the text
   without moving the recorded `line_starts`: three short, so the item went unmeasured. They move
   with it now.

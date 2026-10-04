@@ -30,6 +30,8 @@ LEADER_END_RE = re.compile(r"\.(?:\s+\.){3,}\s*$")  # (dots set apart: a word's 
 LEADER_ITEM_RE = re.compile(r"\s*(?P<bullet>[•◦▪‣▸▶►●■□○★⋆])(?P<leader>\s*" + LEADER_DOTS + r")\s*")
 BULLET_ADVANCE_EM = 0.5  # the bullet's advance: CMSY's \bullet, and \textbullet as EC sets it (0.497 em)
 DOT_ADVANCE_EM = 0.278   # a Computer Modern period's: how far a leader's last dot reaches past its origin
+TURNED_TALL = 2.0    # a turned glyph joining a level line stands at most this many times its words' height
+TURNED_REACH = 1.5   # em: from the turned glyph's centre to the words on either side of it
 
 
 def is_leader(text: str) -> bool:
@@ -382,6 +384,45 @@ class LinesMixin(GraphicsMixin):
                     joined.tab = host.tab
                     out[out.index(host)] = joined
                     break
+        return out
+
+    @staticmethod
+    def join_turned_glyphs(lines: list[Line]) -> list[Line]:
+        """A lone glyph the PDF draws turned (txfonts' `\\circlearrowleft` is ⟳ turned 120°) in
+        the gap of a level line: its origin lies off the line's baseline, so line building left it a
+        line of its own, read as rotated and kept in the background, while the words around it
+        reflowed and Slides set its gap elsewhere ("Aut(X̃ | X)ᵒᵖ ⟳ p⁻¹(x)", real_beamer-monodromy
+        s17). Centred on words of that line with words on both sides, it is a hole of that line:
+        level at its baseline, its box the turned box cut to the gap between its neighbours (its
+        picture grows to its ink at render)."""
+        out = list(lines)
+        for g_line in list(out):
+            texts = [s for s in g_line.spans if s.text.strip()]
+            if len(texts) != 1 or any(s.horizontal for s in g_line.spans) or len(texts[0].text.strip()) > 2:
+                continue
+            g = texts[0]
+            for host in out:
+                if host is g_line or not all(s.horizontal for s in host.spans):
+                    continue
+                words = [w for w in host.spans if w.text.strip()]
+                level = [w for w in words if g.rect.h <= TURNED_TALL * w.rect.h
+                         and abs(g.rect.cy - w.rect.cy) <= 0.5 * w.size]
+                before = [w for w in words if 0 <= g.rect.cx - w.rect.x1 <= TURNED_REACH * w.size]
+                after = [w for w in words if 0 <= w.rect.x0 - g.rect.cx <= TURNED_REACH * w.size]
+                if not (level and before and after):
+                    continue
+                x0, x1 = max(g.rect.x0, max(w.rect.x1 for w in before)), min(g.rect.x1, min(w.rect.x0 for w in after))
+                if x1 - x0 < 0.2 * g.size:
+                    continue  # no gap left for it: a glyph over the words, not between them
+                top, bottom = min(w.rect.y0 for w in level), max(w.rect.y1 for w in level)
+                level_g = replace(g, rect=Rect(x0, max(g.rect.y0, top), x1, min(g.rect.y1, bottom)),
+                                  baseline=host.baseline, horizontal=True)
+                joined = new_line(host.spans + [level_g])
+                joined.tab = host.tab
+                joined.holes = [[level_g]]
+                out.remove(g_line)
+                out[out.index(host)] = joined
+                break
         return out
 
     @staticmethod

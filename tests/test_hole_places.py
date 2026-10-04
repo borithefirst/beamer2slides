@@ -4,6 +4,7 @@ its words, a framed formula with one span of prose beside it, and a radical sign
 formula's baseline in the hole's crop (real_linear-attention-a s35/s38, real_beamer-monodromy).
 Offline: the expected places are the ones measured live on Google's thumbnails."""
 
+from beamer2slides import ir
 from beamer2slides.classify import PageClassifier
 from beamer2slides.emit_holes import fit_holes, formula_shifts, hole_slide_dicts, slide_holes_of, slides_hole_x
 from beamer2slides.emit_metrics import FontMapper
@@ -252,6 +253,53 @@ def test_a_framed_formula_beside_one_span_of_prose_is_a_hole() -> None:
     holes = [e for e in page.classify()["elements"] if e["kind"] == "image" and e.get("anchor")]
     assert len(holes) == 1, "the frame and its formula became one picture over a hole in the line"
     assert holes[0]["bbox"][2] >= 146.35, "the frame is in the hole's picture"
+
+
+# real_beamer-monodromy s17: "which agrees with π₁(X, x) ⟳ p⁻¹(x)." - txfonts' \circlearrowleft is
+# ⟳ turned 120°, its origin 10 pt above the line's baseline.
+TURNED: list[tuple[str, str, float, list[float], list[float], list[float]]] = [
+    ("which agrees with", "LinBiolinumT", 10.909, [50.16, 254.84], [50.16, 246.81, 132.16, 257.72], [1.0, 0.0]),
+    (" \U0001d70b", "LibertineMathMI", 10.909, [132.16, 254.84], [132.16, 244.2, 141.31, 255.11], [1.0, 0.0]),
+    ("(", "txsys", 10.909, [145.58, 254.84], [145.58, 245.86, 149.21, 256.77], [1.0, 0.0]),
+    ("X", "LinLibertineTI", 10.909, [149.65, 254.84], [149.65, 246.68, 156.5, 257.59], [1.0, 0.0]),
+    (",", "LibertineMathMI", 10.909, [157.31, 254.84], [157.31, 244.2, 159.71, 255.11], [1.0, 0.0]),
+    (" x", "LinLibertineTI", 10.909, [159.71, 254.84], [159.71, 246.68, 166.82, 257.59], [1.0, 0.0]),
+    (")", "txsys", 10.909, [167.47, 254.84], [167.47, 245.86, 171.11, 256.77], [1.0, 0.0]),
+    ("⟳", "txsym", 10.909, [179.5, 244.66], [171.6, 244.66, 188.95, 263.8], [-0.5, 0.866]),
+    ("p", "LinLibertineTI", 10.909, [186.14, 254.84], [186.14, 246.68, 191.47, 257.59], [1.0, 0.0]),
+    ("−", "txsys", 7.97, [192.0, 250.88], [192.0, 244.32, 197.07, 252.29], [1.0, 0.0]),
+    ("1", "LinLibertineT", 7.97, [197.39, 250.88], [197.39, 244.9, 201.1, 252.87], [1.0, 0.0]),
+    ("(", "txsys", 10.909, [202.14, 254.84], [202.14, 245.86, 205.77, 256.77], [1.0, 0.0]),
+    ("x", "LinLibertineTI", 10.909, [206.21, 254.84], [206.21, 246.68, 211.39, 257.59], [1.0, 0.0]),
+    (")", "txsys", 10.909, [212.05, 254.84], [212.05, 245.86, 215.68, 256.77], [1.0, 0.0]),
+    (".", "LinBiolinumT", 10.909, [216.22, 254.84], [216.22, 246.81, 218.62, 257.72], [1.0, 0.0])]
+
+
+def turned_page(spans: list[tuple[str, str, float, list[float], list[float], list[float]]]) -> list[ir.Element]:
+    raw: list[RawSpan] = [{"id": f"p0s{i}", "text": t, "font": f, "size": size, "color": "#000000", "alpha": 255,
+                           "origin": origin, "bbox": bbox, "dir": d, "smallcaps": False}
+                          for i, (t, f, size, origin, bbox, d) in enumerate(spans)]
+    page = PageClassifier({"index": 0, "label": "1", "size": list(PAGE), "spans": raw, "images": [], "drawings": [],
+                           "links": []}, 10.909)
+    return page.classify()["elements"]
+
+
+def test_a_turned_glyph_between_words_is_a_hole_of_their_line() -> None:
+    """Its origin off the line's baseline made it a rotated line of its own, left in the background
+    while its words reflowed: Slides set its gap elsewhere and the glyph stood over "(x)"."""
+    els = turned_page(TURNED)
+    holes = [e for e in els if e["kind"] == "image" and e.get("anchor")]
+    assert [h["spans"] for h in holes] == [["p0s7"]]
+    x0, x1 = holes[0]["bbox"][0], holes[0]["bbox"][2]
+    assert 171.11 - 1.5 <= x0 and x1 <= 186.14 + 1.5, "the hole is the gap between ')' and 'p' (and its pad)"
+    texts = [e for e in els if e["kind"] == "text"]
+    assert len(texts) == 1 and "⟳" not in str(texts[0]), "one line of words, the glyph only in its picture"
+
+
+def test_a_turned_glyph_with_no_words_beside_it_stays_apart() -> None:
+    """A sloped glyph away from any line's gap (a mark beside a line's end) joins no line."""
+    alone = [s for s in TURNED if s[0] not in ("p", "−", "1", "(", "x", ")", ".")]
+    assert not [e for e in turned_page(alone) if e["kind"] == "image" and e.get("anchor")]
 
 
 # real_beamer-monodromy s12: "surjective. Hence <\boxed{H ↦ (H\Y → X) ↦ Aut(Y | H\Y) ≅ H}>." - the

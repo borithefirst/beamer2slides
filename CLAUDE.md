@@ -237,7 +237,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   before the hole on its PDF line (`emit_holes.slides_hole_x`, the paragraph as its box holds it
   `emit_text.held_paragraph`); a `\boxed` formula's rules are a box (`classify_graphics.box_edge`),
   a raised radical its span's (`render.RAISED_SLACK`); a literal list number moves the recorded
-  `line_starts` with it (`literal_list_numbers`); graphics drawn at words (tikzmark arrows,
+  `line_starts` with it (`literal_list_numbers`); a lone turned glyph in a level line's gap (⟳ of
+  `\circlearrowleft`) is a hole of that line (`join_turned_glyphs`); graphics drawn at words (tikzmark arrows,
   braces) are **overlays** anchored to their text and stretched to the words Slides sets.
 - Theme: the most common background goes on the master, shared decoration onto layout pictures,
   layouts' placeholders get the deck's title/body style, frame counters become per-slide text.
