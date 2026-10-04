@@ -197,6 +197,17 @@ Google's renderer (advances as in `tools/probe_advances.py`, one reference row p
   0.227 z_i + 0.968 z_(i+1) + extra_below(r, z_i) + extra_above(r, z_(i+1)), z being each line's own
   largest run (`emit.line_sizes`, `inner_pitch`).
 
+## 2d. Math operators (`tools/probe_math_operators.py`, 2026-10-04)
+34 operators written in 11 served faces between Lato H's at 28 pt, measured on Google's
+thumbnails (ink height, centre above the baseline, advance, stroke) against TeX's own glyph
+(CMSY10/CMMI10/CMR10/MSBM10/CMEX10 rendered from MiKTeX's .pfb). Lato has none of them, and
+Slides' fallback draws them far from TeX: ≠ 47% short, ⊤ 38%, ⊙ ⊗ ⊕ 32% short and 0.105 em
+above the math axis, ≤ ≥ 30% short, ∞ 29%, ↦ 41%, ∈ 0.1 em high and 50% too wide. Nearest TeX
+by height and axis: STIX Two Math for 20 operators (⊤ +0%, ≤ ≥ -4%, ≠ -9%, ∈ +3%, all on the axis
+within 0.01 em), Libertinus Math for ⊙ ⊗ ⊕ ∏ ∫, STIX Two Text for ∂; Lato (the fallback) stays
+best for ∃, ℝ ℕ ℤ ℂ and ⟶. Stroke is thresholded ink over perimeter: it ranks faces against each
+other, not against TeX in absolute terms. Full table: the probe's summary.txt.
+
 ## 3. Choice
 - **Default for CM Sans: Lato** at size × 1/1.020. Humanist like CM Sans, cap height matches
   within 1%, and nothing gets wider than the original (titles use their own factor).
