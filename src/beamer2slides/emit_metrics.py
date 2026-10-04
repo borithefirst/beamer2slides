@@ -82,6 +82,14 @@ BULLET_SHAPES: dict[str, tuple[str, int, float, float]] = {  # shape: (preset, l
 # box, 0.075 em more on all 97 bullets of a converted deck, whose words started where the PDF's
 # do; docs/project-notes.md "Triangle bullets").
 CHAR_BULLETS: dict[BulletFace, tuple[str, float, float]] = {"triangle": ("►", 0.68, 0.28)}
+# The glyph each preset draws a face as (BULLET_SHAPES, tools/probe_bullets.py). A text shell that
+# holds a bullet no preset draws (CHAR_BULLETS) writes its other bullets as these characters
+# (`a:buChar` in the run's face, as createParagraphBullets' bullet is drawn in its paragraph's), so
+# a box mixing beamer's ▶ with discs or balls (its subitems', or its items' under ▶ subitems)
+# keeps its ▶ and draws the rest as the preset would, at the preset's measures
+# (emit_text.shell_route; tools/probe_shell_bullets.py compares the two live).
+PRESET_CHARS: dict[BulletFace, str] = {"disc": "●", "circle": "○", "square": "■", "open_square": "❏", "triangle": "➢",
+                                       "star": "★", "diamond": "◆", "open_diamond": "◇"}
 _GLYPH_FACES: tuple[tuple[str, BulletFace], ...] = (
     ("▶►▸‣", "triangle"), ("•●", "disc"), ("◦○", "circle"), ("■▪", "square"), ("□", "open_square"), ("★⋆", "star"),
     ("◆♦", "diamond"), ("◇⋄", "open_diamond"))
@@ -740,6 +748,16 @@ def bullet_char_of(bullet: SetBullet) -> str | None:
     """The character a bullet is written as when no preset draws it (CHAR_BULLETS); None else."""
     shape = bullet_shape_of(bullet)
     return None if shape is None or shape not in CHAR_BULLETS else CHAR_BULLETS[shape][0]
+
+
+def shell_char_of(bullet: SetBullet) -> str | None:
+    """The character a bullet is written as in a text shell: its own (CHAR_BULLETS) where no preset
+    draws it, else its preset's glyph (PRESET_CHARS); None for a number (Slides numbers a list
+    itself, never probed through a .pptx)."""
+    shape = bullet_shape_of(bullet)
+    if shape is None:
+        return None
+    return CHAR_BULLETS[shape][0] if shape in CHAR_BULLETS else PRESET_CHARS[shape]
 
 
 def face_ems(shape: BulletFace, char: bool) -> tuple[float, float]:

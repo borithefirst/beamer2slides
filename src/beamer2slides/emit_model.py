@@ -140,7 +140,8 @@ class Shell:
 @dataclass(frozen=True, kw_only=True)
 class ShellParagraph:
     """A paragraph of a text shell: one placeholder character the API pass replaces by its words,
-    and the bullet the .pptx gives it (`a:buChar`; the API has no preset drawing it)."""
+    and the bullet the .pptx gives it (`a:buChar`: one no preset draws, or beside such bullets a
+    preset's glyph, emit_metrics.shell_char_of)."""
     level: int
     """The nesting level (`lvl`), relative to the box's shallowest bulleted paragraph."""
     char: str | None
@@ -158,7 +159,7 @@ class ShellParagraph:
 
 @dataclass(frozen=True, kw_only=True)
 class PptxText:
-    """The text shell the .pptx carries for a text element whose bullets no preset draws
+    """The text shell the .pptx carries for a text element holding bullets no preset draws
     (`emit_text.text_shell_of`, emit_pptx._add_text_shell), Slides pt."""
     box: Box
     paragraphs: tuple[ShellParagraph, ...]

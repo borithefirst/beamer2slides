@@ -20,7 +20,7 @@ from beamer2slides.classify import HOLE_PAD
 from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, FontMapper, find_marks, fit_holes,
                                 formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
                                 measure_jobs, overlay_boxes, pick_gap, slide_holes, space_shift)
-from beamer2slides.emit_metrics import unspaced
+from beamer2slides.emit_metrics import CHAR_BULLETS, PRESET_CHARS, unspaced
 from beamer2slides.emit_model import Place, PptxText, set_text, table_of, text_of
 from beamer2slides.emit_pptx import SHELL_CHAR
 from beamer2slides.emit_tables import pptx_table_of, table_requests_of
@@ -40,6 +40,8 @@ NBSP = "\xa0"
 # demo p3's hole after 'for x ∈ ℝ and n ≥ 2, the mean' is 16.7 (∈ ≥ in STIX Two Math's measured
 # advances since 2026-10-04), and live it sits 0.34 pt from its words' (tools/alignment.py)
 MAX_SHIFT = 18.0
+# what a text shell's bullets may be: one no preset draws, or beside one a preset's glyph
+SHELL_CHARS = {c for c, _, _ in CHAR_BULLETS.values()} | set(PRESET_CHARS.values())
 
 Box4 = tuple[float, float, float, float]
 
@@ -678,8 +680,8 @@ def test_bullets_are_styled_before_they_are_created(decks: tuple[Emitted, ...]) 
 
 
 def test_triangle_bullets_come_with_the_pptx(decks: tuple[Emitted, ...]) -> None:
-    """A box whose bullets are all beamer's ▶ (no preset draws it: createParagraphBullets wrote ➢)
-    comes in the .pptx as a text shell whose bullets are `a:buChar` ► (▶'s shape, larger in Slides; emit_text.text_shell_of): it
+    """A box holding beamer's ▶ (no preset draws it: createParagraphBullets wrote ➢) comes in the
+    .pptx as a text shell whose bullets are `a:buChar` ► (▶'s shape, larger in Slides; emit_text.text_shell_of), its others their presets' glyphs: it
     is never created here nor given preset bullets; each paragraph's words go in front of its
     placeholder character, deleted right after, so no paragraph is ever empty; and no style request
     covers a whole item (it would restyle the item's bullet)."""
@@ -710,9 +712,12 @@ def test_triangle_bullets_come_with_the_pptx(decks: tuple[Emitted, ...]) -> None
                 if len(shell.paragraphs) != len(paragraphs):
                     found.append(f"{where}: {len(shell.paragraphs)} shell paragraphs for {len(paragraphs)}")
                     continue
+                # (its other bullets, beside ►, are their presets' glyphs: emit_metrics.shell_char_of)
                 for p, sp in zip(paragraphs, shell.paragraphs):
-                    if (sp.char is None) != (not p["bullet"]) or (sp.char is not None and sp.char != "►"):
+                    if (sp.char is None) != (not p["bullet"]) or (sp.char is not None and sp.char not in SHELL_CHARS):
                         found.append(f"{where}: a paragraph's bullet {p['bullet']} carried as {sp.char!r}")
+                if not any(sp.char == "►" for sp in shell.paragraphs):
+                    found.append(f"{where}: a shell without a bullet no preset draws")
                 # the fill: last paragraph first, words in front of the character, then the character out
                 fills = [(jint(r, "insertText", "insertionIndex"), jstr(r, "insertText", "text"),
                           jint(reqs[k + 1], "deleteText", "textRange", "startIndex") if k + 1 < len(reqs)

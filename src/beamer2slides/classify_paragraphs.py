@@ -28,6 +28,9 @@ EM_SPACE = chr(0x2003)
 FURNITURE_BAND = 0.13  # of the page's height: the header or footer band furniture is drawn in
 QUAD_EM = 0.9  # a word gap this wide or wider is a \quad's, written as em spaces (`runs_reaching`)
 TRAILING_PUNCT = re.compile(r"(?<=\w)[,.;:!?)\]]+\s*$")
+# An item whose baseline is this many of its sizes or fewer from another item's is next to it in
+# one list (`single_line_align`): an item's pitch, itemsep and a level's change.
+LIST_NEIGHBOUR_EM = 2.5
 BOX_PAD = " "   # a padded \colorbox's \fboxsep, highlighted (a no-break space: the box never breaks)
 
 
@@ -429,6 +432,16 @@ class ParagraphsMixin(LinesMixin):
                 and abs(l.x1 - line.x1) > 1 and abs(l.rect.cx - self.W / 2) > 2]
         if near:
             return "left"
+        # An item next to another item that is not centred (its parent above it, a sibling at
+        # another level) is an item of that list, set from the left like it: its centre on the page
+        # is its length's. Centred, Slides moved its bullet with its words, which came out narrower:
+        # the bullet left its column and touched them (real_postgres-on-the-wi s27's one subitem,
+        # real_c-error-handling s27's last item, whose words start elsewhere than its siblings').
+        if line.bullet is not None and any(
+                p.first.bullet is not None and p.first is not line and not self.page_centred(p)
+                and any(0 < abs(l.baseline - line.baseline) <= LIST_NEIGHBOUR_EM * line.size for l in p.lines)
+                for p in neighbours):
+            return "left"
         # (ending where a right-aligned paragraph next to it ends: flushed right with it - a quote's
         # attribution under the quote, set right past the margin the page's other text keeps; left,
         # its words ran out past the text area in Slides, r1_lang_v2 s3)
@@ -442,6 +455,11 @@ class ParagraphsMixin(LinesMixin):
         if abs(line.x1 - (self.W - margin)) <= 2 and line.x0 > self.W / 2:
             return "right"
         return "left"
+
+    def page_centred(self, par: Paragraph) -> bool:
+        """Is `par` centred: a paragraph of several lines found so, a line alone centred on the page
+        (its bullet with it)."""
+        return par.align == "center" if len(par.lines) > 1 else abs(par.first.rect.cx - self.W / 2) <= 2
 
     @staticmethod
     def is_justified(par: Paragraph) -> bool:

@@ -5387,3 +5387,22 @@ class on a fresh conversion before working on it.
   battles' 0.660 -> 0.389: without its thick space Slides' line is 612 px against the PDF's 613
   (with it 2.8% wider), but the PDF sets wide spaces all along that line and 'pick' had landed on
   the PDF's 'pick' only with the gap. Table cells get no edge spaces (`span_runs`).
+- Bullets (track T, r2 ledger). (1) ▶ beside other bullets: `shell_route` took a box only when
+  every bullet was ▶, so a box mixing ▶ with balls, discs or stars (biore s84, rxjs s4-8, s31, 17
+  boxes in the two decks; 21_bullet_shapes p4) went through createParagraphBullets and its ▶ came
+  out ➢. Such a box is now a shell too, each other bullet written as its preset's own glyph
+  (`emit_metrics.PRESET_CHARS`, `shell_char_of`: ● ○ ■ ❏ ★ ◆ ◇) at the size and gap of that
+  preset; a numbered item keeps the box on the API path. `tools/probe_shell_bullets.py` (live,
+  `--dry-run` offline) measured it at 24 pt (2026-10-04): every preset glyph as a shell `buChar`
+  has the preset's ink height and baseline (within a pixel, 0.019 em) and ends one pixel nearer
+  its words; a mixed shell draws each line's own glyph. Candidates measured too: ✴ as a buChar is
+  0.60 em high with fill 0.26 (Zapf's ✴ 0.21; ★ is 0.35), the way for africa s39; ⬤ is 0.96 em,
+  far past beamer's ball; as words ▶ is 0.45 em in Lato and 0.79 in Noto Sans Symbols 2, ► 0.69
+  in Lato (MSAM10's ▶ 0.58). (2) A lone subitem whose line, bullet included, fell within 2 pt
+  of the page's middle was centred (postgres s27, c-error-handling s27: its bullet onto its words,
+  a box of its own). `single_line_align`: a bulleted line within `LIST_NEIGHBOUR_EM` (2.5) of its
+  size of a bulleted, not page-centred paragraph's line is left-aligned, and joins its list.
+  Corpus: those two and defense s46's numbered-ball item (rightly). Left: c-error s27's lone '▶'
+  paragraph in MSAM is Slides' 0.45 em fallback (writing ► changes the text: an
+  `OPERATOR_FACES`-like face for ▶ is the way, probe section C); ball bullets lose their shading
+  by design, and a level's smaller ball is held at the text-size cap like its parent's (defense).

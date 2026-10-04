@@ -38,14 +38,19 @@ def shell_of(el: JsonObject) -> PptxText:
     return shell
 
 
-def test_only_boxes_of_triangle_bullets_are_shells() -> None:
+def test_only_boxes_holding_triangle_bullets_are_shells() -> None:
     el = column_list_of()
     assert shell_route(text_of(el))
-    # a box mixing ▶ with a preset's bullet keeps the API's way (its presets are what was measured)
+    # a box mixing ▶ with a preset's bullet is a shell too (its ▶ came out ➢ otherwise)
     mixed = deepcopy(el)
     jobj(mixed, "paragraphs", 1, "bullet")["text"] = "●"
-    assert not shell_route(text_of(mixed))
-    # numbers, no bullets at all, and an empty paragraph (it would lose its bullet at the import)
+    assert shell_route(text_of(mixed))
+    # but not one of preset bullets alone: createParagraphBullets draws those
+    discs = deepcopy(mixed)
+    jobj(discs, "paragraphs", 0, "bullet")["text"] = "•"
+    assert not shell_route(text_of(discs))
+    # numbers (Slides numbers a list itself), no bullets at all, and an empty paragraph (it would
+    # lose its bullet at the import)
     numbered = deepcopy(el)
     jobj(numbered, "paragraphs", 1)["bullet"] = {"kind": "number", "text": "2.", "color": "#000000",
                                                   "bbox": [21.03, 113.7, 29.51, 124.61]}
@@ -57,6 +62,36 @@ def test_only_boxes_of_triangle_bullets_are_shells() -> None:
     empty = deepcopy(el)
     jobj(empty, "paragraphs", 1)["runs"] = []
     assert not shell_route(text_of(empty))
+
+
+def balls_over_triangles() -> JsonObject:
+    """real_presentazione-rxjs s4: ball items (beamer's ball template, an image) over ▶ subitems in
+    one box: the subitems came out ➢, createParagraphBullets' only arrow."""
+    el = nested_list()
+    jobj(el, "paragraphs", 0)["bullet"] = {"kind": "image", "text": "", "color": "#39398a",
+                                           "bbox": [21.03, 70.06, 27.03, 76.06], "ink": [21.22, 71.0, 26.03, 75.81]}
+    return el
+
+
+def test_a_box_mixing_triangles_with_balls_brings_each_as_its_character() -> None:
+    from beamer2slides.emit_metrics import PRESET_CHARS
+    el = balls_over_triangles()
+    shell = shell_of(el)
+    assert [(p.level, p.char) for p in shell.paragraphs] == [(0, PRESET_CHARS["disc"]), (1, TRIANGLE)]
+    # the ball at the size createParagraphBullets' disc is given (its preset's measures hold for its glyph)
+    created = text_requests(el, SCALE)
+    ball_size = next(pt_of(jobj(r, "updateTextStyle", "style", "fontSize")) for r in created if "updateTextStyle" in r)
+    assert shell.paragraphs[0].size == ball_size
+    # its words and indents as the created box has them, and no createParagraphBullets
+    base_w, base_h = shell.box[2] - shell.box[0], shell.box[3] - shell.box[1]
+    reqs = [slides_json(r) for r in text_shell_requests_of(text_of(el), "b2s_s003", "b2s_s003_t1", SCALE, FONTS,
+                                                         Shell(base_w=base_w, base_h=base_h), None, None, None, None)]
+    assert not any("createParagraphBullets" in r for r in reqs)
+
+    def indents(rs: list[JsonObject]) -> list[tuple[float, float]]:
+        return [(pt_of(jobj(r, "updateParagraphStyle", "style", "indentStart")),
+                 pt_of(jobj(r, "updateParagraphStyle", "style", "indentFirstLine"))) for r in rs if "updateParagraphStyle" in r]
+    assert indents(reqs) == indents(created)  # (the ball keeps its preset's gap)
 
 
 def test_the_pptx_carries_a_shell_with_its_bullets_as_characters() -> None:

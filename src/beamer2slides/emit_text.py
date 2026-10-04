@@ -17,7 +17,7 @@ from typing import Literal
 from .emit_metrics import (
     ASCENT_EM, BASELINE_A, DESCENT_EM, LINE_EM, MIDDLE_BASELINE_EM, PAD_X, PX_PT, SOFT_BREAK, FontMapper,
     bullet_char_of, bullet_extent_of, bullet_level_of, bullet_preset_of, bullet_size_of, letter_face_style,
-    letter_faces, u16,
+    letter_faces, shell_char_of, u16,
 )
 from .emit_model import (
     ElementDict, JsonMap, Placeholder, PptxText, SetParagraph, SetRun, SetText, Shell, ShellParagraph, block_of, box_of,
@@ -1019,20 +1019,22 @@ def _prepared(text: SetText, scale: float, fonts: FontMapper
 
 def shell_route(text: SetText) -> bool:
     """Whether a text comes in the .pptx as a text shell (`text_shell_of`) instead of being created
-    through the API: when it has bullets and every one is a bullet no preset draws (CHAR_BULLETS:
-    beamer's ▶, which createParagraphBullets could only write as ➢), its bullets are the .pptx's
-    `a:buChar`. A box mixing such bullets with others keeps today's path: a preset's glyphs are
-    what the bullet metrics measured, a number needs Slides' autonumbering (never probed through a
-    .pptx), and one box holds one kind of bullet in beamer anyway. Upright, left-to-right prose
-    only, and no empty paragraph (an empty bulleted paragraph loses its bullet at the import)."""
+    through the API: when one of its bullets is a bullet no preset draws (CHAR_BULLETS: beamer's
+    ▶, which createParagraphBullets could only write as ➢), its bullets are the .pptx's
+    `a:buChar`, the others as their preset's glyph (`shell_char_of`, PRESET_CHARS). A box of ▶
+    items over disc subitems, or of ball items over ▶ subitems, is a shell too (its ▶ were ➢
+    there: real_presentation-biore 84, real_presentazione-rxjs 4-8, 31); one holding a number
+    keeps today's path, which numbers it (Slides' autonumbering, never probed through a .pptx).
+    Upright, left-to-right prose only, and no empty paragraph (an empty bulleted paragraph loses
+    its bullet at the import)."""
     bullets = [p.bullet for p in text.paragraphs if p.bullet is not None]
-    return bool(bullets) and not text.rotation and not text.code and \
-        all(bullet_char_of(b) is not None for b in bullets) and \
+    return any(bullet_char_of(b) is not None for b in bullets) and not text.rotation and not text.code and \
+        all(shell_char_of(b) is not None for b in bullets) and \
         all(p.direction is None and "".join(r.text for r in p.runs) for p in text.paragraphs)
 
 
 def text_shell_of(text: SetText, box: Box, scale: float, fonts: FontMapper) -> PptxText | None:
-    """The text shell the .pptx carries for a text whose bullets no preset draws (`shell_route`;
+    """The text shell the .pptx carries for a text holding bullets no preset draws (`shell_route`;
     None for any other), at `box` (Slides pt; the API pass places and sizes it as a box it creates):
     one paragraph per paragraph, each a placeholder character in its bullet's size, colour and
     family, its bullet the character at 100% of it, its level relative to the shallowest bullet's.
@@ -1049,7 +1051,7 @@ def text_shell_of(text: SetText, box: Box, scale: float, fonts: FontMapper) -> P
             out.append(ShellParagraph(level=0, char=None, color=None, size=round(base, 1), font=font,
                                       text_size=round(base, 1)))
             continue
-        out.append(ShellParagraph(level=min(8, max(0, p.level - least)), char=bullet_char_of(p.bullet),
+        out.append(ShellParagraph(level=min(8, max(0, p.level - least)), char=shell_char_of(p.bullet),
                                   color=p.bullet.color or (p.runs[0].color if p.runs else None),
                                   size=bullet_size_of(p.bullet, cap, scale, True), font=font,
                                   text_size=round(base, 1)))

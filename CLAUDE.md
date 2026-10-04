@@ -101,8 +101,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   size, `emit.BULLET_SHAPES`, `emit.bullet_level`; glyph bullets sized and shaped by their PDF ink,
   `render.glyph_ink` -> bullet `ink`/`fill`, `emit.ink_sized`, an unnumbered ball image by its ink
   too; capped at the largest size of 30% of the item's letters, `emit_text.bullet_cap`; a
-  dingbat label always by its ink, `SetBullet.label_icon`; a
-  ball keeps its label's parentheses unless they reach its rim, `BALL_RIM`; numbers after nested
+  dingbat label always by its ink, `SetBullet.label_icon`; a box holding beamer's ▶ is a .pptx
+  text shell (`emit_text.shell_route`), its other bullets their presets' own glyphs, which draw
+  alike (`emit_metrics.PRESET_CHARS`, `tools/probe_shell_bullets.py`); a ball keeps its label's parentheses unless they reach its rim, `BALL_RIM`; numbers after nested
   glyph items are literal, emit making one list per preset; a mark outlined in another colour is
   a picture),
   inline math as runs with scripts (down from 0.10 em, up from 0.12 em, beside \tiny words 0.85-0.95
@@ -124,7 +125,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   on another line; `column_edge`); rows of words of different sizes printed over each other are
   separate lines (`overprinted_rows`), and smaller words at the page foot well under or printed
   over a box join no box (`joins_box`, `printed_over`); a lone line starting where its neighbours
-  (a bulleted one's: its siblings anywhere) start is left-aligned (`single_line_align`), a lone line flush with a right-aligned paragraph beside it right-aligned;
+  (a bulleted one's: its siblings anywhere; a bulleted line by a list's lines, never page-centred,
+  `LIST_NEIGHBOUR_EM`) start is left-aligned (`single_line_align`), a lone line flush with a right-aligned paragraph beside it right-aligned;
   lines broken by hand never join (`hand_broken`; beside other content a column is measured by
   its mates, `column_mates`; two lines ending together are a measure only with several words and
   no longer known line; a lettered 'label' set off by a word space is a word, `label_is_word`;

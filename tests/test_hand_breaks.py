@@ -1,6 +1,7 @@
 """Where a paragraph's lines break on synthetic pages: lines a person broke by hand stay apart (a
 column measured by its neighbours beside a picture, Japanese lines, two short lines or two lines of
 one word ending together),
+a list's lone subitem centred on the page by chance stays a left-aligned item of its list,
 a wrapped line opening on a word that looks like a label stays in its paragraph, an aligned
 formula's description column is a gutter whatever paragraph lies under it, and a centred column of
 contact lines stays centred with its breaks."""
@@ -104,6 +105,30 @@ def test_lines_of_one_word_ending_together_are_no_measure():
              words("Code design choices with return codes", 57, 142, 246)]
     out = texts(spans)
     assert "5." in out and "6." in out, out
+
+
+# -- a lone item of a list -------------------------------------------------------------------------
+
+def test_a_lone_subitem_centred_by_chance_stays_in_its_list():
+    """A subitem's one line, ▶ and words, whose middle falls within 2 pt of the page's (by chance:
+    it runs to near the right margin): its list's items left-aligned around it say it is one of
+    them, not a centred line (real_postgres-on-the-wire s27, real_c-error-handling s27: written
+    CENTER in a box of its own, its bullet drifting off the list's and onto its words)."""
+    def item(x: float, baseline: float, said: str, w: float) -> list[Span]:
+        return [span("▶", x, baseline, 8.5, "MSAM10"), words(said, x + 13.9, baseline, w)]
+    spans = (item(18.8, 66.7, "the ReadyForQuery message includes transaction status", 253.3)
+             + item(18.8, 83.2, "this is useful for things like prompts or, more importantly,", 287.2)
+             + [words("pgbouncer", 32.7, 96.7, 47.2)]
+             + item(18.8, 111.7, "the transaction status only got included in protocol 3.0", 251.2)
+             + item(41.3, 125.6, "for 2.0 libpq does string comparison to try and track the status", 263.7))
+    lone = spans[-1].text
+    assert abs((41.3 + spans[-1].rect.x1) / 2 - W / 2) <= 2  # (centred on the page by its rect)
+    slide = classify_page(page(spans), SIZE)
+    boxes = [el for el in slide["elements"] if el["kind"] == "text" and any(lone in text(p) for p in el["paragraphs"])]
+    assert len(boxes) == 1
+    pars = boxes[0]["paragraphs"]
+    assert len(pars) == 4, [text(p) for p in pars]
+    assert pars[-1].get("align") != "center"
 
 
 # -- a word that looks like a label ----------------------------------------------------------------
