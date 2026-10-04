@@ -24,8 +24,8 @@ from .emit_model import (
     json_number, number_box, number_box_of, run_of, set_text, text_of,
 )
 from .emit_widths import (
-    SCRIPT_SIZE, SMALL_CAPS_SIZE, guessed_chars, held_starts, paragraph_dict, runs_between, set_runs_of,
-    slides_lines_of, slides_width_of,
+    SCRIPT_SIZE, SMALL_CAPS_SIZE, guessed_chars, held_starts, joined_runs, paragraph_dict, runs_between,
+    set_runs_of, slides_lines_of, slides_width_of,
 )
 from .fonts import cjk_font, font_info, google_font
 from .google_types import (
@@ -320,10 +320,11 @@ def hole_runs_of(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> lis
 
 
 def held_paragraph(p: SetParagraph, scale: float, fonts: FontMapper) -> SetParagraph:
-    """A paragraph as its text box holds it: runs in sentences, each hole its no-break spaces,
-    and the line starts classify recorded moved to that text (`held_starts`)."""
+    """A paragraph as its text box holds it: runs in sentences, each hole its no-break spaces, a
+    word joiner where Slides would break inside a word (`joined_runs`), and the line starts
+    classify recorded moved to that text (`held_starts`)."""
     ir = in_sentence_of(p.runs)
-    held = hole_runs_of(ir, scale, fonts)
+    held = joined_runs(hole_runs_of(ir, scale, fonts))
     return replace(p, runs=tuple(held), line_starts=held_starts(ir, held, p.line_starts))
 
 

@@ -22,6 +22,7 @@ from .fonts import LETTER_FACE_ADVANCE_EM, font_info, letter_face, script_capita
 
 
 ZWSP = "​"
+WORD_JOINER = "⁠"       # no break here, no width (tools/probe_script_break.py); emit writes it: joined_runs
 SCRIPT_SIZE = 2 / 3          # super- and subscripts in Slides (measured 0.665: tools/probe_text_fit_fonts.py)
 WRAP_MARGIN = 1.0            # Slides pt kept free in a cell so kerning or rounding cannot wrap it
 SMALL_CAPS_SIZE = 0.70       # Slides draws a small capital at 70% of its capital (tools/probe_text_fit_fonts.py)
@@ -89,8 +90,8 @@ def wide_advance(ch: str, unmeasured: float) -> float:
     full-width form is a whole em in every fallback font (unicodedata's East Asian Width W / F).
     At 0.6 em a Japanese header came out 40% narrower than Slides sets it and wrapped its cell.
     A bidi mark (`bidi.MARKS`: the LRM or RLM `bidi.logical_line` writes) draws nothing, nor
-    does the zero-width space before a hole (HOLE_BREAK)."""
-    if ch in bidi.MARKS or ch == ZWSP:
+    does the zero-width space before a hole (HOLE_BREAK), nor a word joiner (`joined_runs`)."""
+    if ch in bidi.MARKS or ch == ZWSP or ch == WORD_JOINER:
         return 0.0
     return 1.0 if unicodedata.east_asian_width(ch) in "WF" else unmeasured
 
@@ -338,7 +339,7 @@ def guessed_chars(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> in
         table = face_advances(family, fonts.face_of(run))
         count += sum(1 for ch in run.text if (ch.upper() if run.smallcaps else ch) not in table
                      and ch not in " " and not unicodedata.combining(ch) and ch not in bidi.MARKS
-                     and ch != ZWSP and unicodedata.east_asian_width(ch) not in "WF")
+                     and ch != ZWSP and ch != WORD_JOINER and unicodedata.east_asian_width(ch) not in "WF")
     return count
 
 
@@ -353,6 +354,29 @@ def breaks_before(text: str, i: int) -> bool:
     subscript [γ] on the next)."""
     return 0 < i < len(text) and text[i] in OPENING_BRACKETS and text[i - 1].isalpha() and \
         unicodedata.east_asian_width(text[i - 1]) == "A"
+
+
+def joined_runs(runs: Sequence[SetRun]) -> tuple[SetRun, ...]:
+    """The runs with a WORD_JOINER wherever Slides would break inside a word (`breaks_before`),
+    at the end of the run before it: TeX set π[γ]([x]) whole, and a box wide enough for its
+    line pulled the π up onto the line above (real_beamer-monodromy s17 item 5). The joiner
+    takes no room and keeps the two together (tools/probe_script_break.py); a hole's no-break
+    spaces are never split."""
+    text = "".join(r.text for r in runs)
+    cuts = {i for i in range(1, len(text)) if breaks_before(text, i)}
+    if not cuts:
+        return tuple(runs)
+    out: list[SetRun] = []
+    at = 0
+    for r in runs:
+        if r.hole:
+            out.append(r)
+        else:
+            pieces = [WORD_JOINER + ch if at + k in cuts and k > 0 else ch for k, ch in enumerate(r.text)]
+            end = WORD_JOINER if at + len(r.text) in cuts else ""
+            out.append(replace(r, text="".join(pieces) + end))
+        at += len(r.text)
+    return tuple(out)
 
 
 def first_break(text: str, a: int, end: int) -> int:
@@ -390,9 +414,24 @@ def held_index(ir: Sequence[SetRun], held: Sequence[SetRun], at: int) -> int:
     a = b = 0
     for r, s in zip(ir, held):
         if at <= a + len(r.text):
-            return b + min(at - a, len(s.text))
+            return b + _held_offset(s, at - a)
         a, b = a + len(r.text), b + len(s.text)
     return b
+
+
+def _held_offset(s: SetRun, k: int) -> int:
+    """Where the run's character `k` lies in the run as the box holds it (`s`): a hole's no-break
+    spaces end where they end, a word joiner (`joined_runs`) is not counted and the character
+    after it (or the run's end past one ending it) is where `k` lies."""
+    if s.hole or WORD_JOINER not in s.text:
+        return min(k, len(s.text))
+    i = n = 0
+    while i < len(s.text) and n < k:
+        n += s.text[i] != WORD_JOINER
+        i += 1
+    while i < len(s.text) and s.text[i] == WORD_JOINER:
+        i += 1
+    return i
 
 
 def held_starts(ir: Sequence[SetRun], held: Sequence[SetRun], starts: tuple[int, ...] | None) -> tuple[int, ...] | None:

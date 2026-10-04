@@ -21,6 +21,7 @@ from difflib import SequenceMatcher
 from typing import Literal, TypedDict, TypeVar
 
 from . import identity, snapshot
+from .emit_widths import WORD_JOINER
 from .google_types import SlidesRange, SlidesRequest, SlidesTableCellLocation
 from .ir_types import Box
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str, as_str
@@ -850,7 +851,9 @@ def predicted_text(el: JsonMap) -> str:
 def collapse_holes(text: str) -> str:
     """Hole runs (no-break spaces sized to a formula) as one no-break space: their count follows the formula width.
     The zero-width space emit writes in front of a hole (emit.HOLE_BREAK) is no character of the
-    text either: a deck converted before it and one after say the same."""
+    text either: a deck converted before it and one after say the same; nor is a word joiner
+    (emit_widths.joined_runs: π, U+2060, [γ])."""
+    text = text.replace(WORD_JOINER, "")
     return re.sub(" +", " ", text.replace("​", ""))
 
 

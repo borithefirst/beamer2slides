@@ -19,7 +19,7 @@ from beamer2slides.emit_pptx import shape_element_requests, shape_requests, temp
 from beamer2slides.emit_text import (
     hole_runs, hole_runs_of, in_sentence, in_sentence_of, text_box_requests, text_element_requests,
 )
-from beamer2slides.emit_widths import pdf_line_breaks, set_runs_of
+from beamer2slides.emit_widths import joined_runs, pdf_line_breaks, set_runs_of
 from beamer2slides.ir_types import ImageElement, IRError, MarkedShape, ShapeElement, TextElement
 from beamer2slides.json_types import Json, JsonObject
 
@@ -59,8 +59,8 @@ def agree(slides: list[JsonObject], scale: float, fonts: emit.FontMapper) -> int
                 assert set_text(typed) == text_of(el), el["id"]
                 assert text_element_requests(typed, "s", "o", scale, fonts, None, None, None, None, None) == \
                     text_box_requests(el, "s", "o", scale, fonts), el["id"]
-                assert slides_texts(el, scale, fonts) == ["".join(r.text for r in hole_runs_of(set_runs(p.runs), scale, fonts))
-                                                          for p in typed.paragraphs]
+                assert slides_texts(el, scale, fonts) == [
+                    "".join(r.text for r in joined_runs(hole_runs_of(set_runs(p.runs), scale, fonts))) for p in typed.paragraphs]
                 for p, d in zip(typed.paragraphs, jobjs(el, "paragraphs")):
                     runs = set_runs(p.runs)
                     assert runs == set_runs_of(jobjs(d, "runs"))

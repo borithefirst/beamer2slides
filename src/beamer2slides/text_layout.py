@@ -28,7 +28,7 @@ from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 
 from . import bidi, emit
-from .emit_widths import breaks_before
+from .emit_widths import WORD_JOINER, breaks_before
 from .fonts import LETTER_FACE_ADVANCE_EM, script_capital
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object
 
@@ -178,8 +178,8 @@ def advance(ch: str, st: JsonMap, size: float) -> float:
         size *= emit.SCRIPT_SIZE
     if ch == "\t":
         return TAB_EM * size
-    if ch in bidi.MARKS or ch == ZWSP:
-        return 0.0  # (an LRM or RLM draws nothing, nor does a zero-width space)
+    if ch in bidi.MARKS or ch == ZWSP or ch == WORD_JOINER:
+        return 0.0  # (an LRM or RLM draws nothing, nor does a zero-width space or word joiner)
     if family == emit.FONT_FOR_FAMILY["mono"]:
         return emit.ROBOTO_MONO_ADVANCE_EM * size
     if family in LETTER_FACE_ADVANCE_EM and script_capital(ch):  # (emit_metrics.letter_faces)

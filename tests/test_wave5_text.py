@@ -70,6 +70,33 @@ def test_slides_breaks_before_a_bracket_after_a_greek_letter():
     assert [text[a:b] for a, b, _ in lines][:2] == ["and π", "[γ]([x])"], lines
 
 
+def test_a_word_joiner_keeps_a_greek_letter_with_its_bracket():
+    """tools/probe_script_break.py, live: a WORD JOINER after π keeps 'π[γ]([x])' whole at every
+    width and takes no room (U+FEFF does not). real_beamer-monodromy s17 item 5: the PDF's second
+    line 'π[γ]([x]) = ...' is wider than the first plus 'π', so no box width kept π down."""
+    from beamer2slides.emit_model import run_of
+    from beamer2slides.emit_widths import WORD_JOINER, held_index, joined_runs, slides_width_of
+    from beamer2slides.merge import collapse_holes
+    from beamer2slides.text_layout import wrap
+    ir = tuple(run_of(r) for r in (text_run("and π", 11.0), text_run("[γ]", 8.0, script="sub"),
+                                   text_run("([x]) and λ(t)", 11.0)))
+    held = joined_runs(ir)
+    assert [r.text for r in held] == ["and π" + WORD_JOINER, "[γ]", "([x]) and λ" + WORD_JOINER + "(t)"]
+    assert joined_runs(held) == held  # (a joiner already there is no break left)
+    scale = SLIDE_W / 362.83
+    assert slides_width_of(held, scale, FONTS) == slides_width_of(ir, scale, FONTS)
+    # classify's offsets into the IR text land on the same characters of the held text
+    ir_text, held_text = "".join(r.text for r in ir), "".join(r.text for r in held)
+    for at in range(len(ir_text)):
+        assert held_text[held_index(ir, held, at)] == ir_text[at], at
+    assert emit.first_break(held_text, 4, len(held_text)) == held_text.index(" ", 4)
+    style: JsonObject = {"fontFamily": "Lato", "fontSize": 20.0}
+    lines = wrap(held_text, [style] * len(held_text), 60.0)
+    assert held_text[lines[0][0]:lines[0][1]].strip() == "and", lines
+    # what reads the deck back reads no joiner
+    assert collapse_holes(held_text) == ir_text
+
+
 # -- a short inline formula is not broken by Slides ---------------------------------------------
 
 MI, SY, RM = "LMMathItalic10-Regular", "LMMathSymbols10-Regular", "LMRoman10-Regular"

@@ -4972,6 +4972,15 @@ to (real_linear-attention-a s35/s38: a `k_t^⊤` 23 pt right of its gap, one aft
   wraps as "π" / "[γ]", never after a Latin letter or a digit, scripts or not
   (`tools/probe_script_break.py`). `emit_widths.breaks_before`, in `first_break` and
   `text_layout.wrap` (monodromy s17 item 5).
+- Modelling that break only moved the item's line count to Slides'; TeX's line was "… because" /
+  "π[γ]([x]) = …" and Slides still split π from its bracket. A U+2060 WORD JOINER before the
+  bracket keeps them together and takes no width; U+FEFF does not (probe variants
+  `wj-sub-bracket`, `wj-paren`, `bom-sub-bracket`). emit writes it wherever `breaks_before` cuts
+  inside a run (`emit_widths.joined_runs`, in `held_paragraph` and `slides_texts`); `held_index`
+  skips it so measured places stay on their characters. The base is read live, so it carries the
+  joiner like the person's read-back; the source's predicted text meets them through
+  `merge.collapse_holes`, which drops it, and deck_ir and inverse read it as nothing.
+  `text_edit_requests` keeps the raw live text, joiner included, so its indices stay Google's.
 - A literal list number (`classify.literal_list_numbers`, "5)<TAB>") was put before the text
   without moving the recorded `line_starts`: three short, so the item went unmeasured. They move
   with it now.

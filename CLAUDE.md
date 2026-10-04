@@ -132,7 +132,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   0x7F tries TS1/T2A before T1; U+2010/U+2011 are read as `-` (`extract.HYPHENS`, faces lack them);
   Slides breaks after a hyphen, so line sizing takes the next word only to it (`hyphen_cut`,
   `emit.first_break`), and before an opening bracket after a Greek letter, π / [γ]
-  (`emit_widths.breaks_before`, `tools/probe_script_break.py`); a short inline formula (≤ `FORMULA_GLUE_SHARE` of its line) keeps no-break
+  (`emit_widths.breaks_before`, `tools/probe_script_break.py`), so emit writes a U+2060 word
+  joiner there to keep TeX's word whole (`emit_widths.joined_runs`; readers drop it:
+  `merge.collapse_holes`, deck_ir, inverse); a short inline formula (≤ `FORMULA_GLUE_SHARE` of its line) keeps no-break
   spaces (`formula_groups`); math letters are styled per piece (`classify.math_pieces`: italic
   per glyph, NFKC, script capitals as Unicode, written in STIX Two Math / Libertinus Math by
   `fonts.letter_face` and read back as their run, `deck_ir.capitals_as_their_runs`; a relation's

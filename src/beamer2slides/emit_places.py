@@ -27,7 +27,7 @@ from .emit_metrics import LINE_EM, PAD_X, SYMBOL_ADVANCE_EM, FontMapper, u16
 from .emit_model import Anchored, JsonMap, Place, SetText, block_of, box_of, json_number, objects_of, point_of, text_of
 from .emit_pptx import api_error, batch, template_key
 from .emit_text import box_lines_of, held_paragraph, hole_runs_of, hugs_of, text_box_requests_of
-from .emit_widths import paragraph_dict, set_runs_of
+from .emit_widths import joined_runs, paragraph_dict, set_runs_of
 from .gapi import HttpError
 from .google_auth import credentials_for_threads, fetcher_for_threads, shared_service, slides_service
 from .google_types import SlidesRequest, SlidesService
@@ -115,13 +115,14 @@ def ink_end(img: RGB, px_per_pt: float, y0: float, y1: float, x0: float, x1: flo
 
 
 def slides_texts_of(text: SetText, scale: float, fonts: FontMapper) -> list[str]:
-    """Each paragraph's text as its text box ends up holding it (holes as their no-break spaces)."""
-    return ["".join(r.text for r in hole_runs_of(p.runs, scale, fonts)) for p in text.paragraphs]
+    """Each paragraph's text as its text box ends up holding it (holes as their no-break spaces,
+    word joiners: `emit_text.held_paragraph`)."""
+    return ["".join(r.text for r in joined_runs(hole_runs_of(p.runs, scale, fonts))) for p in text.paragraphs]
 
 
 def slides_texts(el: JsonMap, scale: float, fonts: FontMapper) -> list[str]:
     """`slides_texts_of` a text dict: only its paragraphs' runs are read."""
-    return ["".join(r.text for r in hole_runs_of(set_runs_of(objects_of(p["runs"], "runs")), scale, fonts))
+    return ["".join(r.text for r in joined_runs(hole_runs_of(set_runs_of(objects_of(p["runs"], "runs")), scale, fonts)))
             for p in objects_of(el["paragraphs"], "paragraphs")]
 
 
