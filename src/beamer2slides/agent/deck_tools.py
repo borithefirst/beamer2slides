@@ -108,17 +108,14 @@ def _classify_into(j: Job, source: Path, out: Path, overlays: str,
     `fidelity` can go on using.
     """
     from ..classify import classify
-    from ..extract import extract, select_overlays
+    from ..extract import select_overlays
     from ..ir import deck_json
-    from ..notes import prepare as prepare_notes
+    from ..notes import read_with_notes
 
-    prepared = prepare_notes(source, out)
+    prepared, raw = read_with_notes(source, out)
     pdf = prepared.pdf
     if pdf != out / "slides.pdf" and (out / "slides.pdf").exists():
         (out / "slides.pdf").unlink()  # stale from an earlier run of a PDF that had notes
-    raw = extract(pdf, prepared.labels)
-    for page in raw["pages"]:
-        page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, overlays)
     (out / "raw.json").write_text(json.dumps(raw, indent=1, ensure_ascii=False), encoding="utf-8")
     classified = classify(raw)

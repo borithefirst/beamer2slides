@@ -30,10 +30,10 @@ from ..classify import PageClassifier
 from ..classify_model import Rect
 from ..classify_state import REFUSALS, DiagramRefusal, Refusal
 from ..classify_text import body_size
-from ..extract import extract, select_overlays
+from ..extract import select_overlays
 from ..ir import Slide
 from ..json_types import Json, JsonObject, as_int, as_object, as_objects, as_str
-from ..notes import prepare
+from ..notes import read_with_notes
 from ..typing_compat import assert_never
 
 Outcome = Literal["native", "mixed", "picture", "background", "none"]
@@ -92,8 +92,7 @@ def frame_score(page: int, slide: Slide, refusals: list[DiagramRefusal]) -> Fram
 def score(pdf: Path) -> list[FrameScore]:
     """Every frame of `pdf` (its last overlay step), classified as `convert` would."""
     with tempfile.TemporaryDirectory() as tmp:
-        prepared = prepare(pdf, Path(tmp))
-        raw = select_overlays(extract(prepared.pdf, prepared.labels), "last")
+        raw = select_overlays(read_with_notes(pdf, Path(tmp))[1], "last")
     body = body_size(raw)
     out: list[FrameScore] = []
     for page in raw["pages"]:
