@@ -8,11 +8,11 @@ from beamer2slides import ir
 from beamer2slides.classify import PageClassifier
 from beamer2slides.classify_model import Rect, Span, new_line, new_span
 from beamer2slides.classify_text import line_starts
-from beamer2slides.fonts import font_info
+from beamer2slides.fonts import OPERATOR_FACES, font_info
 from beamer2slides.emit_holes import fit_holes, formula_shifts, hole_slide_dicts, slide_holes_of, slides_hole_x
-from beamer2slides.emit_metrics import FontMapper
+from beamer2slides.emit_metrics import SYMBOL_ADVANCE_EM, FontMapper
 from beamer2slides.emit_text import held_paragraph
-from beamer2slides.emit_widths import paragraph_dict, slides_lines_of
+from beamer2slides.emit_widths import paragraph_dict, set_runs_of, slides_lines_of
 from beamer2slides.json_types import Json, JsonObject
 from beamer2slides.pdf import Char
 from beamer2slides.raw_types import RawDrawing, RawSpan
@@ -155,10 +155,14 @@ def test_a_hole_after_scripts_is_where_slides_sets_their_advances() -> None:
 def test_a_hole_after_a_hanging_label_is_measured_from_the_tab_stop() -> None:
     # Live (s38, ℒ in STIX Two Math: fonts.letter_face): the k before the gap ends its ink at
     # 598.0 pt and the moved picture's ink starts at 601.2 pt; the PDF's picture is at 689.8 pt.
-    # (With ℒ from Lato's fallback the gap started at 595.4 pt.)
+    # (With ℒ from Lato's fallback the gap started at 595.4 pt.) That ∇ was still the fallback's,
+    # 0.981 em; written in STIX Two Math (fonts.OPERATOR_FACES) it is 0.743, and the gap starts
+    # that much sooner (live, 2026-10-04: the gap before the picture 1.81 pt against the PDF's 1.29).
+    (nabla,) = set_runs_of([run(("∇ℒ", "CMSY10", "sans", False, False, None), 10.91)])
+    sooner = (SYMBOL_ADVANCE_EM["∇"] - OPERATOR_FACES["∇"].advance) * FONTS.size_of(nabla, SCALE)[1]
     x, shift = predicted(sgd())
-    assert abs(x - 598.6) < 3, f"gap predicted at {x:.1f} pt"
-    assert abs(shift + 91.2) < 3, f"picture moved {shift:.1f} pt"
+    assert abs(x - (598.6 - sooner)) < 3, f"gap predicted at {x:.1f} pt"
+    assert abs(shift + 91.2 + sooner) < 3, f"picture moved {shift:.1f} pt"
 
 
 # real_beamer-monodromy s17: "4)<TAB>These two maps are mutually inverse, so <framed formula>."

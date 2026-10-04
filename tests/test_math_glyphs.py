@@ -156,9 +156,9 @@ def styled(reqs: list[JsonObject], field: str) -> list[JsonObject]:
 
 
 def test_emit_writes_a_runs_script_capitals_in_their_face():
-    """⊆ ℒ𝒪 (CMSY10): the run in its family's face, then ℒ𝒪 (three UTF-16 units: 𝒪 is astral)
-    alone in STIX Two Math at the run's weight."""
-    words, rel = run_json("Let x", "CMSS10", "sans"), run_json("\xa0⊆\xa0ℒ𝒪 here", "CMSY10", "sans")
+    """→ ℒ𝒪 (CMSY10): the run in its family's face, then ℒ𝒪 (three UTF-16 units: 𝒪 is astral)
+    alone in STIX Two Math at the run's weight (→ stays in the run's: fonts.OPERATOR_FACES)."""
+    words, rel = run_json("Let x", "CMSS10", "sans"), run_json("\xa0→\xa0ℒ𝒪 here", "CMSY10", "sans")
     par: JsonObject = {"align": "left", "level": 0, "size": 10.91, "text_x0": 30.0, "tab_x0": None, "wrap_limit": None,
                        "bullet": None, "lines": [{"baseline": 100.0, "x0": 30.0, "x1": 120.0}],
                        "runs": [words, rel]}
@@ -173,7 +173,7 @@ def test_emit_writes_a_runs_script_capitals_in_their_face():
 
 
 def test_a_run_with_no_script_capital_gets_no_face_of_its_own():
-    rel = run_json("x\xa0⊆\xa0y", "CMSY10", "sans")
+    rel = run_json("x\xa0→\xa0y", "CMSY10", "sans")  # (→: no operator face either, fonts.OPERATOR_FACES)
     par: JsonObject = {"align": "left", "level": 0, "size": 10.91, "text_x0": 30.0, "tab_x0": None, "wrap_limit": None,
                        "bullet": None, "lines": [{"baseline": 100.0, "x0": 30.0, "x1": 80.0}], "runs": [rel]}
     el: JsonObject = {"id": "t", "kind": "text", "role": "body", "paragraphs": [par], "bbox": [30.0, 90.0, 80.0, 104.0]}

@@ -10,8 +10,7 @@ from importlib import resources
 from typing import Literal, TypedDict
 
 from .emit_model import BulletFace, JsonMap, SetBullet, SetRun, bullet_of, run_of
-from .fonts import (METRICS_FAMILIES, MetricsFamily, font_info, google_font, letter_face, metrics_family,
-                    script_capital)
+from .fonts import METRICS_FAMILIES, MetricsFamily, font_info, google_font, metrics_family, written_face
 from .google_types import SlidesTextStyle
 from .gslides import pt_json as pt
 from .json_types import Json, JsonObject, JsonShapeError, as_object
@@ -160,18 +159,17 @@ def u16(text: str) -> int:
 
 
 def letter_faces(text: str, font: str, start: int) -> list[tuple[int, int, str]]:
-    """(start, end, face) of each stretch of script capitals in a run's `text` (fonts.script_capital),
-    in UTF-16 units from `start` (where the run's text starts), and the face they are written in
-    (fonts.letter_face of the run's PDF `font`)."""
-    face = letter_face(font) if any(script_capital(c) for c in text) else None
-    if face is None:
-        return []
+    """(start, end, face) of each stretch of a run's `text` written in a face of its own (script
+    capitals, fonts.letter_face of the run's PDF `font`; a math font's operators Slides would draw
+    from its fallback, fonts.OPERATOR_FACES: fonts.written_face), in UTF-16 units from `start`
+    (where the run's text starts)."""
     out: list[tuple[int, int, str]] = []
     at = start
     for c in text:
         n = u16(c)
-        if script_capital(c):
-            if out and out[-1][1] == at:
+        face = written_face(c, font)
+        if face is not None:
+            if out and out[-1][1] == at and out[-1][2] == face:
                 out[-1] = (out[-1][0], at + n, face)
             else:
                 out.append((at, at + n, face))
@@ -180,7 +178,7 @@ def letter_faces(text: str, font: str, start: int) -> list[tuple[int, int, str]]
 
 
 def letter_face_style(face: str, bold: bool) -> SlidesTextStyle:
-    """The style written over a run's script capitals, `fields` "weightedFontFamily" (its weight
+    """The style written over a run's `letter_faces`, `fields` "weightedFontFamily" (its weight
     the run's: a fontFamily alone would set it regular)."""
     return {"weightedFontFamily": {"fontFamily": face, "weight": 700 if bold else 400}}
 

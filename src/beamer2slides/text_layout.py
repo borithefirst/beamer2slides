@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 from . import bidi, emit
 from .emit_widths import HOLE_BREAKS, WORD_JOINER, breaks_before
-from .fonts import LETTER_FACE_ADVANCE_EM, script_capital
+from .fonts import face_advance
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object
 
 INSET_X = emit.PAD_X            # box edge -> text, left and right
@@ -181,8 +181,9 @@ def advance(ch: str, st: JsonMap, size: float) -> float:
         return 0.0  # (an LRM or RLM draws nothing, nor does a hole's break or a word joiner)
     if family == emit.FONT_FOR_FAMILY["mono"]:
         return emit.ROBOTO_MONO_ADVANCE_EM * size
-    if family in LETTER_FACE_ADVANCE_EM and script_capital(ch):  # (emit_metrics.letter_faces)
-        return LETTER_FACE_ADVANCE_EM[family] * size
+    written = face_advance(ch, family)  # (a script capital or operator in its face: emit_metrics.letter_faces)
+    if written is not None:
+        return written * size
     table = (emit.ADVANCES.get(family) or emit.ADVANCES["Lato"])[_style_name(st)]
     if ch == NBSP:
         ch = " "

@@ -39,7 +39,7 @@ from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_ins
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, OPTICAL_WEIGHTS_READ, PAD_X,
                    PPTX_TITLE_DY, SOFT_BREAK, FontMapper, extra_above, line_size)
 from .emit_widths import HOLE_BREAKS, WORD_JOINER
-from .fonts import LETTER_FACE_NAMES, cjk_font, script_capital
+from .fonts import LETTER_FACE_NAMES, cjk_font, face_advance
 from .google_types import (AffineTransform, Dimension, Page, PageElement, Presentation, SlidesService, children,
                            object_id, part, parts, presentation)
 from .gslides import EMU_PER_PT
@@ -745,16 +745,18 @@ def _merge_key(r: TargetRun) -> tuple[object, ...]:
 
 
 def capitals_as_their_runs(runs: Sequence[ReadRun], fonts: FontMapper, scale: float) -> list[ReadRun]:
-    """Emit writes a math run's script capitals in a face of their own (`emit_metrics.letter_faces`:
-    STIX Two Math, Libertinus Math): read back, a piece of nothing but script capitals in one of
-    those faces is its run's, in the face of the words beside it (the one before, else the one
-    after; PT Serif with none, as classify sets math with no words around it), so pull's compare
-    sees the math letter it wrote and no change of font. A run of other characters in such a face
-    is none emit wrote (a person's words in STIX Two Math) and stays."""
+    """Emit writes a math run's script capitals, and the operators of a math font's run Slides
+    would draw from its fallback, in a face of their own (`emit_metrics.letter_faces`: STIX Two
+    Math, Libertinus Math, Noto Sans Math; fonts.written_face): read back, a piece of nothing but
+    such characters in the face emit writes them in (`fonts.face_advance`) is its run's, in the
+    face of the words beside it (the one before, else the one after; PT Serif with none, as
+    classify sets math with no words around it), so pull's compare sees the math it wrote and no
+    change of font. A run of other characters in such a face is none emit wrote (a person's words
+    in STIX Two Math) and stays."""
     out = list(runs)
     for k, r in enumerate(out):
         if r.slides_font not in LETTER_FACE_NAMES or not r.run.text.strip() or \
-                not all(script_capital(c) or c.isspace() for c in r.run.text):
+                not all(c.isspace() or face_advance(c, r.slides_font) is not None for c in r.run.text):
             continue
         beside = [o for o in out[:k][::-1] + out[k + 1:] if o.slides_font not in LETTER_FACE_NAMES]
         family = beside[0].slides_font if beside else FONT_FOR_FAMILY["serif"]

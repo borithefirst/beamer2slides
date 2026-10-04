@@ -278,14 +278,111 @@ def google_font(name: str) -> tuple[str, int, bool] | None:
 CALLIGRAPHIC_FACE = "STIX Two Math"
 LETTER_FACES: tuple[tuple[str, str], ...] = (("RSFS", "Libertinus Math"),
                                              ("LIBERTINUSMATH", "Libertinus Math"))  # (unicode-math's own)
-LETTER_FACE_NAMES = frozenset({CALLIGRAPHIC_FACE} | {face for _, face in LETTER_FACES})
 LETTER_FACE_ADVANCE_EM = {"STIX Two Math": 0.736, "Libertinus Math": 0.790}  # the capitals' mean
 SCRIPT_LETTERLIKE = frozenset("ℬℰℱℋℐℒℳℛ")  # (Unicode's script capitals outside the math block)
+
+# Math operators Lato and PT Serif lack are drawn by Slides' fallback face, far from TeX's:
+# tools/probe_math_operators.py (2026-10-04, Google's renderer, 28 pt, against CMSY10/CMEX10) found
+# ⊤ 38% short, ≠ 47% short, ⊙⊗⊕ 32% short and 0.105 em above the math axis, ≤≥ 30% short, ∈ 0.105
+# em high and 50% too wide, ↦ 41% short and 0.104 em high. An operator of a math font's run
+# (`math_operator_faces`) is written in the served face nearest TeX's: where that face is within
+# the probe's tolerances on height (15%) and axis (0.05 em) and the fallback is not, or clearly
+# nearer on both (∪∩: 5% and 0.03 em against 11-21% and 0.06-0.08; ∑: 3% against 11%, × 0.016
+# em off the axis against 0.080), or, as near on both, within every tolerance where the fallback
+# sets it on a whole em (∀∃∇: 79% and 20% too wide, a visible gap after ∀). `advance` is that
+# face's measured advance (em), what widths count. Left to the fallback: ∂ (Lato's is as high
+# and on the axis; CMMI's slanted ∂ was never measured italic), → and ⟶ (STIX Two Math's no
+# nearer), ℝℕℤℂ (Lato's own are nearest). Read back as their run (deck_ir.capitals_as_their_runs).
+OperatorFaceName = Literal["STIX Two Math", "Libertinus Math", "Noto Sans Math"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class OperatorFace:
+    face: OperatorFaceName
+    advance: float  # em: Slides' advance of the operator in `face`
+
+
+def _stix(advance: float) -> OperatorFace:
+    return OperatorFace(face="STIX Two Math", advance=advance)
+
+
+def _libertinus(advance: float) -> OperatorFace:
+    return OperatorFace(face="Libertinus Math", advance=advance)
+
+
+OPERATOR_FACES: dict[str, OperatorFace] = {
+    # TeX (height, centre em, advance) -> the face's (height %, centre em off, advance em); Lato's in []
+    "⊤": _stix(0.714),         # \top      +0%  0.000 [-38%] (Noto Sans Symbols as near: one face fewer)
+    "⊥": _stix(0.714),         # \bot      +2% +0.008 [+5% +0.032, 0.996 em]
+    "∈": _stix(0.714),         # \in       +3% +0.008 [-14% +0.105, 0.996 em]
+    "∉": _stix(0.720),         # \notin    -9% +0.008 [-21% +0.112]
+    "⊂": _stix(0.714),         # \subset   +3% +0.008 [+3% +0.105]
+    "⊆": _stix(0.714),         # \subseteq -2% +0.008 [-15% +0.105]
+    "∪": _stix(0.630),         # \cup      -5% -0.032 [+11% +0.064]
+    "∩": _stix(0.636),         # \cap      -5% -0.032 [+21% +0.080]
+    "∀": _stix(0.568),         # \forall   -5%  0.000 [-5% +0.016, 0.996 em against TeX's 0.555]
+    "∃": _stix(0.568),         # \exists   -2% -0.008 [-5%  0.000, 0.996 em against TeX's 0.555]
+    "∇": _stix(0.743),         # \nabla    -5% +0.016 [-7% +0.024, 0.996 em against TeX's 0.833]
+    "∞": _stix(0.951),         # \infty    -4% +0.008 [-29% +0.080]
+    "≤": _stix(0.714),         # \leq      -4%  0.000 [-30% +0.048]
+    "≥": _stix(0.714),         # \geq      -4%  0.000 [-28% +0.056]
+    "≠": _stix(0.720),         # \neq      -9% +0.008 [-47% +0.072]
+    "≈": _stix(0.714),         # \approx  +12% -0.024 [-31% +0.064]
+    "≡": _stix(0.714),         # \equiv    +4% +0.008 [+19% +0.105]
+    "⇒": _stix(0.883),         # \Rightarrow +12% 0.000 [-6% +0.112]
+    "↦": _stix(0.945),         # \mapsto  -22% +0.008 [-41% +0.104]
+    "·": _stix(0.276),         # \cdot     +0% +0.016 [+29% +0.048]
+    "∑": _stix(0.934),         # \sum (text style) +3% +0.007 [-11% +0.015, 0.681 em against 1.055]
+    "⊙": _libertinus(0.731),   # \odot     -5%  0.000 [-32% +0.105] (STIX Two Math's +15%)
+    "⊗": _libertinus(0.731),   # \otimes   -5%  0.000 [-32% +0.105]
+    "⊕": _libertinus(0.731),   # \oplus    -5%  0.000 [-32% +0.105]
+    "∏": _libertinus(1.001),   # \prod     -2% -0.001 [-11% +0.015, 0.681 em against 0.944]
+    "∫": _libertinus(0.501),   # \int      -1% +0.007 [-19% +0.023]
+    "×": OperatorFace(face="Noto Sans Math", advance=0.568),  # \times -7% +0.016 [-7% +0.080]
+}
+LETTER_FACE_NAMES = frozenset({CALLIGRAPHIC_FACE} | {face for _, face in LETTER_FACES} |
+                              {o.face for o in OPERATOR_FACES.values()})
 
 
 def script_capital(c: str) -> bool:
     """A script capital, regular (𝒜, ℒ) or bold (𝓐)."""
     return c in SCRIPT_LETTERLIKE or 0x1D49C <= ord(c) <= 0x1D4B5 or 0x1D4D0 <= ord(c) <= 0x1D4E9
+
+
+@lru_cache(maxsize=None)
+def math_operator_faces(font: str) -> bool:
+    """Whether a run in PDF font `font` writes its operators in their OPERATOR_FACES face: a TeX
+    math font's run (CMSY, Latin Modern Math, txsys, ...), which Slides sets in Lato or PT Serif
+    (FONT_FOR_FAMILY), the faces the probe measured; never a text font's (a footline's 'A · B', a
+    T2A Type 3 font's Ч read as ×), nor one set in a Google font of its own (Fira Math in Fira
+    Sans: `google_font`), whose operators nobody measured."""
+    return font_info(font).family == "math" and google_font(font) is None
+
+
+def written_face(c: str, font: str) -> str | None:
+    """The face emit writes character `c` of a run in PDF font `font` in when it is not the run's
+    own (emit_metrics.letter_faces): a script capital's `letter_face`, a math operator's
+    OPERATOR_FACES face; None for any other."""
+    if script_capital(c):
+        return letter_face(font)
+    operator = OPERATOR_FACES.get(c)
+    return operator.face if operator is not None and math_operator_faces(font) else None
+
+
+def face_advance(c: str, face: str) -> float | None:
+    """Slides' advance (em) of `c` in `face` where `face` is one emit writes `c` in (written_face):
+    the capitals' mean, an operator's measured advance; None otherwise."""
+    if script_capital(c):
+        return LETTER_FACE_ADVANCE_EM.get(face)
+    operator = OPERATOR_FACES.get(c)
+    return operator.advance if operator is not None and operator.face == face else None
+
+
+def written_advance(c: str, font: str) -> float | None:
+    """Slides' advance (em) of `c` in a run of PDF font `font` when emit writes it in a face of its
+    own (written_face); None when it is set in the run's face."""
+    face = written_face(c, font)
+    return None if face is None else face_advance(c, face)
 
 
 def letter_face(font: str) -> str | None:

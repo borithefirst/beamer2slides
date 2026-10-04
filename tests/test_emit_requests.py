@@ -39,7 +39,10 @@ from .json_reads import jarr, jat, jbool, jint, jnum, jnums, jobj, jobjs, jstr, 
 
 TESTS = Path(__file__).resolve().parent
 NBSP = "\xa0"
-MAX_SHIFT = 15.0  # slide pt a predicted picture may move from its PDF place
+# slide pt a predicted picture may move from its PDF place: where Lato sets a long line's end.
+# demo p3's hole after 'for x ∈ ℝ and n ≥ 2, the mean' is 16.7 (∈ ≥ in STIX Two Math's measured
+# advances since 2026-10-04), and live it sits 0.34 pt from its words' (tools/alignment.py)
+MAX_SHIFT = 18.0
 
 Box4 = tuple[float, float, float, float]
 

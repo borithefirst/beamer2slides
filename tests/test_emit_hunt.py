@@ -15,6 +15,7 @@ from beamer2slides.emit import EMU_PER_PT, SLIDE_W
 from beamer2slides.emit_model import JsonMap, table_of, text_of
 from beamer2slides.emit_tables import TableLayout, pptx_table_of, table_layout_of
 from beamer2slides.emit_text import text_box_requests_of
+from beamer2slides.fonts import OPERATOR_FACES
 from beamer2slides.json_types import Json, JsonObject
 from beamer2slides.google_types import SlidesRequest, slides_json
 
@@ -311,10 +312,14 @@ def test_lines_classify_found_measure_a_paragraph_tex_widths_cannot() -> None:
 def test_a_symbol_the_face_lacks_is_as_wide_as_slides_fallback_sets_it() -> None:
     # V-control-16: '⊂' at 0.6 em (unmeasured) where Slides' fallback font sets 0.981 em
     # (probe_symbols): the line came out 8 pt wider than predicted and its last word wrapped.
+    # ⊂ is now written in STIX Two Math (fonts.OPERATOR_FACES), at its advance there; ∧ is still
+    # the fallback's.
     scale = SLIDE_W / 362.83
-    run = text_run("⊂", BODY, font="CMSY10", family="math")
+    run = text_run("∧", BODY, font="CMSY10", family="math")
     _family, size = FONTS(run, scale)
-    assert emit.slides_width([run], scale, FONTS) == pytest.approx(emit.SYMBOL_ADVANCE_EM["⊂"] * size)
+    assert emit.slides_width([run], scale, FONTS) == pytest.approx(emit.SYMBOL_ADVANCE_EM["∧"] * size)
+    subset = text_run("⊂", BODY, font="CMSY10", family="math")
+    assert emit.slides_width([subset], scale, FONTS) == pytest.approx(OPERATOR_FACES["⊂"].advance * size)
 
 
 # ---------------------------------------------------------------- UTF-16 ranges

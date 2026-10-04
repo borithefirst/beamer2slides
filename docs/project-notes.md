@@ -5321,4 +5321,15 @@ class on a fresh conversion before working on it.
   a line 3 pt from the edge ran 9 pt past the slide, 27_text_fit p8). pull and adopt read it back
   as one TeX space (`inverse.latex_escape`), never `~ `. Open: a mono run's edges lose about
   0.14 em each (needs a measured narrow space in emit); LinLibertineTI math (monodromy) is not
-  read as a formula.
+  read as a formula. Live: ansible s26's gap after 'Questions?' is the PDF's (was half).
+- **Track Y, operators in a math face** (after the operator probe, docs/calibration.md 2d): 27
+  operators a math font's run sets in Lato's fallback are written in the served face nearest
+  TeX's, as script capitals are (`fonts.OPERATOR_FACES`: STIX Two Math for 21 incl. ⊤ ≤ ≠ ∈ ∑,
+  Libertinus Math for ⊙⊗⊕∏∫, Noto Sans Math for ×), widths by that face's measured advance
+  (`written_advance`, `face_advance`), read back as their run by deck_ir. ∀∃∇ tie Lato on height
+  and axis but Lato's fallback sets them on a whole em (79% too wide), so they go too. Only runs
+  of a math font with no Google face of its own (`math_operator_faces`): a footline's 'A · B' or
+  a T2A Ч read as × stays, and Fira Math's operators were never measured. ∂, →, ⟶, ℝℕℤℂ stay in
+  Lato (as near or nearer). Offline over 43 decks, 8 changed, only on elements gaining a face.
+  Open: `classify_text.unmeasured_symbols` and `emit_widths.guessed_chars` still treat these
+  operators as unmeasured; a bold run asks weight 700 of faces with no bold cut, as capitals do.
