@@ -13,7 +13,8 @@ from dataclasses import dataclass, replace
 from typing import Literal, TypedDict
 
 from . import bidi
-from .emit_metrics import ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, SLIDE_W, FontMapper, u16
+from .emit_metrics import (ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, SLIDE_W, FontMapper, letter_face_style,
+                           letter_faces, u16)
 from .emit_model import (
     CellGrid, JsonMap, ObjectMap, PptxTable, SetRun, SetTable, columns_of, set_table, table_of,
 )
@@ -806,6 +807,11 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
                     "objectId": object_id, "cellLocation": loc,  # (UTF-16 units: u16)
                     "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": min(u16(text), start + u16(piece))},
                     "style": style, "fields": ",".join(fields + ["smallCaps", "foregroundColor", "baselineOffset"])}})
+                for c0, c1, face in letter_faces(piece, run.font, start):
+                    reqs.append({"updateTextStyle": {
+                        "objectId": object_id, "cellLocation": loc, "style": letter_face_style(face, run.bold),
+                        "fields": "weightedFontFamily", "textRange": {"type": "FIXED_RANGE", "startIndex": c0,
+                                                                      "endIndex": c1}}})
                 start += u16(piece)
             col = cols[c]
             centred = col.centred or ()

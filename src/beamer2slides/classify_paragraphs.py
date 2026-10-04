@@ -13,7 +13,8 @@ from .classify_text import (
     COMPOSED, FRACTION_SLASH, NBSP, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
     family_of, first_word_width, formula_groups, gap_between, glued, is_code, is_mono, last_word_width,
     line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, prose_spaces, raised_mark,
-    reading_order, script_of, script_size, stretched, thin_span, with_accent, with_text,
+    reading_order, script_in_script, script_of, script_size, stretched, thick_spaces, thin_span, with_accent,
+    with_text,
 )
 from .classify_lines import LinesMixin, ends_in_leader, leader_line, leader_pitch
 from .fonts import serif_math_letters
@@ -702,7 +703,8 @@ class ParagraphsMixin(LinesMixin):
                     text = negate(NEGATION + text)
                 if thin_span(span, line, par.lines):
                     text = re.sub(r"(?<=\S) (?=\S)", " ", text)  # "48 000 EUR" breaks nowhere
-                script = forced or script_of(span, line)
+                script = forced or script_of(span, line) or script_in_script(
+                    span, prev, runs[-1]["script"] if runs and not runs[-1].get("hole") else None, line)
                 # Slides shrinks sub/superscripts itself: give them the line's size.
                 size = script_size(span, line) if script else span.size
                 family, italic = family_of(span), span.info.italic
@@ -763,6 +765,7 @@ class ParagraphsMixin(LinesMixin):
                         runs.append(with_text(style, text))
                 prev = span
         prose_spaces(runs)
+        thick_spaces(runs)
         if not indent:
             runs = [r for r in runs if r["text"]]
         if runs:

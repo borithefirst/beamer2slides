@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from . import curves, ir_types
-from .emit_metrics import PAD_X, FontMapper, u16
+from .emit_metrics import PAD_X, FontMapper, letter_face_style, letter_faces, u16
 from .emit_model import (
     JsonMap, NodeLook, NodeSite, Template, TemplateKey, box_of, node_look, node_look_of, node_site_of, set_card,
     set_runs, template_of,
@@ -842,6 +842,10 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                         "fields": ",".join(sfields + ["smallCaps", "foregroundColor", "baselineOffset"]),
                         "textRange": {"type": "FIXED_RANGE", "startIndex": start + offset,
                                       "endIndex": min(start + u16(line_text), start + offset + u16(piece))}}})
+                    for c0, c1, face in letter_faces(piece, run.font, start + offset):
+                        reqs.append({"updateTextStyle": {
+                            "objectId": target, "style": letter_face_style(face, run.bold), "fields": "weightedFontFamily",
+                            "textRange": {"type": "FIXED_RANGE", "startIndex": c0, "endIndex": c1}}})
                     offset += u16(piece)
                 start += u16(line_text) + 1
             reqs.append({"updateParagraphStyle": {

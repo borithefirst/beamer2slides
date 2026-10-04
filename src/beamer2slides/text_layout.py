@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 
 from . import bidi, emit
+from .fonts import LETTER_FACE_ADVANCE_EM, script_capital
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object
 
 INSET_X = emit.PAD_X            # box edge -> text, left and right
@@ -35,6 +36,7 @@ INSET_Y = 7.2                   # Slides' top and bottom text insets
 CAP_EM = 0.72                   # ink above the baseline (Lato's capitals)
 DESC_EM = 0.2                   # ink below it
 NBSP = "\xa0"
+THICK_SPACE = "\u2008"          # a relation's thick space, set as a no-break space (classify_text.THICK_SPACE)
 ZWSP = emit.ZWSP                # zero width, a line may break after it (UAX #14 LB8; emit.HOLE_BREAK)
 SOFT_BREAK = emit.SOFT_BREAK
 UNKNOWN_EM = 0.5                # a character nobody measured
@@ -179,6 +181,8 @@ def advance(ch: str, st: JsonMap, size: float) -> float:
         return 0.0  # (an LRM or RLM draws nothing, nor does a zero-width space)
     if family == emit.FONT_FOR_FAMILY["mono"]:
         return emit.ROBOTO_MONO_ADVANCE_EM * size
+    if family in LETTER_FACE_ADVANCE_EM and script_capital(ch):  # (emit_metrics.letter_faces)
+        return LETTER_FACE_ADVANCE_EM[family] * size
     table = (emit.ADVANCES.get(family) or emit.ADVANCES["Lato"])[_style_name(st)]
     if ch == NBSP:
         ch = " "
@@ -292,7 +296,7 @@ def wrap(chars: str, styles: Sequence[JsonMap], width: float) -> list[tuple[int,
             adv = advance(ch, styles[i], font_size(styles[i]))
             if ch == " " or ch == ZWSP:
                 w += adv
-                if ch == ZWSP or chars[i + 1:i + 2] != NBSP:
+                if ch == ZWSP or chars[i + 1:i + 2] not in (NBSP, THICK_SPACE):
                     last_break, ink_at_break = i + 1, ink
                 i += 1
                 continue

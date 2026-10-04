@@ -133,7 +133,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   Slides breaks after a hyphen, so line sizing takes the next word only to it (`hyphen_cut`,
   `emit.first_break`); a short inline formula (≤ `FORMULA_GLUE_SHARE` of its line) keeps no-break
   spaces (`formula_groups`); math letters are styled per piece (`classify.math_pieces`: italic
-  per glyph, NFKC, script capitals as Unicode); OT1 accents compose (`compose_accents`), `\not`
+  per glyph, NFKC, script capitals as Unicode, written in STIX Two Math / Libertinus Math by
+  `fonts.letter_face` and read back as their run, `deck_ir.capitals_as_their_runs`; a relation's
+  no-break space in a Lato run is U+2008, `classify_text.thick_spaces`); OT1 accents compose (`compose_accents`), `\not`
   negates (`negate`). Every text range emit writes is UTF-16 (`emit.u16`: astral math letters). A
   run inside a sentence keeps its paragraph's size (`emit.in_sentence`); leader dots and ellipses
   never set `shape_ratio`; a line of spaced dots is a leader (`classify_lines.leader_item`), never

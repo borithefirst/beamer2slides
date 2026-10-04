@@ -4926,3 +4926,23 @@ across the box, or dotted lines a third longer than the PDF's.
 - Live: slides 8, 28 and 41 have one item per line and leaders ending within ~10 px of the PDF's;
   mean text_overlap 0.657 -> 0.666 (slide 8 0.481 -> 0.467: the leaders' few px of overrun).
   The dots are PT Serif's periods, heavier than CM's.
+
+## Script capitals and relation spaces (real-deck review, 2026-10-04)
+\mathcal letters drew from Lato's swash fallback (heavy, wide), and TeX's thick space around a
+relation came out as a no-break space, 0.194 em in Lato against TeX's 0.278.
+- Faces (`fonts.letter_face`, `script_capital`, `LETTER_FACE_NAMES`): script capitals of CMSY,
+  EUSM and the tx/px cuts are written in STIX Two Math (CMSY10's within +2% advance, -6% height,
+  +2% stroke, `tools/probe_math_glyphs.py`); RSFS in Libertinus Math (-5%, 0%, +18%); none for a
+  run already in a Google math face. emit writes one `weightedFontFamily` updateTextStyle per
+  stretch (`emit_metrics.letter_faces`, `letter_face_style`) in text, cells and diagram labels,
+  never over a whole bulleted paragraph; widths count `LETTER_FACE_ADVANCE_EM`.
+- deck_ir reads such a piece back as its neighbour's run (`capitals_as_their_runs`, not on foreign
+  decks), so pull sees no font change; a person's own STIX words stay.
+- Thick spaces (`classify_text.thick_spaces`, `THICK_SPACE` U+2008, 0.278 em in Lato): a no-break
+  space beside a relation in a sans run, not a script, a hole or a Google font. PT Serif's U+2008 is
+  0.250 against its 0.239 no-break space, so serif runs keep NBSP; U+205F is 0 em in Lato. compare,
+  texmap and inverse read it as a space (`~`), text_layout wraps it like NBSP.
+- A prime over a subscript (f_{s'}) and what follows such a script on its baseline join the
+  script's run (`script_in_script`); bold tx/px blackboard and script cuts are named.
+- Live: big-o s14, defense s21 draw STIX capitals like the PDF's; text_overlap means held or rose
+  (derived-cat 0.579 -> 0.59, big-o 0.606 -> 0.611, phylogenet 0.759 -> 0.76, others equal).

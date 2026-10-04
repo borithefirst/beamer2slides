@@ -54,7 +54,7 @@ TOL: dict[str, float] = {
 }
 IGNORED_ROLES = frozenset({"footer", "math", "icon", "overlay", "highlight"})
 NORMALISE = str.maketrans({" ": " ", " ": " ", " ": " ", "\t": " ", "\x0b": " ", "“": '"', "”": '"',
-                           "‘": "'", "’": "'", "…": "...", "−": "-", "​": ""})
+                           "‘": "'", "’": "'", "…": "...", "−": "-", "​": "", "\u2008": " "})
 HOLE = ""
 
 T = TypeVar("T")

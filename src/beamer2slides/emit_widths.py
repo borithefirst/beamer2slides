@@ -18,7 +18,7 @@ from .emit_metrics import (
     SYMBOL_ADVANCE_EM, UNMEASURED_ADVANCE_EM, FontMapper, advance_widths, cm_face_of, design_width,
 )
 from .emit_model import JsonMap, SetParagraph, SetRun, paragraph_of, run_of, runs_of
-from .fonts import font_info
+from .fonts import LETTER_FACE_ADVANCE_EM, font_info, letter_face, script_capital
 
 
 ZWSP = "​"
@@ -60,7 +60,12 @@ def slides_width_of(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> 
         if run.script:
             size *= SCRIPT_SIZE
         total += fonts.leader_correction_of(run, family) * size  # (a leader's dots: their measured pitch)
+        # (script capitals are written in a face of their own: emit_metrics.letter_faces)
+        face = letter_face(run.font) if any(script_capital(c) for c in run.text) else None
         for ch in run.text:
+            if face is not None and script_capital(ch):
+                total += LETTER_FACE_ADVANCE_EM[face] * size
+                continue
             ch = " " if ch == " " else ch  # (a no-break space, a \colorbox's padding, is a space's width)
             if unicodedata.combining(ch):
                 continue  # (a macron over its letter: no advance of its own)

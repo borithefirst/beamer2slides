@@ -9,7 +9,7 @@ from typing import Literal, Protocol, TypedDict
 
 from . import bidi
 from .classify_model import ACCENTS, OUTLINE_MIN, Line, Paragraph, Rect, Span, column_x0
-from .fonts import MATH_ITALIC_RE, font_info
+from .fonts import MATH_ITALIC_RE, font_info, google_font
 from .ir import BulletShape, CardBox, Family, Label, Script
 from .ir import Paragraph as ParagraphJson
 from .ir import Run
@@ -90,6 +90,27 @@ def script_of(span: Span, line: Row) -> Script | None:
     return None
 
 
+def script_in_script(span: Span, before: Span | None, outer: Script | None, line: Row) -> Script | None:
+    """The script of a script's own script: in f_{s'} TeX raises the prime (CMSY6) over its
+    subscript s, so on the line it is neither raised nor lowered enough to be a script of its own,
+    and it was written at body height, a speck beside the subscript (big-o-for-weighted s10).
+    Slides nests no scripts: such a span joins the run of the script it follows (`before`, its
+    neighbour on the left, written as `outer`), the prime coming out over the s as TeX set it; and
+    what follows a span so joined on its own baseline joins too (p|_{p^{-1}(U)}: the 1 after the
+    −, monodromy s9). None for anything else: a span the line already scripts, a body-size one,
+    one not right after a script, or one at the script's own height."""
+    if before is None or outer is None or script_of(span, line) is not None or span.size >= 0.85 * line.size or \
+            span.size > before.size + 0.1:
+        return None
+    if not before.rect.x1 - 0.1 * line.size <= span.rect.x0 <= before.rect.x1 + 0.3 * line.size:
+        return None
+    shift = span.baseline - before.baseline
+    if script_of(before, line) is None:  # (before is a script's script itself)
+        return outer if abs(shift) <= 0.1 * before.size else None
+    raised_or_lowered = shift < -0.12 * before.size or shift > 0.10 * before.size
+    return outer if raised_or_lowered and abs(shift) <= 0.8 * before.size else None
+
+
 def script_size(span: Span, line: Row) -> float:
     """The IR size of a script run: its line's, which Slides draws at 2/3 - or larger than the
     span by that factor when the span is smaller still (a subscript of a subscript, 0.5-0.55;
@@ -115,9 +136,14 @@ DOUBLE_STRUCK = {"C": "ℂ", "H": "ℍ", "N": "ℕ", "P": "ℙ", "Q": "ℚ", "R"
 SCRIPT = {"B": "ℬ", "E": "ℰ", "F": "ℱ", "H": "ℋ", "I": "ℐ", "L": "ℒ", "M": "ℳ", "R": "ℛ"}
 FRAKTUR = {"C": "ℭ", "H": "ℌ", "I": "ℑ", "R": "ℜ", "Z": "ℨ"}
 # \mathbb's fonts: AMS's msbm, txfonts' and pxfonts' copy of it (txsyb, pxsyb), and newtx's
-# txsym, which holds txsya and txsyb (its C, Q, Z were read as script capitals, derived-cat s17).
-DOUBLE_STRUCK_FONTS = ("MSBM", "TXSYB", "PXSYB", "TXSYM")
-SCRIPT_FONTS = ("CMSY","CMBSY", "LMMATHSYMBOLS", "RSFS", "EUSM", "EUSB", "TXSY", "PXSY", "NTXSY")
+# txsym, which holds txsya and txsyb (its C, Q, Z were read as script capitals, derived-cat s17);
+# the bold cuts of each (txbsyb, pxbsyb, txbsym; txsyb5 and txbsyb5 the small ones). Their capitals
+# are glyphs named A-Z in a font whose 'a' is msbm's Gmir, the calligraphic fonts' A-Z sit in
+# cmsy's layout ('a' is turnstileright): txsys, txsy7, txsy5 and their bold txbsys...; txfonts'
+# txsy, txbsy (MiKTeX's newtx, txfonts, amsfonts .pfb encodings). Fonts whose glyphs are named by
+# their Unicode letter (newpx's pxsys u1D49C, stxscr, txmiaSTbb, NewPXBBMI) need no reading.
+DOUBLE_STRUCK_FONTS = ("MSBM", "TXSYB", "PXSYB", "TXSYM", "TXBSYB", "PXBSYB", "TXBSYM")
+SCRIPT_FONTS = ("CMSY", "CMBSY", "LMMATHSYMBOLS", "RSFS", "EUSM", "EUSB", "TXSY", "PXSY", "NTXSY", "TXBSY", "PXBSY")
 FRAKTUR_FONTS = ("EUFM", "EUFB")
 # Unicode math letters (unicode-math, OpenType math fonts) that are plain letters set italic.
 MATH_ITALIC_NAMES = ("MATHEMATICAL ITALIC ", "PLANCK CONSTANT")  # ℎ is the italic h
@@ -412,7 +438,9 @@ def span_runs(spans: list[Span]) -> list[Run]:
         if family == "math":
             family = base_family
             pieces = math_pieces(s.font, text)
-        script = script_of(s, main)  # (the largest span stands for the line)
+        # (the largest span stands for the line)
+        script = script_of(s, main) or \
+            script_in_script(s, spans[i - 1] if i else None, runs[-1]["script"] if runs else None, main)
         size = script_size(s, main) if script else s.size
         if script == "super" and text.strip() in RAISED_MARKS:
             pieces, script, size = [(raised_mark(text), False)], None, main.size
@@ -426,6 +454,7 @@ def span_runs(spans: list[Span]) -> list[Run]:
             else:
                 runs.append(run)
     prose_spaces(runs)
+    thick_spaces(runs)
     runs = [r for r in runs if r["text"]]
     if lead and runs:  # (a right-to-left cell starting with a Latin word says which way it reads)
         runs[0]["text"] = lead + runs[0]["text"]
@@ -481,6 +510,36 @@ def glued(text: str, lead: bool, trail: bool) -> str:
         body = text.rstrip(" ")
         text = body + NBSP * (len(text) - len(body))
     return text
+
+
+# TeX's thick space beside a relation (\thickmuskip, 5/18 em). Slides' no-break space in Lato is
+# 0.194 em; its punctuation space U+2008 is 0.278 em, draws nothing, breaks no line and keeps the
+# line pitch (tools/probe_math_glyphs.py). Not in PT Serif (0.250 against a 0.239 no-break space)
+# nor anywhere else measured; U+205F, Unicode's medium math space, is 0 em in Lato.
+THICK_SPACE = "\u2008"
+RELATIONS = frozenset("=<>≤≥≠≈≡∼≃≅∝∈∉∋⊂⊃⊆⊇⊊⊋≺≻≪≫⊢⊨→←↔⇒⇐⇔↦⟶⟵⟷⟹⟸⟺⟼↪↩")
+
+
+def thick_spaces(runs: list[Run]) -> None:
+    """The no-break space beside a relation (" = " in a formula: `glued`) as THICK_SPACE where Slides
+    sets it in Lato: a run of the sans family in no Google font of the PDF's own, neither a script
+    (TeX puts no space around a relation in one) nor a hole. A breakable space stays one: TeX may
+    break a line after a relation, and Slides breaks at no U+2008."""
+    owner = [k for k, r in enumerate(runs) for _ in r["text"]]
+    text = "".join(r["text"] for r in runs)
+    at: set[int] = set()
+    for i, c in enumerate(text):
+        r = runs[owner[i]]
+        if c != NBSP or r["script"] or r.get("hole") or r["family"] != "sans" or google_font(r["font"]):
+            continue
+        if any(0 <= j < len(text) and text[j] in RELATIONS and not runs[owner[j]]["script"] for j in (i - 1, i + 1)):
+            at.add(i)
+    i = 0
+    for r in runs:
+        n = len(r["text"])
+        if any(i <= k < i + n for k in at):
+            r["text"] = "".join(THICK_SPACE if i + k in at else c for k, c in enumerate(r["text"]))
+        i += n
 
 
 def prose_spaces(runs: list[Run]) -> None:

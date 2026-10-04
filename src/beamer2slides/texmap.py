@@ -746,7 +746,7 @@ def frame_visible(source: Source, frame: Frame) -> Visible:
 # ---------------------------------------------------------------- locating words
 
 WORD_RE = re.compile(r"\S+")
-NORMALISE = str.maketrans({"\u00a0": " ", "\u2009": " ", "\u202f": " ", "\t": " ", "\x0b": " ", "“": '"', "”": '"',
+NORMALISE = str.maketrans({"\u00a0": " ", "\u2008": " ", "\u2009": " ", "\u202f": " ", "\t": " ", "\x0b": " ", "“": '"', "”": '"',
                            "‘": "'", "’": "'", "ﬁ": "fi", "ﬂ": "fl", "…": "...", "−": "-"})
 
 

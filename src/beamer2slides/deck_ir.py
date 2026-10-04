@@ -38,7 +38,7 @@ from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_ins
                           thumbnail_picture_places, thumbnail_rows, thumbnail_weights, top_drift)
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, OPTICAL_WEIGHTS_READ, PAD_X,
                    PPTX_TITLE_DY, SOFT_BREAK, ZWSP, FontMapper, extra_above, line_size)
-from .fonts import cjk_font
+from .fonts import LETTER_FACE_NAMES, cjk_font, script_capital
 from .google_types import (AffineTransform, Dimension, Page, PageElement, Presentation, SlidesService, children,
                            object_id, part, parts, presentation)
 from .gslides import EMU_PER_PT
@@ -675,7 +675,7 @@ def text_paragraphs(pe: PageElement, text: JsonObject, resolver: StyleResolver, 
             cur.runs.append(ReadRun(run=run, slides_font=family, slides_size=size))
     paragraphs: list[ReadParagraph] = []
     for o in opened:
-        runs = merge_runs(o.runs)
+        runs = merge_runs(o.runs if foreign else capitals_as_their_runs(o.runs, fonts, scale))
         bullet = o.head.bullet
         bstyle = o.bullet_style
         if bullet is not None and runs:
@@ -740,6 +740,33 @@ MERGE_KEYS = ("font", "size", "bold", "italic", "color", "link", "script", "unde
 def _merge_key(r: TargetRun) -> tuple[object, ...]:
     return (r.font, r.size, r.bold, r.italic, r.color, r.link, r.script, r.underline, r.strike, r.highlight,
             r.smallcaps, r.weight)
+
+
+def capitals_as_their_runs(runs: Sequence[ReadRun], fonts: FontMapper, scale: float) -> list[ReadRun]:
+    """Emit writes a math run's script capitals in a face of their own (`emit_metrics.letter_faces`:
+    STIX Two Math, Libertinus Math): read back, a piece of nothing but script capitals in one of
+    those faces is its run's, in the face of the words beside it (the one before, else the one
+    after; PT Serif with none, as classify sets math with no words around it), so pull's compare
+    sees the math letter it wrote and no change of font. A run of other characters in such a face
+    is none emit wrote (a person's words in STIX Two Math) and stays."""
+    out = list(runs)
+    for k, r in enumerate(out):
+        if r.slides_font not in LETTER_FACE_NAMES or not r.run.text.strip() or \
+                not all(script_capital(c) or c.isspace() for c in r.run.text):
+            continue
+        beside = [o for o in out[:k][::-1] + out[k + 1:] if o.slides_font not in LETTER_FACE_NAMES]
+        family = beside[0].slides_font if beside else FONT_FOR_FAMILY["serif"]
+        like = beside[0] if beside else None
+        if like is not None and (like.slides_size, like.run.bold, like.run.italic, like.run.smallcaps,
+                                 like.run.script) == (r.slides_size, r.run.bold, r.run.italic, r.run.smallcaps,
+                                                      r.run.script):
+            # (drawn alike, it is its neighbour's TeX font and size: one run again, as classify wrote it)
+            psize, font = like.run.size, like.run.font
+        else:
+            psize, font = pdf_size(fonts, family, r.slides_size, r.run.bold, r.run.italic, scale, None,
+                                   r.run.text, r.run.smallcaps, r.run.script is not None)
+        out[k] = replace(r, run=replace(r.run, font=font, family=family_of(family), size=psize), slides_font=family)
+    return out
 
 
 def merge_runs(runs: Sequence[ReadRun]) -> list[ReadRun]:

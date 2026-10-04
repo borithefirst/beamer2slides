@@ -267,6 +267,37 @@ def google_font(name: str) -> tuple[str, int, bool] | None:
     return family, weight, italic
 
 
+# Script capitals (\mathcal, \mathscr: Unicode's script letters, classify_text.math_pieces) are in
+# no face Slides sets TeX's text in: behind Lato it drew them from a mix of heavy swash fallback
+# faces. tools/probe_math_glyphs.py measured the served faces' script capitals against TeX's
+# (advance, ink height, stroke per em): STIX Two Math is CMSY10's calligraphic within +2%, -6% and
+# +2% (Lato's fallback -2%, +10%, -9%), and Euler's script (EUSM) as near; RSFS's formal script
+# (\mathscr) is nearest Libertinus Math's, -5%, 0% and +18% (Lato's fallback -15%, +9%, +39%).
+# Emit writes a run's script capitals in the face of its PDF font (`letter_face`) and deck_ir
+# reads such a piece back as the run around it.
+CALLIGRAPHIC_FACE = "STIX Two Math"
+LETTER_FACES: tuple[tuple[str, str], ...] = (("RSFS", "Libertinus Math"),
+                                             ("LIBERTINUSMATH", "Libertinus Math"))  # (unicode-math's own)
+LETTER_FACE_NAMES = frozenset({CALLIGRAPHIC_FACE} | {face for _, face in LETTER_FACES})
+LETTER_FACE_ADVANCE_EM = {"STIX Two Math": 0.736, "Libertinus Math": 0.790}  # the capitals' mean
+SCRIPT_LETTERLIKE = frozenset("ℬℰℱℋℐℒℳℛ")  # (Unicode's script capitals outside the math block)
+
+
+def script_capital(c: str) -> bool:
+    """A script capital, regular (𝒜, ℒ) or bold (𝓐)."""
+    return c in SCRIPT_LETTERLIKE or 0x1D49C <= ord(c) <= 0x1D4B5 or 0x1D4D0 <= ord(c) <= 0x1D4E9
+
+
+def letter_face(font: str) -> str | None:
+    """The face the script capitals of a run in PDF font `font` are written in (LETTER_FACES, else
+    CALLIGRAPHIC_FACE); None where the run is set in a Google math face, which has its own."""
+    google = google_font(font)
+    if google is not None and "Math" in google[0]:
+        return None
+    key = re.sub(r"[^A-Z0-9]", "", font.split("+", 1)[-1].upper())
+    return next((face for prefix, face in LETTER_FACES if key.startswith(prefix)), CALLIGRAPHIC_FACE)
+
+
 @lru_cache(maxsize=None)
 def font_info(name: str) -> FontInfo:
     base = name.split("+", 1)[-1]

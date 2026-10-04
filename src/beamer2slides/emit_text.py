@@ -16,7 +16,8 @@ from typing import Literal
 
 from .emit_metrics import (
     ASCENT_EM, BASELINE_A, DESCENT_EM, LINE_EM, MIDDLE_BASELINE_EM, PAD_X, PX_PT, SOFT_BREAK, FontMapper,
-    bullet_char_of, bullet_extent_of, bullet_level_of, bullet_preset_of, bullet_size_of, u16,
+    bullet_char_of, bullet_extent_of, bullet_level_of, bullet_preset_of, bullet_size_of, letter_face_style,
+    letter_faces, u16,
 )
 from .emit_model import (
     ElementDict, JsonMap, Placeholder, PptxText, SetParagraph, SetRun, SetText, Shell, ShellParagraph, block_of, box_of,
@@ -1242,6 +1243,11 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
                     "objectId": object_id, "style": style, "fields": written,
                     "textRange": {"type": "FIXED_RANGE", "startIndex": c0, "endIndex": c1},
                 }})
+            for c0, c1, face in letter_faces(run.text, run.font, start):
+                if not (p.bullet is not None and c0 == p_start and c1 == p_end):  # (its bullet's too)
+                    reqs.append({"updateTextStyle": {
+                        "objectId": object_id, "style": letter_face_style(face, run.bold), "fields": "weightedFontFamily",
+                        "textRange": {"type": "FIXED_RANGE", "startIndex": c0, "endIndex": c1}}})
             start = end
 
         # Slides measures a paragraph from where it *starts*, which is the right edge of a

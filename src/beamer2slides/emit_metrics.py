@@ -10,7 +10,9 @@ from importlib import resources
 from typing import Literal, TypedDict
 
 from .emit_model import BulletFace, JsonMap, SetBullet, SetRun, bullet_of, run_of
-from .fonts import METRICS_FAMILIES, MetricsFamily, font_info, google_font, metrics_family
+from .fonts import (METRICS_FAMILIES, MetricsFamily, font_info, google_font, letter_face, metrics_family,
+                    script_capital)
+from .google_types import SlidesTextStyle
 from .gslides import pt_json as pt
 from .json_types import Json, JsonObject, JsonShapeError, as_object
 
@@ -44,6 +46,7 @@ SYMBOL_ADVANCE_EM = {
     "σ": 0.612, "φ": 0.643, "ω": 0.777, "Δ": 0.664, "Σ": 0.615, "Ω": 0.742, "∂": 0.577, "∇": 0.981,
     "′": 0.186, "∀": 0.981, "∃": 0.981, "∧": 0.981, "∨": 0.981, "⊥": 0.981, "∥": 0.981, "∘": 0.489,
     "…": 0.724, " ": 0.19,
+    "\u2008": 0.278,  # (the punctuation space a relation's thick space is written as: classify_text.THICK_SPACE)
 }
 MATH_SPACE_EM = 0.278  # TeX's \thickmuskip (5 mu) around relations
 CMTT_ADVANCE_EM, ROBOTO_MONO_ADVANCE_EM = 0.525, 0.6
@@ -154,6 +157,32 @@ def u16(text: str) -> int:
     character (𝔼 U+1D53C from amssymb's \\mathbb, 𝛽 U+1D6FD) is two. Counting code points put
     every style range after one a unit early and split the next one's surrogate pair (two tofu)."""
     return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def letter_faces(text: str, font: str, start: int) -> list[tuple[int, int, str]]:
+    """(start, end, face) of each stretch of script capitals in a run's `text` (fonts.script_capital),
+    in UTF-16 units from `start` (where the run's text starts), and the face they are written in
+    (fonts.letter_face of the run's PDF `font`)."""
+    face = letter_face(font) if any(script_capital(c) for c in text) else None
+    if face is None:
+        return []
+    out: list[tuple[int, int, str]] = []
+    at = start
+    for c in text:
+        n = u16(c)
+        if script_capital(c):
+            if out and out[-1][1] == at:
+                out[-1] = (out[-1][0], at + n, face)
+            else:
+                out.append((at, at + n, face))
+        at += n
+    return out
+
+
+def letter_face_style(face: str, bold: bool) -> SlidesTextStyle:
+    """The style written over a run's script capitals, `fields` "weightedFontFamily" (its weight
+    the run's: a fontFamily alone would set it regular)."""
+    return {"weightedFontFamily": {"fontFamily": face, "weight": 700 if bold else 400}}
 
 
 # XML 1.0 refuses C0 controls other than tab, newline and return, lone surrogates and U+FFFE/F:
