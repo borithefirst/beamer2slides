@@ -4,7 +4,7 @@ drawings that become native diagrams.
 
 import math
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -170,6 +170,23 @@ def on_rim(rect: Rect, end: Sequence[float], other: Sequence[float]) -> bool:
     return behind and abs(math.dist((cx, cy), end) - radius) <= 0.6
 
 
+STANDING_STROKES = 3  # drawings ending on a caption's words from one side: a figure standing on it
+
+
+def stands_on(c: Rect, met: Sequence[tuple[Span, Line]], ends: Sequence[tuple[Sequence[float], RawDrawing]],
+              near: Callable[[Span, float, float], bool]) -> bool:
+    """A figure standing on its caption, not a graphic drawn for its words: the words it meets
+    lie beyond its box (their middle below its foot or above its top), and several of its
+    strokes end on them - a tree's leaves on the line under it. An arrow or a brace meets its
+    words with one or two strokes. As an overlay, the figure was stretched after the caption
+    Slides set while what it did not hold stayed in the background (a tree's nodes slid off
+    their outlines)."""
+    if not all(s.rect.cy >= c.y1 or s.rect.cy <= c.y0 for s, _ in met):
+        return False
+    meeting = {d["id"] for (x, y), d in ends if any(near(s, x, y) for s, _ in met)}
+    return len(meeting) >= STANDING_STROKES
+
+
 class FiguresMixin(ParagraphsMixin):
     """Methods of classify.PageClassifier; the state they share is `classify_state.PageState`."""
 
@@ -323,7 +340,16 @@ class FiguresMixin(ParagraphsMixin):
                 out.append(diagram)  # frames around their own text (a framed paragraph), not marks on prose
                 continue
             overlay = self.overlay(c, label_spans, lines, len(out), over_text)
-            if overlay:
+            if overlay == "standing" and over_text and all(
+                    t.cy >= c.y1 or t.cy <= c.y0 for e, t in zip(text_elements, text_rects)
+                    if t.intersects(c) and not grazed(e, t, c)):
+                # (its strokes reach into the caption's box: no text under it all the same)
+                over_text = False
+                drafted = self.diagram_from(c, label_spans, len(out))
+                diagram = None if isinstance(drafted, DiagramRefusal) else drafted
+                self.diagram_refusals = [r for r in self.diagram_refusals if r.box is not c] + \
+                    ([drafted] if isinstance(drafted, DiagramRefusal) else [])
+            if isinstance(overlay, dict):
                 out.append(overlay)
                 continue
             if over_text:
@@ -374,7 +400,8 @@ class FiguresMixin(ParagraphsMixin):
             return None
         return images[0]
 
-    def overlay(self, c: Rect, label_spans: list[Span], lines: list[Line], index: int, over_text: bool) -> ImageElement | None:
+    def overlay(self, c: Rect, label_spans: list[Span], lines: list[Line], index: int, over_text: bool
+                ) -> ImageElement | Literal["standing"] | None:
         """A figure cluster drawn over native text or right at its words (a tikzmark arrow, a
         brace under a phrase, an emphasis ellipse, a callout): a picture of only its own
         drawings and labels on a transparent ground (`drawings`), grouped with the text it
@@ -429,6 +456,8 @@ class FiguresMixin(ParagraphsMixin):
         ends = [(p, d) for d in drawings for p in points(d)]
         met = [(s, l) for s, l in words if any(near(s, x, y) and (not rim_only(d) or self.graphic_drawings[d["id"]].contains(s.rect.cx, s.rect.cy))
                                                 for (x, y), d in ends)]
+        if met and stands_on(c, met, ends, near):
+            return "standing"  # a figure on its caption: no overlay, whatever its strokes reach into
         if not met and over_text:
             met = [(s, l) for s, l in words if any(s.rect.intersects(self.graphic_drawings[d["id"]]) for d in drawings)]
         if not over_text:

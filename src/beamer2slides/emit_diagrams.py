@@ -681,6 +681,19 @@ def label_width_on(w: float, cx: float, paragraphs: Sequence[Sequence[ir_types.R
     return min(w, max(least, w - 2 * over))
 
 
+ON_NODE_INSET = 0.5  # pt: a line end this far inside a node's box is on the node, not at its rim
+
+
+def on_filled_node(start: Point, end: Point, nodes: Sequence[ir_types.Node]) -> bool:
+    """Whether a line lies wholly inside a filled node (a legend's swatch on its key box, an edge
+    within a filled frame around a group): drawn after the nodes, or the fill hides it."""
+    def inside(box: Box, p: Point) -> bool:
+        x0, y0, x1, y1 = box
+        return x0 + ON_NODE_INSET < p[0] < x1 - ON_NODE_INSET and y0 + ON_NODE_INSET < p[1] < y1 - ON_NODE_INSET
+    return any(n.shape is not None and n.fill is not None and inside(n.bbox, start) and inside(n.bbox, end)
+               for n in nodes)
+
+
 def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                         template: Callable[[TemplateKey], Template] | None, page: Page | None) -> list[SlidesRequest]:
     """Nodes become shapes, edges become lines with arrow heads; the parts are grouped so the
@@ -728,7 +741,9 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                     assert_never(plan.form)
         else:
             segments.append((f"{object_id}_l{j}", ln.from_, ln.to, ln))
-    for oid, (x1, y1), (x2, y2), ln in segments:
+
+    def draw(oid: str, start: Point, end: Point, ln: DiagramLine) -> None:
+        (x1, y1), (x2, y2) = start, end
         dx, dy = (x2 - x1) * scale, (y2 - y1) * scale
         drawn = arcs.get(oid)
         if drawn is not None and ln.sweep is not None and template is not None:
@@ -738,13 +753,13 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
             tpl = template(key)
             transform = arc_transform(tpl, ln, ln.sweep, scale, at) if piece is None else \
                 ellipse_transform(tpl, piece, scale)
-            reqs += arc_requests(tpl, oid, ln, transform, scale)
+            reqs.extend(arc_requests(tpl, oid, ln, transform, scale))
             children.append(oid)
-            continue
+            return
         if ln.elbow is not None and template is not None:
             tpl = template(bend_template_key_of(ln.elbow.bend))
             # Like a straight line: from the transform origin along +size, flipped by negative scales.
-            reqs += _copied(tpl, oid, dx / tpl.w, dy / tpl.h, x1 * scale, y1 * scale)
+            reqs.extend(_copied(tpl, oid, dx / tpl.w, dy / tpl.h, x1 * scale, y1 * scale))
         else:
             reqs.append({"createLine": {"objectId": oid, "lineCategory": "STRAIGHT", "elementProperties": {
                 "pageObjectId": slide_id,
@@ -762,6 +777,13 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                                               + (",dashStyle" if ln.dash is not None else ""),
                                               "lineProperties": line_props}})
         children.append(oid)
+
+    # A line wholly inside a filled node is drawn on it (a legend's swatch on its key box): under
+    # the nodes, as edges between nodes are, the fill hid it.
+    on_nodes = {seg[0] for seg in segments if on_filled_node(seg[1], seg[2], el.nodes)}
+    for oid, start_at, end_at, ln in segments:
+        if oid not in on_nodes:
+            draw(oid, start_at, end_at, ln)
     for j, node in enumerate(el.nodes):
         oid = node_oids[j]
         x0, y0, x1, y1 = (v * scale for v in node.bbox)
@@ -856,6 +878,9 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
             reqs.append({"groupObjects": {"groupObjectId": f"{object_id}_g{j}", "childrenObjectIds": list(members)}})
             members = [f"{object_id}_g{j}"]
         children += members
+    for oid, start_at, end_at, ln in segments:
+        if oid in on_nodes:
+            draw(oid, start_at, end_at, ln)
     # Edges follow the nodes they start or end on.
     sites = [(n.bbox, n.shape, n.adjust, n.rotation) for n in el.nodes]
     for oid, start_at, end_at, ln in segments:

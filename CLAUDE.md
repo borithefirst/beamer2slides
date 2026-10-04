@@ -197,7 +197,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   whatever box reaches them; a hole's picture on a photo is its glyphs on a clear ground
   (`render.on_picture_ground`); a crop leaves out glyphs another picture owns when one of the two
   is a hole (`render.others_glyphs`); icons grow to their ink; a line crossing a picture's edge keeps its
-  crossing rows in the background (`picture_crossings`).
+  crossing rows in the background (`picture_crossings`). A figure whose 3+ strokes end on words
+  beyond its box stands on its caption: a plain picture, no overlay (`classify_figures.stands_on`);
+  a diagram's segments inside a filled node are drawn after the nodes (`on_filled_node`); a smaller
+  glyph raised 0.3 em over its words is a footnote mark, no label (`classify_reasons.footnote_mark`).
 - `table`: text framed by rules (or rule-less `plain_tables`), with borders, merges, fills. Column
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
   and the table does not grow over its caption; classify cuts a spanning chunk at word gaps when it

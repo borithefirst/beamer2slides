@@ -32,6 +32,17 @@ CAPTION_RE = re.compile(r"^\S+\.?(\s+[\dIVXivx]+(\.\d+)*)?\s*[:.](\s|$)")
 RELATIONS = set("=<>≤≥≈≠≡∼≃≅∝⇒⇔→")
 # A tick label that is a number, or several touching ("1,0001,0501,100"; "10%", "−0.5").
 TICK_NUMBER_RE = re.compile(r"[-−+]?\d[\d.,−%]*")
+# A smaller mark this far (in ems of the words after it) above their baseline is a superscript.
+FOOTNOTE_RAISE_EM = 0.3
+
+
+def footnote_mark(first: Span, nxt: Span) -> bool:
+    """A line opening on a superscript mark (the `$^*$` of a footnote under a formula, '* plus
+    complicated models'): the mark of a note, no item label. As a hanging label it was written
+    `*<TAB>text`, and in a centred paragraph Slides took the tab to its own stop, the mark far
+    left of its words. (beamer raises its own item triangle 1.25 pt at \\scriptsize: 0.11 em of
+    an 11 pt item.)"""
+    return first.size < nxt.size and nxt.baseline - first.baseline >= FOOTNOTE_RAISE_EM * nxt.size
 
 
 class ReasonsMixin(FiguresMixin):
@@ -80,15 +91,16 @@ class ReasonsMixin(FiguresMixin):
             # A dash followed by a word space opens an attribution ("--- Richard Thaler") or a
             # line of dialogue; an \item[--] label is set off by \labelsep, wider than a space.
             dash = token in ("—", "–") and gap < LABEL_SEP_EM * line.size
+            mark = footnote_mark(first, nxt) and not on_ball
             if gap >= 0.25 * line.size and ((token in LABEL_GLYPHS - PRESET_GLYPHS) or lettered) and not on_ball \
-                    and not dash:
+                    and not dash and not mark:
                 # \item[--], \item[\checkmark]: Slides has no such bullet preset. The glyph stays
                 # literal text, and a tab reaches the item text (hanging indent).
                 line.tab = nxt
                 return
             # (a bullet glyph opening a leader stands right against its dots: `leader_item`)
             apart = gap >= 0.25 * line.size or token in BULLET_GLYPHS and is_leader(nxt.text)
-            if apart and (token in BULLET_GLYPHS or ENUM_RE.match(token)) and not on_ball and not dash:
+            if apart and (token in BULLET_GLYPHS or ENUM_RE.match(token)) and not on_ball and not dash and not mark:
                 if token in BULLET_GLYPHS:
                     line.bullet = {"kind": "glyph", "text": token, "color": first.color, "bbox": first.rect.as_list(),
                                    "label": label_of([first])}

@@ -5195,3 +5195,19 @@ class on a fresh conversion before working on it.
   wider than CM. Offline plans of 609 decks: 5 slides changed, all an added indentEnd; 4 of them
   were words joined up in the archived renders (Fira 'Network for', two CJK items, ArialMT
   '5. 6.'). Not yet seen live.
+- **Third-year talk** (track L, real_third-year-talk-2017-lmcarvalh). A figure standing on its
+  caption (a tree's leaves, a plot's strokes ending on the words under it) became an overlay
+  anchored to the caption: Slides set the caption at another width, the picture moved and
+  stretched with it, and what the overlay did not hold stayed in the background (hollow ovals,
+  doubled curves). `classify_figures.stands_on` keeps such a figure a plain picture: every word
+  it meets lies beyond its box and 3 or more of its drawings (`STANDING_STROKES`) end on them,
+  where an arrow or a brace meets its words with 1-2 (defense p32's architecture figure, once
+  anchored to its own label, is a picture now too). A legend's line swatches lay under the white
+  key boxes created after them: `emit_diagrams.on_filled_node` lines are drawn after the nodes.
+  A smaller glyph raised at least 0.3 em over the words after it (`classify_reasons.footnote_mark`,
+  a `$^*$`) is no hanging label: `∗<TAB>` tabbed it far left in a centred line. Two causes lie
+  in extract and went in after track K: text scaled across in an included figure (every letter
+  one factor off its advance, within `SCALED_SPREAD` 1%) is not small caps, and a glyph back
+  and more than half an em down is a new line (`DROPPED_LINE`: 'THE' over 'END' read 'THEEND').
+  Open: p10's panel f1 is still an overlay (its caption split between labels and text); the ∗
+  is not a superscript run; 'iterations' missing on slide 15.
