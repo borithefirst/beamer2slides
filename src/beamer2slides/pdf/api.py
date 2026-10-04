@@ -328,6 +328,20 @@ def renders(backend: PdfBackend) -> bool:
 # ---------------------------------------------------------------------- helpers every backend shares
 
 
+STRETCHED = 1e-3  # a glyph matrix this much wider than tall (or narrower) is stretched across
+
+
+def stretch_across(a: float, b: float, c: float, d: float) -> float:
+    """How much wider than tall a glyph matrix [a b c d] draws: its baseline length over the size
+    `chars` reports (the square root of its determinant). An included figure scaled wider than
+    tall stretches its words (1.285 on real_third-year-talk-2017 p11), and a font's width for a
+    glyph at that size is that much short of the advance drawn: 'A ttach' (the capital's ink
+    reaching its advance, so its width was the font's, 0.18 em short). 1.0 for a square one."""
+    det = math.sqrt(abs(a * d - b * c))
+    stretch = math.hypot(a, b) / det if det > 0 else 1.0
+    return stretch if abs(stretch - 1.0) > STRETCHED else 1.0
+
+
 def char_box(ox: float, oy: float, ux: float, uy: float, advance: float, size: float, ascent: float,
              descent: float) -> Box:
     vx, vy = uy, -ux  # "up" in glyph space

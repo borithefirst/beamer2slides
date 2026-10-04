@@ -5251,3 +5251,15 @@ class on a fresh conversion before working on it.
   partly within `GLYPH_MARGIN` of its box, up to `INK_ROUNDS` 3, skipping objects `grow_to_ink`
   measured; `holds` is the erasure's own test. 89 decks: 7 of 1,137 boxes grew, all real cuts
   (linear-attention's 'softmax' under a 2 pt strike rule showed as a 2 pt strip); ~0.05 s a deck.
+- **A capital in words scaled across** (track P, third-year-talk p11, 1.285x): 'A ttach',
+  'T here'. Where a glyph's ink reaches its advance the backends take the font's width at
+  `size` = font size x sqrt(det), short by the matrix's stretch (`hypot(a,b)/sqrt(det)`) for a
+  figure scaled wider than tall, so a wide capital ended 0.18 em before its kerned neighbour,
+  over JOIN_GAP. Both backends now stretch that width (`pdf.api.stretch_across`, 1.0 unless off
+  by more than `STRETCHED` 0.1%): only that page changed over the 27 real decks and 62 built
+  PDFs. extract's own font-width fallbacks (`glyph_widths`) are still unstretched.
+- **Live check of the campaign** (2026-10-04, decks re-converted, overlap of words vs the PDF):
+  c-error-handling s27 0.48 -> 0.83, linear-attention s18 0.55 -> 0.70, ansible's mean 0.52 ->
+  0.58, thesis-defense s4 0.87 -> 0.92 ('sources' stays on its line), defense s33 0.74 -> 0.975
+  (the architecture figure one picture), third-year-talk's mean 0.88 -> 0.92 (s17 'THE END'
+  0.45 -> 0.61), africa s2's footline whole over the frame; no deck's mean went down.

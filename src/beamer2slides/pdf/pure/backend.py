@@ -21,7 +21,7 @@ import numpy as np
 from ...arrays import Pixels, RGBA
 from ..api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
                    EmbeddedImage, Link, PageLink, PageObject, PdfError, UriLink, char_box, font_metrics,
-                   join_surrogates, mul, pixel_bounds, render_matrix, trace, transform_box)
+                   join_surrogates, mul, pixel_bounds, render_matrix, stretch_across, trace, transform_box)
 from ..api import Drawing, ImageInfo, Matrix, Metadata, Rgb, Segment, add_stroke, fill_drawing
 from .content import FontCache, Parser, PObj
 from .fonts import Font
@@ -236,7 +236,7 @@ class Page:
             if ux > 0.999 and ci.box[2] >= lr - 0.01 and font is not None:
                 width = font.glyph_width(u, size)
                 if width > 0:
-                    advance, exact = width, False
+                    advance, exact = width * stretch_across(m[0], m[1], m[2], m[3]), False
             if obj is not None:  # FPDFText_GetFillColor; without an object, the colour before it
                 color = (obj.fill if obj.fill is not None else 0) & 0xFFFFFF
                 alpha = _alpha255(obj.fill_alpha)

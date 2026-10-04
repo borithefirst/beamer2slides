@@ -288,3 +288,45 @@ def test_text_scaled_across_is_no_small_caps() -> None:
     # true small caps: each letter's own advance, not one factor
     sc = {c: 0.5 * SIZE * f for c, f in zip("likehod", (1.4, 1.5, 1.3, 1.2, 1.25, 1.12, 1.33))}
     assert extract._small_caps(Page(word, sc), word)
+
+
+def stretched_pdf(path: Path, across: float) -> None:
+    """A one-page PDF of Helvetica words drawn `across` times wider than tall (an included
+    figure scaled across), as pdfTeX writes them: the pair kerns of 'Attach' and 'There' in TJ."""
+    content = (f"BT /F1 10 Tf {across} 0 0 1 20 200 Tm [(A) 30 (ttach parent)] TJ "
+               f"{across} 0 0 1 20 180 Tm [(T) 18 (here is always)] TJ ET").encode()
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>",
+               b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+               b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 250] /Contents 4 0 R"
+               b" /Resources << /Font << /F1 5 0 R >> >> >>",
+               b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream",
+               b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for n, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % n + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    path.write_bytes(out)
+
+
+@pytest.mark.parametrize("across", [2.0, 1.285, 0.95, 1.0])
+def test_a_kerned_capital_in_words_scaled_across_takes_no_space(tmp_path: Path, across: float) -> None:
+    """third-year-talk p11: a figure's captions stretched 1.285x read 'A ttach parent', 'T here is
+    always'. The capital's ink reaches its advance, so the backend takes the font's width for it,
+    which was the width at the size drawn (the square root of the matrix's determinant) and not\n    stretched across: 0.18 em short of the next letter there, 0.23 em here at 2x."""
+    pdf = tmp_path / "stretched.pdf"
+    stretched_pdf(pdf, across)
+    doc = Document(pdf)
+    try:
+        chars = doc[0].chars()
+        text = "".join(s.text for s in extract.shown_spans(doc[0]))
+    finally:
+        doc.close()
+    for a, b in zip(chars, chars[1:]):
+        if a.c in "AT" and b.c in "th":
+            assert abs(a.origin[0] + a.advance - b.origin[0]) < 0.1 * a.size, (a, b)
+    assert "Attach" in text and "There" in text, text

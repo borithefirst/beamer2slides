@@ -22,7 +22,7 @@ from ..arrays import Pixels
 from .api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
                   Drawing, DrawingItem, EmbeddedImage, ImageInfo, Link, Mark, MarkParams, Matrix, Metadata, PageLink,
                   PageObject, PdfError, Point, Segment, UriLink, add_stroke, char_box, fill_drawing, font_metrics,
-                  join_surrogates, mul, pixel_bounds, render_matrix, trace, transform_box)
+                  join_surrogates, mul, pixel_bounds, render_matrix, stretch_across, trace, transform_box)
 
 if TYPE_CHECKING:
     from ctypes import _Pointer
@@ -351,7 +351,8 @@ class Page:
                 if tr.value >= loose.right - 0.01:
                     width = ctypes.c_float()
                     if font and R.FPDFFont_GetGlyphWidth(font, u, ctypes.c_float(size), width) and width.value > 0:
-                        advance, exact = width.value, False
+                        # (the font's width at the size drawn, stretched as the glyph is)
+                        advance, exact = width.value * stretch_across(m.a, m.b, m.c, m.d), False
             # A character no text object draws (a space the text page put into a right-to-left
             # run) has no colour of its own: it keeps the one before it (r, g, b, a are unchanged)
             R.FPDFText_GetFillColor(tp, i, r, g, b, a)
