@@ -211,7 +211,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   overfull table's rules run off the right edge, but no table ends past the page: its columns close
   up to their words (`emit.squeezed_columns`), text as large as fits down to 0.75x, and one that
   cannot fit stays a picture (`table_fits`); a
-  siunitx dash is a `centred` cell; cell accents compose (`span_runs`).
+  siunitx dash is a `centred` cell; cell accents compose (`span_runs`). A justified wrapped cell
+  keeps each PDF line whole (`emit_tables.held_lines_of`); between two vertical rules stretched
+  spaces split no column (`TableRows.stretched`); a cell's inline \frac is num ⁄ den, its bar no
+  rule (`cell_fractions`, `fraction_slashes`); LM Sans's square \textbullet is '▪' (`square_bullets`).
   Convert brings tables empty in the .pptx with their own cell margins (`emit.pptx_table`) and
   fills them through the API, so rows keep the PDF pitch. The base records those margins
   (`table_margins`); sync refills such a table in place when its words or place changed, or rows and columns that

@@ -5,10 +5,10 @@ import statistics
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from .classify_model import Line, Rect, Span, union_all
+from .classify_model import Fraction, Line, Rect, Span, union_all
 from .classify_state import Fill, PageState, Rule
-from .classify_text import cell_runs, is_mono, justified_cells, span_runs
-from .ir import Align, Border, Column, DiagramElement, Merge, TableElement, element_json
+from .classify_text import FRACTION_SLASH, cell_runs, is_mono, justified_cells, span_runs, with_text
+from .ir import Align, Border, Column, DiagramElement, Merge, Run, TableElement, element_json
 from .raw_types import RawSpan
 from .typing_compat import assert_never
 
@@ -149,6 +149,9 @@ class TablesMixin(PageState):
         if any(i - 1 in rows.between for i in rows.between) or numbered_listing(rows.rows):
             return None
         size = rows.size
+        # (a cell's inline fraction: its bar is no rule of the table's)
+        fractions = cell_fractions(horizontal, spans, size)
+        horizontal = [h for h in horizontal if not any(h.rect is f[0] for f in fractions)]
         rows.find_wrapped()
         items, columns = rows.chunks()
         if not columns:
@@ -176,7 +179,8 @@ class TablesMixin(PageState):
                 any(reg.intersects(grown) and not c.expand(0.5).contains_rect(reg, tol=0.5) for reg in self.regions):
             return None
 
-        cell_text = [[cell_runs(lines) for lines in row] for row in cells.cell_lines]
+        cell_text = [[square_bullets(cell_runs(fraction_slashes(lines, fractions))) for lines in row]
+                     for row in cells.cell_lines]
         page_color = next((d["fill"].lower() for d in self.raw["drawings"] if d["type"] == "f" and d["fill"]
                            and Rect.of(d["bbox"]).w * Rect.of(d["bbox"]).h >= 0.95 * self.W * self.H), "#ffffff")
         # [row, col, where each line after the first starts in the cell's text]: emit makes the
@@ -408,7 +412,7 @@ class TablesMixin(PageState):
                 "size": round(size, 2), "row_baselines": [round(b, 2) for b in baselines],
                 "row_heights": [round(p, 2) for p in pitches + [pitches[-1]]], "columns": col_info,
                 "bounds": [round(b, 2) for b in bounds],
-                "cells": [[span_runs(ch) for ch in r[1]] for r in group],
+                "cells": [[square_bullets((span_runs(ch), []))[0] for ch in r[1]] for r in group],
                 "merges": [], "rules": [], "borders": [], "spans": [s.id for s in spans],
             })
         return tables
@@ -429,6 +433,8 @@ def one_baseline(cells: list[list[Span]]) -> bool:
     bases = [statistics.fmean(s.baseline for s in c if s.size >= 0.9 * max(x.size for x in c)) for c in cells]
     return max(bases) - min(bases) <= ROW_BASELINE_SLACK
 
+
+STRETCHED_GAP_EM = 2.0  # a justified line's widest word space in a walled cell (TableRows.stretched)
 
 LISTING_NUMBER = re.compile(r"\d{1,3}:")
 
@@ -507,10 +513,30 @@ class TableRows:
         return gap <= b.size and not self.ruled(a, b) and \
             not (gap > 0.5 * self.size and any(abs(b.rect.x0 - x) <= 0.5 for x in self.column_starts))
 
+    def walled(self, a: Span, b: Span) -> bool:
+        """a and b stand in one cell of a grid ruled on both its sides (|p{}|p{}|): a vertical rule
+        at their row left of a and one right of b, none between them."""
+        y = b.baseline - 0.3 * b.size
+        at = [v.rect.cx for v in self.vertical if v.rect.y0 <= y <= v.rect.y1]
+        return any(x < a.rect.x0 for x in at) and any(x > b.rect.x1 for x in at) and not self.ruled(a, b)
+
+    def stretched(self, a: Span, b: Span) -> bool:
+        """b is the next word of a's phrase across a justified line's stretched space: up to
+        STRETCHED_GAP_EM, in one walled cell (`walled`), b at no column's left edge. A p{} cell's
+        full line of few words is stretched past an em (5.8 pt spaces in 4.93 pt type,
+        real_defense-defense slide 35: 'associate  the  same'); its words were cut into columns
+        of their own, the cells beside them centred merges and the cell's next line a row of its
+        own. Only a wall says so: a table's columns may stand closer than such a space."""
+        gap = b.rect.x0 - a.rect.x1
+        return 0 <= gap <= STRETCHED_GAP_EM * b.size and self.walled(a, b) and \
+            not any(abs(b.rect.x0 - x) <= 0.5 for x in self.column_starts)
+
     def phrase(self, spans: list[Span], x0: float) -> list[Span]:
+        """The words of a row that run on from the one starting at x0: a cell's line, its
+        justified spaces however stretched (`stretched`)."""
         out: list[Span] = []
         for s in sorted(spans, key=lambda s: s.rect.x0):
-            if not out and abs(s.rect.x0 - x0) <= 0.5 or out and self.runs_on(out[-1], s):
+            if not out and abs(s.rect.x0 - x0) <= 0.5 or out and (self.runs_on(out[-1], s) or self.stretched(out[-1], s)):
                 out.append(s)
             elif out:
                 break
@@ -698,6 +724,87 @@ class TableRows:
 
 def extent(ch: list[Span]) -> tuple[float, float]:
     return ch[0].rect.x0, ch[-1].rect.x1
+
+
+FRACTION_CHARS = 6  # letters a cell's fraction may hold, as classify_reasons.simple_fraction's
+
+
+def cell_fractions(rules: list[Rule], spans: list[Span], size: float) -> list[Fraction]:
+    """The inline fractions in a table's cells (`$-1.765~\\frac{mV}{\\mu s}$`): a horizontal rule
+    with words set smaller than the table's right on it and right under it, all within its ends,
+    one part running from end to end (TeX makes the bar as long as the wider part) and the other
+    centred on it, no more than FRACTION_CHARS letters in all. Its bar was taken for a partial
+    rule, and its parts were read as a superscript and a subscript side by side, no bar between
+    them ('-1.765 ^mV _µs', real_zds-2022-drivers slide 85). (A \\cmidrule under a small head has
+    its head a row's pitch above it, and its columns' words never both at its ends.)"""
+    out: list[Fraction] = []
+    for h in rules:
+        bar = h.rect
+        if bar.h > 1.5 or bar.w > 4 * size:
+            continue
+        within = [s for s in spans if s.text.strip() and s.size < 0.85 * size and
+                  s.rect.x0 >= bar.x0 - 1 and s.rect.x1 <= bar.x1 + 1]
+        above = sorted((s for s in within if s.rect.cy < bar.cy and bar.cy - s.baseline <= 0.5 * s.size),
+                       key=lambda s: s.rect.x0)
+        below = sorted((s for s in within if s.rect.cy > bar.cy and s.baseline - bar.cy <= 1.2 * s.size),
+                       key=lambda s: s.rect.x0)
+        if not above or not below or len("".join(s.text for s in above + below).replace(" ", "")) > FRACTION_CHARS:
+            continue
+        sides = [(min(s.rect.x0 for s in part), max(s.rect.x1 for s in part)) for part in (above, below)]
+        full = any(abs(a - bar.x0) <= 1 and abs(b - bar.x1) <= 1 for a, b in sides)
+        if full and all(abs((a + b) / 2 - bar.cx) <= 0.05 * bar.w + 1 for a, b in sides):
+            out.append((bar, above, below))
+    return out
+
+
+def fraction_slashes(lines: list[list[Span]], fractions: list[Fraction]) -> list[list[Span]]:
+    """A cell's lines with each fraction in them set as text lines set one (`reading_order`): its
+    numerator, a fraction slash at the line's size, its denominator. The parts keep their sizes
+    and baselines - the numerator a superscript, the denominator a subscript (`span_runs`) - and
+    are laid side by side across the bar's extent, so that the words before and after keep their
+    spaces and none comes between."""
+    out: list[list[Span]] = []
+    for line in lines:
+        ids = {id(s) for s in line}
+        for bar, above, below in fractions:
+            parts = above + below
+            if not all(id(s) in ids for s in parts):
+                continue
+            rest = [s for s in line if not any(s is p for p in parts)]
+            if not rest:
+                continue
+            main = max(rest, key=lambda s: (s.info.family not in ("math", "icon"), s.size))
+            mid = bar.cx
+
+            def laid(part: list[Span], lo: float, hi: float) -> list[Span]:
+                a0, a1 = min(s.rect.x0 for s in part), max(s.rect.x1 for s in part)
+                k = (hi - lo) / max(a1 - a0, 0.01)
+                return [replace(s, reading=None, rect=Rect(lo + (s.rect.x0 - a0) * k, s.rect.y0,
+                                                           lo + (s.rect.x1 - a0) * k, s.rect.y1)) for s in part]
+            slash = replace(main, id=f"{main.id}/", text=FRACTION_SLASH, reading=None, visual=None,
+                            rect=Rect(mid, main.rect.y0, mid, main.rect.y1))
+            line = [s for s in rest if s.rect.cx < bar.x0] + laid(above, bar.x0, mid) + [slash] + \
+                laid(below, mid, bar.x1) + [s for s in rest if s.rect.cx >= bar.x0]
+            ids = {id(s) for s in line}
+        out.append(line)
+    return out
+
+
+# A bullet glyph a font draws as a filled square (render.glyph_ink: LM Sans's \textbullet, a 0.29 em
+# square, in every LMSans cut of the corpus and test decks; CMSY's, Fira's, Biolinum's, cm-super's
+# and txfonts' are discs).
+SQUARE_BULLET_FONT = re.compile(r"LMSans\d+-")
+SQUARE_BULLET = "▪"
+
+
+def square_bullets(cell: tuple[list[Run], list[int]]) -> tuple[list[Run], list[int]]:
+    """A cell's runs (cell_runs) with each bullet a font draws as a square (SQUARE_BULLET_FONT)
+    written as one: a tabular's hand-made items (`\\tabitem` = `~~\\llap{\\textbullet}~~`) came
+    out larger round dots (real_zds-2022-drivers slide 51). One character for another: the line
+    starts stay."""
+    runs, starts = cell
+    return [with_text(r, r["text"].replace("•", SQUARE_BULLET)) if "•" in r["text"] and
+            SQUARE_BULLET_FONT.match(r["font"]) else r for r in runs], starts
 
 
 def column_bounds(frame: Rect, columns: list[list[float]], vertical: list[Rule], fills: list[Fill]) -> list[float]:

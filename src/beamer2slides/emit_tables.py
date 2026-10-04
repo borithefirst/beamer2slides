@@ -18,7 +18,7 @@ from .emit_metrics import (ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, SLIDE_W, FontM
 from .emit_model import (
     CellGrid, JsonMap, ObjectMap, PptxTable, SetRun, SetTable, columns_of, set_table, table_of,
 )
-from .emit_text import baseline_offset, extra_above, in_sentence_of, run_sizes_of
+from .emit_text import LINE_MARGIN, baseline_offset, extra_above, in_sentence_of, run_sizes_of
 from .emit_widths import (
     WRAP_MARGIN, set_runs_of, slides_width_of, wrap_joins_of, wrap_window_of, wrapped_width_of,
 )
@@ -196,6 +196,22 @@ def fit_columns_of(bounds: Sequence[float], cols: Sequence[Column], scale: float
     return out
 
 
+def held_lines_of(runs: Sequence[SetRun], starts: Sequence[int], col_w: float, scale: float,
+                  fonts: FontMapper) -> float | None:
+    """The text room (Slides pt) a justified cell needs to hold each of its PDF lines whole
+    (wrapped_width) with a text box's LINE_MARGIN, short of taking the next line's first word
+    (wrap_joins) by WRAP_MARGIN at least. TeX shrinks a justified line's spaces as readily as it
+    stretches them, and the substitute's words run a little wider than the PDF's: a cell's room
+    as wide as the PDF's column lost the last word of its full first line to the next ('tipically
+    used / to store', real_zds-2022-drivers slide 26). None where no room does both, where a word
+    TeX hyphenated, taken whole, runs past 1.08 of the column (`col_w`, Slides pt: as
+    table_columns), or where a font was not measured."""
+    whole, joins = wrapped_width_of(runs, starts, scale, fonts), wrap_joins_of(runs, starts, scale, fonts)
+    if whole is None or joins is None or whole + WRAP_MARGIN >= joins - WRAP_MARGIN or whole > 1.08 * col_w:
+        return None
+    return min(whole + LINE_MARGIN, joins - WRAP_MARGIN)
+
+
 def capped_columns(cols: Sequence[Column], scale: float, need: Sequence[float | None],
                    cap: Sequence[float | None]) -> list[bool]:
     """Which columns' text room is held under their `cap` (fit_columns): a left-aligned column
@@ -355,8 +371,11 @@ def table_columns_of(t: SetTable, cells: CellGrid, scale: float, fonts: FontMapp
         widest = need[-1]
         if widest is not None and all(rc in t.justified for rc, _ in mine):
             # Justified cells (classify `justified`) are set out to the PDF's edge (table_requests):
-            # the column needs no room past what its words take, which only widened the table.
-            k = min(k, max(w, widest) + (1 + WRAP_MARGIN) / scale)
+            # the column needs no room past what its words take, which only widened the table -
+            # but each of their PDF lines whole (held_lines_of).
+            held = [h for rc, starts in mine
+                    for h in [held_lines_of(cells[rc[0]][rc[1]], starts, w * scale, scale, fonts)] if h is not None]
+            k = min(k, max([max(w, widest) + (1 + WRAP_MARGIN) / scale] + [h / scale for h in held]))
         cap.append(k)
     bounds = fit_columns_of(bounds, cols, scale, need, tight, cap)
     held = [k if ok else None for k, ok in zip(cap, capped_columns(cols, scale, need, cap))]
@@ -739,6 +758,9 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
     merged = {(m.row, m.col): m for m in t.merges}
     merge_x = {(m.row, m.col): x for m, x in zip(t.merges, t.merge_x)}
     justified = set(t.justified)  # (classify: a tabularx X column's cells)
+    held_lines = {(r, c): h for r, c, starts in t.wrapped if (r, c) in justified and c < n_cols
+                  for h in [held_lines_of(lay.cells[r][c], starts, (cols[c].x1 - cols[c].x0) * scale * lay.shrink,
+                                          scale, fonts)] if h is not None}
     for m in merged.values():
         reqs.append({"mergeTableCells": {"objectId": object_id, "tableRange": {
             "location": {"rowIndex": m.row, "columnIndex": m.col}, "rowSpan": m.rows, "columnSpan": m.cols}}})
@@ -845,11 +867,13 @@ def table_requests_of(t: SetTable, slide_id: str, object_id: str, scale: float, 
             if justify:
                 # A justified cell's lines end where the PDF's do: its text room is the PDF's
                 # column, never less than any of the column's justified cells needs in as many
-                # lines (wrap_window) - one edge for all of them.
+                # lines (wrap_window), nor than it needs to keep each PDF line whole
+                # (held_lines_of) - one edge for all of them.
                 text_x0 = bounds[c] * scale + TABLE_CELL_PAD + left_pad
                 room = bounds[c + 1] * scale - TABLE_CELL_PAD - right_pad - text_x0
-                want = max([(x1 - x0) * scale * lay.shrink] + [w + WRAP_MARGIN for rc in justified if rc[1] == c
-                                                               for w in [cell_width.get(rc)] if w is not None])
+                want = max([(x1 - x0) * scale * lay.shrink] +
+                           [w + WRAP_MARGIN for rc in justified if rc[1] == c for w in [cell_width.get(rc)] if w is not None] +
+                           [h for rc, h in held_lines.items() if rc[1] == c])
                 right_pad += max(0.0, room - want)
             # A cell that reads right to left starts at its right edge, so its alignment and
             # its two indents are mirrored (the text element's rule, one cell wide).

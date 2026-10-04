@@ -5111,3 +5111,20 @@ class on a fresh conversion before working on it.
   the compromise pitch 0.5475 made 11_research_talk 4% wide. Corpus: only ansible's listings and
   28_frames_code changed. Left: a flexible listing's wider indent gives 5 spaces for 4
   (`code_indent`); real_talks' visible-space mark is a rule in the background.
+- Tables in cells (track I). (1) Justified p{} cells keep each PDF line whole: TeX shrinks a
+  justified line's spaces, so a full first line is narrower in the PDF than its words in Lato,
+  and a room as wide as the PDF column lost its last word ('tipically used / to store', zds s26).
+  `emit_tables.held_lines_of` gives each line min(wrapped_width + LINE_MARGIN, wrap_joins -
+  WRAP_MARGIN), honoured by the justified cap and `want`; over 85 hunt decks only r2_tables'
+  justified X columns moved (indentEnd to 0, the edge up to 4.6 pt past the PDF's, inside the
+  cell). (2) A |p|p| table's justified first lines had spaces over an em (5.8 pt in 4.93 pt type,
+  defense s35) and came apart into 5 columns: `TableRows.stretched` lets a phrase run on across a
+  gap up to `STRETCHED_GAP_EM` (2 em) only between two vertical rules and off `column_starts`.
+  (3) A cell's inline \frac (zds s85) had its bar taken as a partial rule: `cell_fractions` claims
+  bar-plus-parts and `fraction_slashes` writes numerator^super ⁄ denominator_sub as text lines
+  do. (4) Only LM Sans draws \textbullet as a square (glyph_ink fill 1.0 over every corpus and
+  test PDF; CMSY, Fira, Biolinum, SFSS, txsys discs at 0.78): `square_bullets` writes LMSans cell
+  bullets as '▪' (\tabitem, zds s51). Corpus and test decks: only the four target pages changed.
+  Left: defense s35 still ends 6.7 pt past its frame (the fixed 7.2 pt TABLE_CELL_PAD against a
+  scaled table's \tabcolsep, the 32 pt column minimum: a per-table .pptx margin is a design
+  decision, sync's API fallback cannot pad); `lay.bounds` ignores the TABLE_MIN_COLUMN_PT clamp.
