@@ -32,7 +32,6 @@ parser and `ir.problems`, the same 148.
 import copy
 import dataclasses
 import json
-import tempfile
 import typing
 from functools import lru_cache
 from pathlib import Path
@@ -43,6 +42,7 @@ from beamer2slides import emit, identity, ir, ir_types, render
 from beamer2slides.classify import classify
 from beamer2slides.json_types import Json, JsonObject
 
+from . import built_decks
 from .json_reads import jarr, jat, jobj, jobjs
 from .test_ir import RENDERED, TESTS, marked_pages, pdfs, raw_pages, read, rendered, small_deck
 
@@ -85,11 +85,10 @@ def hashes(deck: JsonObject) -> list[str]:
 
 @lru_cache(maxsize=None)
 def classified() -> tuple[tuple[str, JsonObject], ...]:
-    out: list[tuple[str, JsonObject]] = []
-    for path in pdfs():
-        with tempfile.TemporaryDirectory() as tmp:
-            out.append((str(path.relative_to(TESTS)).replace("\\", "/"), read(path, Path(tmp))[1]))
-    return tuple(out)
+    """(name, deck) of every built deck as `read` classifies it (made once per run: built_decks)."""
+    found = pdfs()
+    return tuple((str(path.relative_to(TESTS)).replace("\\", "/"), deck)
+                 for path, deck in zip(found, built_decks.classified_decks(found)))
 
 
 @pytest.mark.needs_decks("out")

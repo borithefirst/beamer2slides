@@ -4,14 +4,20 @@
 (`google_auth.use_fetcher`, `net`) rather than by patching a module's private helper.
 
 And how the suite splits across `pytest -n N` workers. The default `--dist load`
-hands out one test at a time, which is wrong here - several files build their decks once in a
-module-scoped fixture (`test_emit_requests`, `test_raster_images`, `test_sync_fuzz`, ...), and
-spreading their tests would build those decks again on every worker. `--dist loadfile` would fix
-that but puts all 53 decks of `test_invariants` on one worker, which is most of the suite's time
-(each deck is extracted, classified and rendered once, ~0.5 s, and its five checks share that).
+hands out one test at a time, which is wrong for a file that builds its decks once in a
+module-scoped fixture (`test_emit_requests`, `test_raster_images`, `test_sync_fuzz`, ...): spread,
+its tests would build those decks again on every worker (`test_emit_requests`' 17 s, eight times
+at -n 8). `--dist loadfile` would fix that but serialises files of independent tests
+(`test_pure_pdf`'s 75 s) and puts all 53 decks of `test_invariants` on one worker.
 
-So: a file is a group unless a test says otherwise, and `test_invariants` says otherwise per deck.
-Run it with `-n auto --dist loadgroup`; without `-n` nothing here changes anything.
+So: the tests of a file that read a fixture it defines above function scope are one group (named
+by the file), every other test goes out on its own, and a test's own `xdist_group` wins
+(`test_invariants` groups per deck, `test_ir_matrix` per case). Run it with `-n N --dist loadgroup`;
+without `-n` nothing here changes anything. The hook runs before xdist's, which writes each test's
+group into its node id: after it, a group added here is never seen (it was not, until 2026-10-04,
+so every test went out on its own). Shared state a fixture does not hold (an `lru_cache`) is per
+worker; what several files read, made once per run, is in `built_decks` (the run's folder,
+`pytest_configure`).
 
 `needs_decks(*paths)`: a test that reads files under `tests/decks/` - built PDFs, a build script -
 which a copy of the tests may leave out (Google's import does). It is skipped when one is missing,
@@ -23,13 +29,18 @@ a module-scoped fixture plans a deck; tests of the containment switch it off the
 """
 
 import contextlib
+import functools
 import os
+import shutil
+import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 from beamer2slides.net import Fetch
+
+from . import built_decks
 
 #: Not `.resolve()`d: under a runfiles tree that would leave the tree for a content store.
 DECKS = Path(__file__).parent / "decks"
@@ -61,9 +72,34 @@ def _drive_folder(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
         monkeypatch.setenv("B2S_DRIVE_FOLDER", "none")
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """The run's folder for what its workers make once and share (`built_decks.SHARED`): made by
+    the process that starts the workers, which inherit it, and removed when that process ends."""
+    if not hasattr(config, "workerinput") and not os.environ.get(built_decks.SHARED):
+        os.environ[built_decks.SHARED] = tempfile.mkdtemp(prefix="b2s-tests-")
+        config.add_cleanup(functools.partial(_forget_shared, os.environ[built_decks.SHARED]))
+
+
+def _forget_shared(folder: str) -> None:
+    shutil.rmtree(folder, ignore_errors=True)
+    if os.environ.get(built_decks.SHARED) == folder:
+        del os.environ[built_decks.SHARED]
+
+
+def shares_module_state(item: pytest.Item) -> bool:
+    """Whether the test reads a fixture its own file makes once for several tests (module, class,
+    package or session scope)."""
+    if not isinstance(item, pytest.Function):
+        return False
+    file = item.nodeid.split("::")[0]  # (a fixture's baseid is the node id of where it is defined)
+    return any(d.scope != "function" and d.baseid == file
+               for defs in item._fixtureinfo.name2fixturedefs.values() for d in defs)
+
+
+@pytest.hookimpl(tryfirst=True)  # before xdist's own, which names each test's group in its node id
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
-        if not any(m.name == "xdist_group" for m in item.iter_markers()):
+        if not any(m.name == "xdist_group" for m in item.iter_markers()) and shares_module_state(item):
             item.add_marker(pytest.mark.xdist_group(item.nodeid.split("::")[0]))
         for mark in item.iter_markers("needs_decks"):
             absent = [p for p in mark.args if not (DECKS / p).exists()]

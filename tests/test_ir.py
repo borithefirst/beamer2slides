@@ -6,7 +6,6 @@ contract is told where.
 The PDFs come from `python tests/decks/build.py` and `python tests/themes/sweep.py --build`."""
 
 import copy
-import tempfile
 import time
 import typing
 from functools import lru_cache
@@ -25,6 +24,7 @@ from beamer2slides.json_types import Json, JsonObject, as_objects, as_str
 from beamer2slides.notes import prepare
 from beamer2slides.raw_types import RawDoc
 
+from . import built_decks
 from .json_reads import jarr, jobj, jobjs
 from .test_marks import FONT, INLINE_IMAGE, cell, element, paragraph, text
 
@@ -55,11 +55,10 @@ def read(pdf: Path, tmp: Path) -> tuple[RawDoc, JsonObject, Path]:
 
 @lru_cache(maxsize=None)
 def classified() -> tuple[tuple[str, JsonObject], ...]:
-    out: list[tuple[str, JsonObject]] = []
-    for path in pdfs():
-        with tempfile.TemporaryDirectory() as tmp:
-            out.append((str(path.relative_to(TESTS)).replace("\\", "/"), read(path, Path(tmp))[1]))
-    return tuple(out)
+    """(name, deck) of every built deck as `read` classifies it (made once per run: built_decks)."""
+    found = pdfs()
+    return tuple((str(path.relative_to(TESTS)).replace("\\", "/"), deck)
+                 for path, deck in zip(found, built_decks.classified_decks(found)))
 
 
 def report(found: list[str]) -> str:

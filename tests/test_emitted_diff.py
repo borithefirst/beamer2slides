@@ -128,7 +128,7 @@ def same_emission(name: str, plan: emit.DeckPlan) -> list[str]:
 
 # ---------------------------------------------------------------- no false positives
 
-@pytest.mark.xdist_group("tests/test_emit_requests.py")  # (its decks, classified once per worker)
+@pytest.mark.xdist_group("tests/test_emit_requests.py")  # (its decks, planned once per worker)
 def test_every_built_deck_emits_the_same_against_its_own_saved_base() -> None:
     """Object ids, element numbering, the slide's page and a JSON round trip are nothing emit writes
     differently: a deck against a base of its own entries, renumbered and saved, marks nothing -

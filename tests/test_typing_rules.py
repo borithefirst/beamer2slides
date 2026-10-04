@@ -77,7 +77,10 @@ def test_no_suppression_comment_and_no_cast() -> None:
     found: list[str] = []
     for name, path in modules().items():
         source = path.read_text(encoding="utf-8")
-        found += [f"{name}:{line}: {text}" for line, text in comments(source) if SUPPRESSION.search(text)]
+        # (a comment the pattern matches is a piece of the source it matches, so a source it
+        # matches nowhere need not be tokenized: most of this test's time)
+        if SUPPRESSION.search(source):
+            found += [f"{name}:{line}: {text}" for line, text in comments(source) if SUPPRESSION.search(text)]
         for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.ImportFrom) and node.module in ("typing", "typing_extensions") and \
                     any(a.name == "cast" for a in node.names):

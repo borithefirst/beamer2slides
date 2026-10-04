@@ -5,7 +5,6 @@ The PDFs come from `python tests/decks/build.py` and `python tests/themes/sweep.
 
 import json
 import re
-import tempfile
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -17,7 +16,7 @@ import pytest
 from pptx.presentation import Presentation as PptxPresentation
 
 from beamer2slides import emit, emit_holes
-from beamer2slides.classify import HOLE_PAD, classify
+from beamer2slides.classify import HOLE_PAD
 from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, FontMapper, find_marks, fit_holes,
                                 formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
                                 measure_jobs, overlay_boxes, pick_gap, slide_holes, space_shift)
@@ -27,14 +26,12 @@ from beamer2slides.emit_pptx import SHELL_CHAR
 from beamer2slides.emit_tables import pptx_table_of, table_requests_of
 from beamer2slides.emit_widths import HOLE_BREAKS
 from beamer2slides.emit_text import text_box_requests_of, words_right
-from beamer2slides.extract import extract, select_overlays
 from beamer2slides.fonts import font_info
 from beamer2slides.google_types import SlidesRequest, part_json, slides_json, slides_request_kind
-from beamer2slides.ir import deck_json
 from beamer2slides.ir_types import Mark, TextElement
 from beamer2slides.json_types import Json, JsonObject, as_str
-from beamer2slides.notes import prepare
 
+from . import built_decks
 from .json_reads import jarr, jat, jbool, jint, jnum, jnums, jobj, jobjs, jstr, jstrs
 
 TESTS = Path(__file__).resolve().parent
@@ -341,16 +338,9 @@ class Emitted:
 
 @lru_cache(maxsize=None)
 def emitted() -> tuple[Emitted, ...]:
-    out: list[Emitted] = []
-    for pdf in pdfs():
-        with tempfile.TemporaryDirectory() as tmp:
-            prepared = prepare(pdf, Path(tmp))
-            raw = extract(prepared.pdf, prepared.labels)
-            for page in raw["pages"]:
-                page["notes"] = prepared.notes.get(page["index"])
-            deck = deck_json(classify(select_overlays(raw, "last")))
-        out.append(Emitted(str(pdf.relative_to(TESTS.parent)).replace("\\", "/"), deck))
-    return tuple(out)
+    found = pdfs()  # (classified once per run: built_decks)
+    return tuple(Emitted(str(pdf.relative_to(TESTS.parent)).replace("\\", "/"), deck)
+                 for pdf, deck in zip(found, built_decks.classified_decks(found)))
 
 
 @pytest.fixture(scope="module")
