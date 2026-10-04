@@ -5,8 +5,8 @@ puts the lines, and Slides boxes do not autofit (none survives the .pptx import)
 laid out here the way emit predicts them: the calibrated Slides advances (`emit.ADVANCES`, per
 family and style; Roboto Mono's 0.6 em), greedy wrapping at spaces inside the box less its insets,
 lines `emit.LINE_EM` x lineSpacing apart, the first baseline `emit.BASELINE_A + ASCENT_EM` under
-the box top, paragraphs spaced with `emit.pitch_between` plus their spaceAbove/spaceBelow (none
-between two bulleted items).
+the box top, paragraphs spaced with `emit.pitch_between` plus their spaceAbove/spaceBelow (between
+two bulleted items only the lower one's spaceAbove, which emit writes with `emit_text.LIST_SPACING`).
 
 The read-back lists the distinct paragraph styles in the order they first appear, not which
 paragraph has which: one style is everybody's, as many as paragraphs is one each, and otherwise the
@@ -396,8 +396,10 @@ def layout_at(rb: JsonMap, size: float | list[float] | None) -> Layout | None:
             if baseline is None:
                 baseline = y0 + emit.BASELINE_A + emit.ASCENT_EM * z + emit.extra_above(r, z)
             elif li == 0:
-                # Slides ignores the space between two bulleted items
-                gap = 0.0 if ps.bullet and bullet_prev else ps.space_above + below
+                # Between two list items a collapsing list drops both spaces; emit writes the gap as
+                # the lower item's spaceAbove under `emit_text.LIST_SPACING`, which keeps it, and never
+                # spaceAbove on an item it leaves collapsing (the read-back does not say spacingMode)
+                gap = ps.space_above if ps.bullet and bullet_prev else ps.space_above + below
                 baseline += emit.pitch_between(previous, r_prev, z, r, gap)  # (snapped with its gap)
             else:
                 baseline += emit.line_pitch(previous, r, z)

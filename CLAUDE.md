@@ -608,7 +608,9 @@ markers.
 - Figure removal switches off paths within the figure box + 5 pt; panel removal 1.5 pt, then 5 pt.
   An image or shading covering the page (`render.PAGE_GROUND`, a background canvas) is never cut
   under a figure or table: it left a white box there.
-- Slides ignores spaceAbove/spaceBelow between bulleted items (docs/calibration.md).
+- Slides ignores spaceAbove/spaceBelow between bulleted items (docs/calibration.md) unless the
+  lower item says NEVER_COLLAPSE, written after createParagraphBullets (`emit_text.LIST_SPACING`,
+  `tools/probe_list_spacing.py`): emit puts each list gap there, not in lineSpacing.
 - **Bullet styling is creation order**: style the paragraph like the bullet, create the bullets,
   then style the text in two or more requests (one request over a whole paragraph restyles its
   bullet), or bullets come out 18 pt default.

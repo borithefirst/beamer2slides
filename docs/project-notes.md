@@ -4891,3 +4891,20 @@ copies whose frame is their whole circle (+353 pt on 29_tikz slide 4).
 - Sync: an old base's footer and number boxes read as width changes once; an arc that is no
   longer turned has a new object id, so sync recreates its unit, and a recreated upright or
   stretched arc finds no template under `_l{j}` and falls back to a stand-in with a warning.
+
+## Line pitch in lists (real-deck review, 2026-10-04)
+Items of one list sat closer than the PDF's in every deck with `\itemsep` or a wrapped item:
+Slides' own boxes say COLLAPSE_LISTS, under which spaceAbove/spaceBelow between two bulleted
+paragraphs are dropped, so emit folded each gap into the upper item's lineSpacing, which also
+spread its own wrapped lines.
+- Probe (`tools/probe_list_spacing.py`, live): spacingMode NEVER_COLLAPSE on the *lower* item keeps
+  its spaceAbove to the model's pitch; on the upper item it does nothing; written before
+  createParagraphBullets it is reset, so paragraph styles stay after the bullets.
+- emit (`emit_text.vertical_layout_of`, `list_spacing`, `LIST_SPACING`): each paragraph's
+  lineSpacing from its own lines' pitch, the gap the lower paragraph's spaceAbove, NEVER_COLLAPSE
+  on a bulleted paragraph after a bulleted one. `text_layout` counts that spaceAbove.
+- Live text_overlap means: beamer-monodromy 0.593 -> 0.664, linear-attention-a 0.619 -> 0.624,
+  presentazione-rxjs 0.69 -> 0.705, thesis-defense 0.947 -> 0.948 (rxjs slide 4's 0.724 -> 0.700
+  is a pixel's shift, the same picture by eye).
+- Sync: spacingMode is not in the snapshot's paragraph keys; a person's own collapsing list with a
+  spaceAbove is laid out by text_layout as if kept (errs towards more room).

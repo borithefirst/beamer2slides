@@ -324,38 +324,53 @@ LineSizes = Sequence[Sequence[float] | float]
 
 def vertical_layout(paras: Sequence[JsonMap], baselines: Sequence[Sequence[float]],
                     sizes: LineSizes) -> tuple[list[float], list[float]]:
-    """`vertical_layout_of` paragraph dicts: of each it reads whether it has a bullet."""
-    return vertical_layout_of([bool(p["bullet"]) for p in paras], baselines, sizes)
+    """`vertical_layout_of` paragraph dicts (one list of baselines and one size each)."""
+    if not len(paras) == len(baselines) == len(sizes):
+        raise ValueError(f"vertical_layout: {len(paras)} paragraphs, {len(baselines)} baselines, {len(sizes)} sizes")
+    return vertical_layout_of(baselines, sizes)
 
 
-def vertical_layout_of(bulleted: Sequence[bool], baselines: Sequence[Sequence[float]],
-                       sizes: LineSizes) -> tuple[list[float], list[float]]:
-    """lineSpacing ratio and spaceAbove per paragraph (`bulleted`: whether each is a list item)
-    so Slides baselines land on the PDF's.
+# Written on every list item that follows another (`list_spacing`): Slides' own boxes say
+# COLLAPSE_LISTS, under which spaceAbove and spaceBelow between two list items are dropped
+# (docs/calibration.md), and NEVER_COLLAPSE keeps them, as between any two paragraphs (what Drive's
+# importer writes on every paragraph; adopt measured it on creandum-board's items: deck_ir
+# `stacked_baseline`). `tools/probe_list_spacing.py` measures it on a box the API makes.
+LIST_SPACING: Literal["NEVER_COLLAPSE"] = "NEVER_COLLAPSE"
 
-    Slides ignores spaceAbove/spaceBelow between items of a bulleted list, so there the gap
-    to the next item has to come from the item's own lineSpacing; for a wrapped item one
-    ratio covers its inner lines plus that gap, spreading the difference evenly.
+
+def list_spacing(bulleted: Sequence[bool]) -> list[bool]:
+    """Which paragraphs of a box are written `LIST_SPACING`: a list item right after another, whose
+    spaceAbove (its gap to the item above, `vertical_layout_of`) a collapsing list would drop."""
+    return [b and i > 0 and bulleted[i - 1] for i, b in enumerate(bulleted)]
+
+
+def vertical_layout_of(baselines: Sequence[Sequence[float]], sizes: LineSizes) -> tuple[list[float], list[float]]:
+    """lineSpacing ratio and spaceAbove per paragraph so Slides baselines land on the PDF's: a
+    wrapped paragraph's ratio is its own lines' pitch, and the gap to the paragraph above is its
+    spaceAbove - between two list items too, which are written `LIST_SPACING` so Slides keeps it.
+    (Under COLLAPSE_LISTS the gap had to come from the upper item's lineSpacing, and for a wrapped
+    item one ratio covered its inner lines and that gap: its continuation lines came out looser than
+    the PDF's - monodromy s7 +10.3 pt on a 26.9 pt pitch - and the gap tighter.)
 
     Pitches snap to whole pixels, so each paragraph aims at the original position measured
     from where Slides will actually have put the previous one: rounding errors don't add up."""
     lines = [[s] * len(bl) if isinstance(s, (int, float)) else list(s) for s, bl in zip(sizes, baselines)]
-    ratios, space_above = _vertical_pass(bulleted, baselines, lines, None)
+    ratios, space_above = _vertical_pass(baselines, lines, None)
     for _ in range(3):  # a paragraph's ratio depends on the next one's (below 100% it moves up)
         estimate = ratios
-        ratios, space_above = _vertical_pass(bulleted, baselines, lines, estimate)
+        ratios, space_above = _vertical_pass(baselines, lines, estimate)
         if ratios == estimate:
             break
     return ratios, space_above
 
 
-def _vertical_pass(bulleted: Sequence[bool], baselines: Sequence[Sequence[float]], lines: Sequence[Sequence[float]],
+def _vertical_pass(baselines: Sequence[Sequence[float]], lines: Sequence[Sequence[float]],
                    estimate: Sequence[float] | None) -> tuple[list[float], list[float]]:
     ratios: list[float] = []
-    space_above = [0.0] * len(bulleted)
+    space_above = [0.0] * len(baselines)
     pulled: dict[int, float] = {}  # paragraph -> lineSpacing < 1 that pulls it up to its target
     first = baselines[0][0]  # predicted Slides baseline of the current paragraph's first line
-    for i, (bullet, bl, zs) in enumerate(zip(bulleted, baselines, lines)):
+    for i, (bl, zs) in enumerate(zip(baselines, lines)):
         n = len(bl)
         z = zs[-1]  # the last line's size: what the next paragraph is spaced from
         uniform = len(set(zs)) == 1
@@ -363,15 +378,9 @@ def _vertical_pass(bulleted: Sequence[bool], baselines: Sequence[Sequence[float]
         def inner(r: float) -> float:  # first to last baseline of this paragraph, unsnapped
             return (n - 1) * LINE_EM * z * r if uniform else sum(inner_pitch(a, r, b) for a, b in zip(zs, zs[1:]))
 
-        has_next = i + 1 < len(bulleted)
-        list_link = has_next and bullet and bulleted[i + 1]
+        has_next = i + 1 < len(baselines)
         next_r = estimate[i + 1] if estimate and has_next else 1.0
-        if list_link:
-            target = baselines[i + 1][0] - first
-            zn = lines[i + 1][0]
-            r = solve_increasing(lambda r: inner(r) + DESCENT_EM * z + ASCENT_EM * zn +
-                                 extra_below(r, z) + extra_above(next_r, zn), target, *RATIO_RANGE)
-        elif n > 1:
+        if n > 1:
             r = (bl[-1] - bl[0]) / (n - 1) / (LINE_EM * z) if uniform else \
                 solve_increasing(inner, bl[-1] - bl[0], *RATIO_RANGE)
         else:
@@ -381,21 +390,16 @@ def _vertical_pass(bulleted: Sequence[bool], baselines: Sequence[Sequence[float]
         last = first + ((n - 1) * line_pitch(z, r, z) if uniform else sum(line_pitch(a, r, b) for a, b in zip(zs, zs[1:])))
         if has_next:
             zn = lines[i + 1][0]
-            natural = pitch_between(z, r, zn, next_r, 0.0)
-            if not list_link:
-                gap = baselines[i + 1][0] - last - pitch_between(z, r, zn, 1.0, 0.0)
-                free = len(baselines[i + 1]) == 1 and not (bulleted[i + 1] and i + 2 < len(bulleted) and bulleted[i + 2])
-                if gap < -PX_PT and free:
-                    # Tighter than Slides' natural pitch (block title right above its body):
-                    # a lineSpacing below 100% moves the next single line up.
-                    rn = max(0.5, 1 + gap / (0.75 * LINE_EM * zn))
-                    pulled[i + 1] = rn
-                # (aimed unsnapped: the step snaps as a whole, its space included, `pitch_between`)
-                rn = pulled.get(i + 1, next_r)
-                unsnapped = DESCENT_EM * z + ASCENT_EM * zn + extra_below(r, z) + extra_above(rn, zn)
-                space_above[i + 1] = max(0.0, baselines[i + 1][0] - last - unsnapped)
-                natural = pitch_between(z, r, zn, rn, space_above[i + 1])
-            first = last + natural
+            gap = baselines[i + 1][0] - last - pitch_between(z, r, zn, 1.0, 0.0)
+            if gap < -PX_PT and len(baselines[i + 1]) == 1:
+                # Tighter than Slides' natural pitch (block title right above its body):
+                # a lineSpacing below 100% moves the next single line up.
+                pulled[i + 1] = max(0.5, 1 + gap / (0.75 * LINE_EM * zn))
+            # (aimed unsnapped: the step snaps as a whole, its space included, `pitch_between`)
+            rn = pulled.get(i + 1, next_r)
+            unsnapped = DESCENT_EM * z + ASCENT_EM * zn + extra_below(r, z) + extra_above(rn, zn)
+            space_above[i + 1] = max(0.0, baselines[i + 1][0] - last - unsnapped)
+            first = last + pitch_between(z, r, zn, rn, space_above[i + 1])
     return ratios, space_above
 
 
@@ -1052,7 +1056,8 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
     last_baseline = paras[-1].lines[-1].baseline * scale
 
     baselines = [[line.baseline * scale for line in p.lines] for p in paras]
-    ratios, space_above = vertical_layout_of([p.bullet is not None for p in paras], baselines, per_line)
+    ratios, space_above = vertical_layout_of(baselines, per_line)
+    spaced = list_spacing([p.bullet is not None for p in paras])
 
     inner_w = (right_pdf - left_pdf) * scale
     # Titles carry their line breaks as soft breaks (SOFT_BREAK) and need no tight width.
@@ -1190,8 +1195,8 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
 
     # From here on indices refer to the final text, without tabs.
     pos = 0
-    for p, t, ratio, above, cap, edge, zs, (justify, indent_end) in zip(paras, texts, ratios, space_above, bullet_caps,
-                                                                       edges, sized, ends):
+    for p, t, ratio, above, cap, edge, zs, (justify, indent_end), listed in zip(
+            paras, texts, ratios, space_above, bullet_caps, edges, sized, ends, spaced):
         p_start, p_end = pos, pos + u16(t)
         pos = p_end + 1
         start = p_start
@@ -1282,12 +1287,15 @@ def _text_requests(text: SetText, slide_id: str, object_id: str, scale: float, f
             paragraph["indentEnd"] = pt(end)
         if rtl:
             paragraph["direction"] = "RIGHT_TO_LEFT"
+        if listed:
+            paragraph["spacingMode"] = LIST_SPACING  # (its spaceAbove is the gap to the item above)
         reqs.append({"updateParagraphStyle": {
             "objectId": object_id,
             "textRange": {"type": "FIXED_RANGE", "startIndex": p_start, "endIndex": max(p_end, p_start + 1)},
             "style": paragraph,
             "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine" +
-                      (",indentEnd" if end > 0.01 else "") + (",direction" if rtl else ""),
+                      (",indentEnd" if end > 0.01 else "") + (",direction" if rtl else "") +
+                      (",spacingMode" if listed else ""),
         }})
     return reqs
 

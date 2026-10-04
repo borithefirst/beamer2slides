@@ -1606,11 +1606,13 @@ def test_lines_of_different_sizes_keep_the_pdf_pitch() -> None:
     # one size on every line is laid out as before
     for sizes in ([[14.0, 14.0, 14.0]], [14.0]):
         assert emit.vertical_layout(paras, [[100.0, 117.0, 134.0]], sizes) == ([round(17 / 16.8, 4)], [0.0])
-    # a bulleted item followed by another: the item's own lines and the gap to the next
+    # a bulleted item followed by another: the item's own lines at their pitch, the gap to the next
+    # its spaceAbove (written with LIST_SPACING, tests/test_text_pitch.py)
     items: list[JsonObject] = [{"bullet": {"kind": "glyph"}}, {"bullet": {"kind": "glyph"}}]
-    (r1, _), _ = emit.vertical_layout(items, [[100.0, 126.9], [155.0]], [[22.1, 21.2], [21.2]])
-    first_to_next = emit.inner_pitch(22.1, r1, 21.2) + emit.LINE_EM * 21.2 + emit.extra_below(r1, 21.2)
-    assert first_to_next == pytest.approx(55.0, abs=0.05)
+    (r1, _), (_, above) = emit.vertical_layout(items, [[100.0, 126.9], [155.0]], [[22.1, 21.2], [21.2]])
+    assert emit.inner_pitch(22.1, r1, 21.2) == pytest.approx(26.9, abs=0.01)
+    first_to_next = emit.line_pitch(22.1, r1, 21.2) + emit.pitch_between(21.2, r1, 21.2, 1.0, above)
+    assert first_to_next == pytest.approx(55.0, abs=emit.PX_PT / 2)
 
 
 def number_table(x1: float) -> JsonObject:
