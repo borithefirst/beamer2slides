@@ -382,7 +382,12 @@ def main() -> None:
                          "backup copies, temporary staging): auto (default) = a 'beamer2slides' folder of "
                          "the app's own; none = new decks in My Drive's root and a base beside its deck; "
                          "or a folder id (= $B2S_DRIVE_FOLDER, drive_folder.py)")
-    sub = ap.add_subparsers(dest="command", required=True)
+    ap.add_argument("--hidden-files", choices=["off", "deck", "pptx"],
+                    help="keep sync bases and backup copies in the app's hidden Drive storage, which Drive's "
+                         "UI and search never show (one more Google consent, for drive.appdata): deck = a "
+                         "backup is a copy of the deck, pptx = its .pptx; off (default) = beside the decks "
+                         "(= $B2S_HIDDEN_FILES, drive_folder.py)")
+    sub =ap.add_subparsers(dest="command", required=True)
     for name, help_text in (("classify", "extract + classify a PDF, with debug images"),
                             ("convert", "full conversion into a Google Slides deck"),
                             ("fidelity", "compare the emitted deck with the PDF")):
@@ -547,6 +552,10 @@ def main() -> None:
         import os
         from .drive_folder import FOLDER_ENV
         os.environ[FOLDER_ENV] = args.drive_folder   # (this process only; worker threads see it too)
+    if args.hidden_files:
+        import os
+        from .drive_folder import HIDDEN_ENV
+        os.environ[HIDDEN_ENV] = args.hidden_files   # (as --drive-folder)
     if args.command == "playground":
         from .playground.server import serve
         return serve(args.host, args.port)

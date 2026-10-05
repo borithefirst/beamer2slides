@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 import pytest
 
-from beamer2slides import doc_ir, doc_merge, doc_sync
+from beamer2slides import doc_ir, doc_merge, doc_sync, drive_folder
 from beamer2slides.doc_ir import Ir
 from beamer2slides.doc_sync import StoredBase, SyncReport
 from beamer2slides.google_types import (CommentList, Comments, DocsBatchUpdateBody, DocsBatchUpdateResponse,
@@ -288,6 +288,9 @@ class _Storage:
         self.refuse_create = self.refuse_rename = False
         self.names: list[str] = []
         self.n = 0
+        self.hidden: set[str] = set()     # files in the app's hidden space
+        self.refuse_hidden = False        # (no drive.appdata grant)
+        self.trashed: list[str] = []
 
     def files(self) -> Files:
         return _StorageFiles(self)
@@ -315,8 +318,13 @@ class _Storage:
         def run() -> DriveFile:
             if self.refuse_create:
                 raise _http(403)
+            in_hiding = body.get("parents") == [drive_folder.APPDATA]
+            if in_hiding and self.refuse_hidden:
+                raise _http(403)
             self.n += 1
             fid = f"base-{self.n}"
+            if in_hiding:
+                self.hidden.add(fid)
             self.blobs[fid] = _uploaded(media_body)
             self.created.append(body)
             return {"id": fid}
@@ -340,7 +348,9 @@ class _Storage:
                 if self.refuse_rename:
                     raise _http(403)
                 self.names.append(name)
-            return {"id": fileId}
+            if body and body.get("trashed"):
+                self.trashed.append(fileId)
+            return {"id": fileId, "spaces": [drive_folder.APPDATA if fileId in self.hidden else "drive"]}
         return _Reply(run)
 
     def export(self, fileId: str, mimeType: str) -> Later[bytes]:
@@ -412,6 +422,38 @@ def test_the_base_file_is_named_for_the_app_not_the_document() -> None:
     doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), known_fid=None)
     assert drive.created[0].get("name") == doc_sync.base_name("doc-1") == "beamer2slides docs base (doc-1).json"
     assert drive.names == [], "the document is not renamed"
+
+
+def test_a_hidden_docs_base_goes_into_the_apps_hidden_space() -> None:
+    drive = _Storage("doc-1")
+    with drive_folder.use_hidden("deck"):
+        fid = doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), known_fid=None)
+    assert drive.created[0].get("parents") == [drive_folder.APPDATA]
+    assert drive.props == {doc_sync.BASE_PROPERTY: fid, doc_sync.BASE_HIDDEN_PROPERTY: "1"}
+    with drive_folder.use_hidden("deck"):   # (the next store: in place, by the id the run found)
+        assert doc_sync.save_drive(drive.drive(), "doc-1", _base(3, "p:drive"), known_fid=fid) == fid
+    assert len(drive.created) == 1
+
+
+def test_a_visible_docs_base_moves_into_hiding_and_the_old_one_to_the_trash(tmp_path: Path) -> None:
+    drive = _Storage("doc-1")
+    old = doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:old"), known_fid=None)
+    with drive_folder.use_hidden("pptx"):
+        new = doc_sync.save_drive(drive.drive(), "doc-1", _base(3, "p:new"), known_fid=old)
+    assert new != old and new in drive.hidden and drive.trashed == [old]
+    assert drive.props == {doc_sync.BASE_PROPERTY: new, doc_sync.BASE_HIDDEN_PROPERTY: "1"}
+    base, where = doc_sync.load_base(tmp_path / "doc.html", "doc-1", drive.drive(), [], found=None)
+    assert where == "drive" and key_of(_found(base)["blocks"][0]) == "p:new"
+
+
+def test_a_hidden_space_that_refuses_keeps_the_docs_base_visible() -> None:
+    drive = _Storage("doc-1")
+    drive.refuse_hidden = True
+    with drive_folder.use_hidden("deck"):
+        fid = doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), known_fid=None)
+        assert doc_sync.save_drive(drive.drive(), "doc-1", _base(3, "p:drive"), known_fid=fid) == fid
+    assert drive.created[0].get("parents") == ["folder"] and len(drive.created) == 1
+    assert drive.props == {doc_sync.BASE_PROPERTY: fid} and drive.trashed == []
 
 
 def test_the_base_in_drive_beats_a_stale_copy_beside_the_file(tmp_path: Path) -> None:

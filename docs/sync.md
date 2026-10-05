@@ -2035,6 +2035,31 @@ talk found one full copy per sync beside it, and the base file too, named after 
   old one named after its deck is renamed by the same request that next stores it. Drive's
   full-text search still reads a docs base's plain JSON; a sync base is gzip, which it does not.
 
+**Hidden storage, an option** (2026-10-05; `--hidden-files off|deck|pptx`, `$B2S_HIDDEN_FILES`,
+`drive_folder.hidden`). Drive's appDataFolder is the app's own space: the Drive UI and its search
+never show it (Settings > Manage apps shows only its size, and can delete it), it counts toward the
+person's quota, and its files cannot be shared. It needs the `drive.appdata` scope, which the full
+`drive` scope does not include either; it is non-sensitive, so no verification. With the mode on:
+- the scope is asked for (`google_auth.wanted_scopes`): a token without it opens the consent once
+  more, asking for it and everything granted before; a token is always loaded with the scopes it
+  says it was granted (`token_scopes`), so a refresh never asks for one it lacks;
+- a sync or docs base is created there; one stored visibly before is made anew there on its next
+  store (a file cannot move between spaces), the deck or document repointed with
+  `b2sBaseHidden=1`, then the old one trashed. Bases are read by the id the deck carries, so the
+  mode can be switched off again and a hidden base is still the one written;
+- a Drive backup (`--backup drive`, a detached agent's `auto`) is, by mode, a **native copy**
+  (`deck`, `guard.hidden_copy`: no export, so no 10 MB limit, and every objectId kept, so a deck
+  restored from it is still the deck its base describes) or its **.pptx** (`pptx`,
+  `guard.hidden_pptx`: the export a `both` backup already made is reused; a restore is an import,
+  with new objectIds). The backup's `hidden` says `{id, name, kind}`; `restore_hint` prints
+  `tools/deck_backup.py restore --hidden ID`, which copies a native one back out (ids kept) or
+  imports a .pptx; `--in-place` imports either into the deck. Trimming to the newest 3 counts both
+  spaces.
+- whatever the space refuses - the scope not granted, a file kind it does not take, an export too
+  large - is kept where it would be with the mode off, with a warning. Whether Drive takes native
+  Slides files in appDataFolder at all, and whether its files can be trashed, is what the live
+  check of both modes answers.
+
 **A backup that did not happen stops the rebuild** (`guard.demand_way_back`). Drive can refuse both
 kinds: the `.pptx` export over 10 MB, the copy when the Drive is full or over quota; `backup_deck`
 only collected warnings, and the forced rebuild then went ahead and replaced a deck nothing could

@@ -1217,6 +1217,7 @@ class DriveFile(TypedDict, total=False):
     createdTime: str
     modifiedTime: str
     size: str               # (bytes, as a decimal string: Drive's int64; none for a Google document)
+    spaces: list[str]       # ("drive", or "appDataFolder" for the app's hidden space)
 
 
 class FileList(TypedDict, total=False):

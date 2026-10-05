@@ -19,7 +19,7 @@ from . import identity
 from .emit import background_key as emit_background_key, slide_layout
 from .emit_state import EmitState, SlideState, emit_state_json
 from .deck_pictures import WORKERS as PICTURE_WORKERS, LivePictures
-from .gapi import HttpError
+from .gapi import HttpError, message_of
 from .google_types import (AffineTransform, DriveFile, DriveService, FileBody, LayoutProperties, Page, PageElement,
                            Presentation, BatchUpdateResponse, Size, SlideProperties, SlidesRequest, SlidesService, WriteControl,
                            all_elements, background_fill, background_url,
@@ -1447,7 +1447,14 @@ def save_drive(drive: DriveService, base: Mapping[str, object], info: DriveFile 
     `info`: the presentation's name, parents and appProperties, where a caller has already read
     them (`deck_info` - they need nothing but the id, so a caller may fetch them while it is doing
     something else: `snapshot_after_convert`). A base file created here is written back into it, so
-    a caller that stores the base several times keeps naming the same file."""
+    a caller that stores the base several times keeps naming the same file.
+
+    With hidden storage on (`drive_folder.hidden`) a new base goes into the app's hidden space, and
+    the deck says so (`BASE_HIDDEN_PROPERTY`); a base stored visibly before is made anew there, and
+    the visible one moved to the trash once the deck names the new one - a file cannot be moved
+    between the two spaces. A hidden space that refuses (no `drive.appdata` grant) leaves the base
+    where it would be with the mode off, with a warning."""
+    from .drive_folder import hidden
     from .gapi import media_upload
 
     pid = base["presentationId"]
@@ -1457,6 +1464,9 @@ def save_drive(drive: DriveService, base: Mapping[str, object], info: DriveFile 
         info = deck_info(drive, pid)
     data = stored_base(base)
     fid = base_file(info)
+    retire: str | None = None
+    if fid and hidden() != "off" and (info.get("appProperties") or {}).get(BASE_HIDDEN_PROPERTY) != "1":
+        retire, fid = fid, None
     if fid:
         try:
             execute(drive.files().update(fileId=fid, body={"name": base_name(pid)},
@@ -1464,14 +1474,58 @@ def save_drive(drive: DriveService, base: Mapping[str, object], info: DriveFile 
         except HttpError:
             fid = None
     if not fid:
-        body: FileBody = {"name": base_name(pid), "mimeType": BASE_MIME, "appProperties": {"b2sBaseOf": pid}}
-        from .drive_folder import place
-        place(body, drive, info.get("parents"))
-        fid = file_id(execute(drive.files().create(body=body, fields="id", media_body=media_upload(
-            io.BytesIO(data), BASE_MIME))), "the sync base")
-        execute(drive.files().update(fileId=pid, body={"appProperties": {BASE_PROPERTY: fid}}, fields="id"))
-        info["appProperties"] = {**(info.get("appProperties") or {}), BASE_PROPERTY: fid}
+        made = _hidden_base(drive, pid, data) if hidden() != "off" else None
+        if made is None and retire:
+            # (the hidden space refused: the visible base it was to replace is written in place)
+            execute(drive.files().update(fileId=retire, body={"name": base_name(pid)},
+                                         media_body=media_upload(io.BytesIO(data), BASE_MIME), fields="id"))
+            return retire
+        in_hiding = made is not None
+        fid = made or _visible_base(drive, pid, data, info.get("parents"))
+        execute(drive.files().update(fileId=pid, fields="id", body={"appProperties": {
+            BASE_PROPERTY: fid, BASE_HIDDEN_PROPERTY: "1" if in_hiding else None}}))
+        props = {k: v for k, v in (info.get("appProperties") or {}).items() if k != BASE_HIDDEN_PROPERTY}
+        info["appProperties"] = {**props, BASE_PROPERTY: fid, **({BASE_HIDDEN_PROPERTY: "1"} if in_hiding else {})}
+    if retire:
+        try:
+            execute(drive.files().update(fileId=retire, body={"trashed": True}, fields="id"))
+        except HttpError as e:
+            print(f"warning: the visible sync base {retire} could not be moved to the trash ({message_of(e)}); "
+                  f"the deck names the hidden one now")
     return fid
+
+
+BASE_HIDDEN_PROPERTY = "b2sBaseHidden"
+"""Set to "1" on a deck whose base file is in the app's hidden Drive space (`save_drive`)."""
+
+
+def _base_body(pid: str) -> FileBody:
+    return {"name": base_name(pid), "mimeType": BASE_MIME, "appProperties": {"b2sBaseOf": pid}}
+
+
+def _hidden_base(drive: DriveService, pid: str, data: bytes) -> str | None:
+    """A new base file holding `data` in the app's hidden space: its id, or None (said) where the
+    space refuses it."""
+    from .drive_folder import APPDATA
+    from .gapi import media_upload
+    body = _base_body(pid)
+    body["parents"] = [APPDATA]
+    try:
+        return file_id(execute(drive.files().create(body=body, fields="id", media_body=media_upload(
+            io.BytesIO(data), BASE_MIME))), "the sync base")
+    except HttpError as e:
+        print(f"warning: the sync base could not go into the app's hidden Drive storage ({message_of(e)}); "
+              f"it is kept where it goes with hidden files off")
+        return None
+
+
+def _visible_base(drive: DriveService, pid: str, data: bytes, beside: list[str] | None) -> str:
+    """A new base file holding `data` where `drive_folder.place` puts it: its id."""
+    from .drive_folder import place
+    from .gapi import media_upload
+    return file_id(execute(drive.files().create(body=place(_base_body(pid), drive, beside), fields="id",
+                                                media_body=media_upload(io.BytesIO(data), BASE_MIME))),
+                   "the sync base")
 
 
 def mark_cleaned(drive: DriveService | None, pid: str, generation: int, info: DriveFile | None) -> str | None:

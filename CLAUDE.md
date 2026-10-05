@@ -347,6 +347,13 @@ a line's added spaces only if Slides sets it within 1% of its PDF width, `emit_t
   each new one trims the deck's copies to the newest `guard.DRIVE_BACKUPS_KEPT` (3; the rest to the
   trash, `trim_drive_backups`); base files are named for the app, never the deck
   (`snapshot.base_name`, `doc_sync.base_name`), so a search for a talk finds the talk.
+  **Hidden storage** (`--hidden-files off|deck|pptx`, `$B2S_HIDDEN_FILES`, `drive_folder.use_hidden`;
+  off by default): bases and backups go into Drive's appDataFolder, which the UI and search never
+  show; scope `drive.appdata` asked for only then (`google_auth.wanted_scopes`; a token loads with
+  its own granted scopes, `token_scopes`). `deck` = a native copy (`guard.hidden_copy`, ids kept),
+  `pptx` = its .pptx (`hidden_pptx`); a base moves in on its next store (`BASE_HIDDEN_PROPERTY`, the
+  visible one trashed after the repoint); whatever the space refuses stays visible with a warning.
+  Restore: `tools/deck_backup.py restore --hidden ID`.
 - **Fonts without internet**: a local google/fonts copy (`$B2S_FONT_SOURCE`, `fontfetch.use_source`,
   `AgentContext.font_source`), or font files handed to adopt (`--fonts`, `deck_adopt(fonts=)`,
   .ttf/.otf/.ttc/.woff/.woff2 named by their name table, `fontfiles.py`, `adopt.use_fonts`).

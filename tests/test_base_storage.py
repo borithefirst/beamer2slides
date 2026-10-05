@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import pytest
 from googleapiclient.errors import HttpError
 
-from beamer2slides import snapshot
+from beamer2slides import drive_folder, snapshot
 from beamer2slides.google_types import (AffineTransform, BatchUpdateResponse, DriveFile, Files, Page, PageElement,
                                         Presentation, Request, Size, SlidesRequest, all_elements, as_json, object_id)
 from beamer2slides.json_types import Json, JsonObject
@@ -54,6 +54,8 @@ class FakeDrive(NoFiles, NoDrive):
         self.pointed: list[tuple[str, Mapping[str, str | None]]] = []
         self.written: list[tuple[str, bytes]] = []
         self.names: dict[str, str] = {}
+        self.trashed: list[str] = []
+        self.hidden_refused = False   # (no drive.appdata grant: the hidden space refuses a file)
 
     # the client's shape: drive.files().get(...).execute()
     @override
@@ -84,6 +86,8 @@ class FakeDrive(NoFiles, NoDrive):
             self.written.append((fid, self.blobs[fid]))
         if body and "name" in body:
             self.names[fid] = body["name"]
+        if body and body.get("trashed"):
+            self.trashed.append(fid)
         if body and "appProperties" in body:
             props = self.props.setdefault(fid, {})
             for k, v in body["appProperties"].items():
@@ -98,6 +102,8 @@ class FakeDrive(NoFiles, NoDrive):
     def create(self, **kw: Unpack[CreateFile]) -> Request[DriveFile]:
         body, media_body = kw["body"], kw.get("media_body")
         assert media_body is not None, "the base goes up with its content"
+        if self.hidden_refused and body.get("parents") == [drive_folder.APPDATA]:
+            raise http_error(403)
         fid = f"base-{len(self.created) + 1}"
         self.created.append(body)
         self.names[fid] = body.get("name", "")
@@ -309,6 +315,61 @@ def test_the_base_is_not_named_after_the_deck() -> None:
     old.names["base-0"] = "A talk - beamer2slides sync base.json.gz"
     snapshot.save_drive(old, base(PID, 2), None)
     assert old.names["base-0"] == snapshot.base_name(PID) and old.created == []
+
+
+# ------------------------------------------------- hidden storage (drive_folder.hidden)
+
+
+def test_a_hidden_base_goes_into_the_apps_hidden_space_and_the_deck_says_so() -> None:
+    drive = no_drive_base()
+    with drive_folder.use_hidden("deck"):
+        fid = snapshot.save_drive(drive, base(PID, 1), None)
+    assert drive.created[0]["parents"] == [drive_folder.APPDATA]
+    assert drive.props[PID] == {snapshot.BASE_PROPERTY: fid, snapshot.BASE_HIDDEN_PROPERTY: "1"}
+    assert loaded(snapshot.load_base(PID, None, drive, None, None))[1]["generation"] == 1
+
+
+def test_a_visible_base_is_made_anew_in_hiding_and_the_old_one_trashed_after_the_deck_names_it() -> None:
+    drive = drive_with_base(base(PID, 1), PID)
+    with drive_folder.use_hidden("pptx"):
+        fid = snapshot.save_drive(drive, base(PID, 2), None)
+    assert fid != "base-0" and drive.created[0]["parents"] == [drive_folder.APPDATA]
+    assert drive.trashed == ["base-0"]
+    assert drive.pointed[-1][1] == {snapshot.BASE_PROPERTY: fid, snapshot.BASE_HIDDEN_PROPERTY: "1"}
+    assert loaded(snapshot.load_base(PID, None, drive, None, None))[1]["generation"] == 2
+
+
+def test_a_base_already_hidden_is_written_in_place() -> None:
+    drive = FakeDrive({PID: {snapshot.BASE_PROPERTY: "base-0", snapshot.BASE_HIDDEN_PROPERTY: "1"}},
+                      {"base-0": snapshot.stored_base(base(PID, 1))}, False)
+    with drive_folder.use_hidden("deck"):
+        assert snapshot.save_drive(drive, base(PID, 2), None) == "base-0"
+    assert (drive.created, drive.trashed) == ([], [])
+
+
+def test_with_the_mode_off_a_hidden_base_is_still_the_one_written() -> None:
+    """A base is read and written by the id its deck carries, wherever it is."""
+    drive = FakeDrive({PID: {snapshot.BASE_PROPERTY: "base-0", snapshot.BASE_HIDDEN_PROPERTY: "1"}},
+                      {"base-0": snapshot.stored_base(base(PID, 1))}, False)
+    with drive_folder.use_hidden("off"):
+        assert snapshot.save_drive(drive, base(PID, 2), None) == "base-0"
+    assert drive.created == []
+
+
+def test_a_hidden_space_that_refuses_keeps_the_base_where_it_would_be(capsys: pytest.CaptureFixture[str]) -> None:
+    new = no_drive_base()
+    new.hidden_refused = True
+    with drive_folder.use_hidden("deck"):
+        fid = snapshot.save_drive(new, base(PID, 1), None)
+    assert new.created[-1]["parents"] == ["folder-1"]   # (beside the presentation, as with the mode off)
+    assert new.props[PID] == {snapshot.BASE_PROPERTY: fid}
+    assert "hidden Drive storage" in capsys.readouterr().out
+    old = drive_with_base(base(PID, 1), PID)
+    old.hidden_refused = True
+    with drive_folder.use_hidden("deck"):
+        assert snapshot.save_drive(old, base(PID, 2), None) == "base-0"
+    assert (old.trashed, old.props[PID]) == ([], {snapshot.BASE_PROPERTY: "base-0"})
+    assert loaded(snapshot.load_base(PID, None, old, None, None))[1]["generation"] == 2
 
 
 def test_a_broken_gzip_base_is_no_base_and_the_cache_stands_in(tmp_path: Path) -> None:

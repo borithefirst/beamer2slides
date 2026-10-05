@@ -2,7 +2,7 @@
 
     python tools/deck_backup.py list    --deck <url|id|out folder>
     python tools/deck_backup.py export  --deck ... [--revision ID] [--to FILE]
-    python tools/deck_backup.py restore --deck ... [--revision ID | --from FILE] [--in-place]
+    python tools/deck_backup.py restore --deck ... [--revision ID | --from FILE | --hidden ID] [--in-place]
     python tools/deck_backup.py prune   --deck ... [--keep 10] [--older-than-days N] [--yes] [--drive]
 
 `list` shows what Drive keeps of the presentation (its revisions, newest last) and the local
@@ -16,6 +16,12 @@ sync base older than the restore describes none of the deck and `sync` refuses i
 large to export whole was backed up in parts (`...-slides-001-004.pptx`, `guard.export_parts`):
 each part restores on its own with `--from`, and Slides' File > Import slides joins them;
 `tools/deck_export.py` exports any deck that way.
+
+A backup kept in the app's hidden Drive storage (`--hidden-files deck|pptx`, `drive_folder.hidden`)
+is restored by its id, `--hidden ID` (the restore hint prints it): a hidden copy of the deck comes
+back as a new presentation copied from it, every object id kept, so the sync base of the deck it
+was taken from describes it; a hidden .pptx comes back as `--from` would bring it. `--in-place`
+from either is an import into the deck itself, with new object ids as above.
 
 `prune` is the only destructive action here: every sync of a deck writes a .pptx of it, so a folder
 that is synced often grows without end. It keeps the newest `--keep` backups (and everything newer
@@ -37,6 +43,7 @@ import sys
 from pathlib import Path
 
 from beamer2slides import guard
+from beamer2slides.drive_folder import hidden, use_hidden
 from beamer2slides.gapi import media_upload
 from beamer2slides.google_auth import credentials, drive_service
 from beamer2slides.google_types import DriveFile, DriveService, Revision, file_id
@@ -130,6 +137,25 @@ def upload_new(drive: DriveService, data: bytes, name: str) -> str:
         media_body=media_upload(io.BytesIO(data), PPTX_MIME), fields="id")), name)
 
 
+SLIDES_MIME = "application/vnd.google-apps.presentation"
+
+
+def hidden_backup(drive: DriveService, fid: str) -> tuple[DriveFile, bytes | None]:
+    """A backup in the app's hidden space: its metadata, and its bytes when it is a .pptx (None: a
+    native copy of the deck, which is copied, not downloaded)."""
+    info = execute(drive.files().get(fileId=fid, fields="id,name,mimeType,appProperties"))
+    if info.get("mimeType") == SLIDES_MIME:
+        return info, None
+    return info, execute(drive.files().get_media(fileId=fid))
+
+
+def copy_out(drive: DriveService, fid: str, name: str, beside: list[str] | None) -> str:
+    """The hidden copy `fid` copied back where a person sees it, as a new presentation: its id."""
+    from beamer2slides.drive_folder import place
+    return file_id(execute(drive.files().copy(fileId=fid, body=place({"name": name}, drive, beside),
+                                              fields="id")), name)
+
+
 def local_backups(folder: Path | None) -> list[Json]:
     if folder is None:
         return []
@@ -196,6 +222,36 @@ def backup_of(entry: JsonObject) -> JsonObject:
     return as_object(backup, "backups.json backup") if backup else {}
 
 
+IN_PLACE_NOTE = ("  Drive's import gives every object of the deck a new id, so a sync base recorded before this "
+                 "restore describes none of it any more: sync refuses such a deck rather than reporting every "
+                 "element as deleted. The deck is yours to edit in Slides; to convert the PDF again, use "
+                 "--new-deck, which leaves this one alone.")
+
+
+def restore_hidden(drive: DriveService, pid: str, fid: str, in_place: bool) -> None:
+    """Put back the backup `fid` from the app's hidden space (`guard.hidden_copy`/`hidden_pptx`)."""
+    info, data = hidden_backup(drive, fid)
+    of = (info.get("appProperties") or {}).get("b2sBackupOf")
+    if of != pid:
+        raise SystemExit(f"hidden file {fid} is no backup of {deck_url(pid)} (it is tagged {of!r})")
+    what = f"the hidden backup {info.get('name', fid)}"
+    if in_place:
+        if data is None:
+            data = execute(drive.files().export(fileId=fid, mimeType=PPTX_MIME))
+        upload_into(drive, data, pid)
+        print(f"{what} written back into {deck_url(pid)} (the content it had is now a revision of its own)")
+        print(IN_PLACE_NOTE)
+        return
+    deck = execute(drive.files().get(fileId=pid, fields="name,parents"))
+    name = f"{file_name(deck, pid)} (restored from {what})"
+    if data is None:
+        new = copy_out(drive, fid, name, deck.get("parents"))
+        print(f"{what} -> a new presentation, every object id kept: {deck_url(new)}")
+    else:
+        new = upload_new(drive, data, name)
+        print(f"{what} -> a new presentation: {deck_url(new)}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="deck_backup", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -204,6 +260,7 @@ def main() -> None:
     ap.add_argument("--revision", help="revision id, 'latest' (default) or 'previous'")
     ap.add_argument("--to", type=Path, help="export: where to write the .pptx")
     ap.add_argument("--from", dest="source", type=Path, help="restore: a .pptx written earlier")
+    ap.add_argument("--hidden", help="restore: the id of a backup in the app's hidden Drive storage")
     ap.add_argument("--in-place", action="store_true",
                     help="restore into the same presentation (its current content becomes a revision)")
     ap.add_argument("--keep", type=int, default=10, help="prune: how many of the newest backups to keep (default 10)")
@@ -223,11 +280,15 @@ def main() -> None:
     older_than_days: float | None = args.older_than_days
     yes: bool = args.yes
     in_drive: bool = args.drive
+    hidden_id: str | None = args.hidden
     pid, folder = resolve_deck(deck)
     if action == "prune" and in_drive:
         return prune_drive(pid, keep, older_than_days, yes)
     if action == "prune":  # no Google call: this is about files on disk
         return prune(folder, keep, older_than_days, yes)
+    if action == "restore" and hidden_id:
+        with use_hidden("deck" if hidden() == "off" else hidden()):   # (the hidden space's scope)
+            return restore_hidden(drive_service(None), pid, hidden_id, in_place)
     drive = drive_service(None)
     revs = revisions(drive, pid)
     if action == "list":
@@ -246,6 +307,8 @@ def main() -> None:
             print(line)
             backup = backup_of(b)
             for k, v in backup.items():
+                if k == "hidden" and isinstance(v, dict):
+                    print(f"      hidden {v.get('kind')}: {v.get('name')}  (restore --hidden {v.get('id')})")
                 if k in ("file", "drive"):
                     print(f"      {k}: {v['url'] if isinstance(v, dict) else v}"
                           f"{'  (deleted)' if k == 'file' and not Path(as_str(v, 'backup.file')).exists() else ''}")
@@ -280,10 +343,7 @@ def main() -> None:
     if in_place:
         upload_into(drive, data, pid)
         print(f"{what} written back into {deck_url(pid)} (the content it had is now a revision of its own)")
-        print("  Drive's import gives every object of the deck a new id, so a sync base recorded before this "
-              "restore describes none of it any more: sync refuses such a deck rather than reporting every "
-              "element as deleted. The deck is yours to edit in Slides; to convert the PDF again, use "
-              "--new-deck, which leaves this one alone.")
+        print(IN_PLACE_NOTE)
     else:
         new = upload_new(drive, data, f"{name} (restored from {what})")
         print(f"{what} -> a new presentation: {deck_url(new)}")

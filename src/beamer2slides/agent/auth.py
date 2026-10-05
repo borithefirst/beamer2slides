@@ -127,7 +127,9 @@ class TokenFile:
                           f"No Google token yet. A human has to run `{CONSENT_COMMAND}` once at "
                           f"a terminal and approve the access; it cannot be done from here.",
                           command=CONSENT_COMMAND)
-        creds = UserCredentials.from_authorized_user_file(str(token), google_auth.SCOPES)
+        # (with the scopes it was granted: a hidden-storage grant survives its refresh)
+        creds = UserCredentials.from_authorized_user_file(str(token), google_auth.token_scopes(token)
+                                                          or google_auth.SCOPES)
         if creds.valid:
             return creds
         if creds.expired and creds.refresh_token:
@@ -153,14 +155,15 @@ class TokenFile:
         out: JsonObject = {"available": False, "source": "token file",
                            "token_installed": token.exists(),
                            "client_installed": secret.exists(),
-                           "scopes": list[Json](google_auth.SCOPES)}
+                           "scopes": list[Json](google_auth.token_scopes(token) or google_auth.SCOPES)}
         if not token.exists():
             out["reason"] = "needs_consent" if secret.exists() else "no_credentials"
             out["command"] = CONSENT_COMMAND
             return out
         try:
             from google.oauth2.credentials import Credentials as UserCredentials
-            creds = UserCredentials.from_authorized_user_file(str(token), google_auth.SCOPES)
+            creds = UserCredentials.from_authorized_user_file(str(token), google_auth.token_scopes(token)
+                                                              or google_auth.SCOPES)
         except Exception as exc:                                   # a truncated or foreign file
             out["reason"] = f"the token file could not be read ({type(exc).__name__})"
             return out
@@ -232,7 +235,7 @@ def _consent() -> int:
     creds = google_auth.credentials()
     _, token = this_machine()._paths()
     print(f"Google access granted; the token is in {token}.")
-    print("Scopes: " + ", ".join(google_auth.SCOPES))
+    print("Scopes: " + ", ".join(google_auth.token_scopes(token) or google_auth.SCOPES))
     if creds.expiry:
         print(f"It expires {creds.expiry:%Y-%m-%d %H:%M} UTC. This project's consent screen is in "
               f"testing mode, so plan on doing this again in a week.")

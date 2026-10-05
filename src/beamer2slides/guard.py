@@ -18,9 +18,11 @@ the deck was edited against it.
 
 Before a destructive write the deck's `revisionId` is recorded (`<out>/backups/backups.json`,
 `emit.json` "previous") and a backup can be kept: an exported .pptx next to the output folder
-and/or a Drive copy of the presentation.
+and/or a Drive copy of the presentation - in the app's hidden Drive space when hidden storage is on
+(`drive_folder.hidden`: a native copy, `hidden_copy`, or the .pptx, `hidden_pptx`).
 """
 
+import io
 import json
 import os
 import re
@@ -510,6 +512,62 @@ def copy_in_drive(drive: DriveService, pid: str, name: str | None) -> JsonObject
     return {"presentationId": cid, "name": copy.get("name"), "url": deck_url(cid)}
 
 
+def _backup_name(drive: DriveService, pid: str, suffix: str) -> str:
+    info = execute(drive.files().get(fileId=pid, fields="name"))
+    return f"{info.get('name', 'deck')} (beamer2slides backup {time.strftime('%Y-%m-%d %H:%M')}){suffix}"
+
+
+def hidden_copy(drive: DriveService, pid: str) -> JsonObject:
+    """A native copy of the presentation in the app's hidden Drive space (`drive_folder.hidden`
+    mode `deck`): no export, so no size limit, and every objectId kept - a deck restored from it
+    (`tools/deck_backup.py restore --hidden ID`) is the same deck to sync. Raises HttpError where
+    Drive will not take it."""
+    from .drive_folder import APPDATA
+    body: FileBody = {"name": _backup_name(drive, pid, ""), "parents": [APPDATA],
+                      "appProperties": {"b2sBackupOf": pid}}
+    copy = execute(drive.files().copy(fileId=pid, body=body, fields="id,name"))
+    return {"id": file_id(copy, f"its hidden copy of {pid}"), "name": copy.get("name"), "kind": "deck"}
+
+
+def hidden_pptx(drive: DriveService, pid: str, exported: Path | None) -> JsonObject:
+    """The presentation's .pptx in the app's hidden Drive space (mode `pptx`): `exported`, the file
+    this backup already wrote, else a new export (Drive's 10 MB limit). A restore from it is an
+    import, which gives the deck new objectIds. Raises HttpError or TimeoutError where Drive will
+    not export or take it."""
+    from .deck_export import export_bytes
+    from .drive_folder import APPDATA
+    from .gapi import media_upload
+    data = exported.read_bytes() if exported is not None else export_bytes(drive, pid)
+    body: FileBody = {"name": _backup_name(drive, pid, ".pptx"), "parents": [APPDATA], "mimeType": PPTX_MIME,
+                      "appProperties": {"b2sBackupOf": pid}}
+    made = execute(drive.files().create(body=body, fields="id,name",
+                                        media_body=media_upload(io.BytesIO(data), PPTX_MIME)))
+    return {"id": file_id(made, f"its hidden .pptx of {pid}"), "name": made.get("name"), "kind": "pptx",
+            "bytes": len(data)}
+
+
+def hide_backup(drive: DriveService, pid: str, exported: Path | None, warnings: list[Json]) -> JsonObject | None:
+    """The Drive backup kept in the app's hidden space, as the context's hidden-storage mode says
+    (`drive_folder.hidden`); None with the mode off, or when the hidden space refused - then a
+    warning says why, and the caller keeps the visible copy it always made: a way back is never
+    lost over where it is kept."""
+    from .drive_folder import hidden
+    mode = hidden()
+    if mode == "off":
+        return None
+    try:
+        if mode == "deck":
+            return hidden_copy(drive, pid)
+        if mode == "pptx":
+            return hidden_pptx(drive, pid, exported)
+        assert_never(mode)
+    except (HttpError, TimeoutError, OSError) as e:
+        why = api_message(e) if isinstance(e, HttpError) else f"{type(e).__name__}: {e}"
+        warnings.append(f"could not keep the backup in the app's hidden Drive storage ({why}); "
+                        f"a visible copy is kept instead")
+        return None
+
+
 def _part_json(p: PartFile) -> JsonObject:
     slides: list[Json] = [n for n in p["slides"]]
     return {"file": p["file"], "slides": slides, "bytes": p["bytes"]}
@@ -566,13 +624,21 @@ def backup_deck(drive: DriveService, pid: str, out: Path, mode: str | None, note
                 warnings.append(f"temporary copies Drive would not delete: {', '.join(leftovers)} "
                                 f"(tools/drive_usage.py --delete-staging)")
     if mode in ("drive", "both"):
-        try:
-            copy = copy_in_drive(drive, pid, None)
-        except HttpError as e:
-            warnings.append(f"could not copy the deck in Drive ({api_message(e)})")
+        made: Json = None
+        exported = result.get("file")
+        kept_hidden = hide_backup(drive, pid, Path(exported) if isinstance(exported, str) else None, warnings)
+        if kept_hidden is not None:
+            result["hidden"] = kept_hidden
+            made = kept_hidden.get("id")
         else:
-            result["drive"] = copy
-            made = copy.get("presentationId")
+            try:
+                copy = copy_in_drive(drive, pid, None)
+            except HttpError as e:
+                warnings.append(f"could not copy the deck in Drive ({api_message(e)})")
+            else:
+                result["drive"] = copy
+                made = copy.get("presentationId")
+        if made is not None:
             try:
                 trimmed = trim_drive_backups(drive, pid, made if isinstance(made, str) else "")
             except HttpError as e:
@@ -631,11 +697,11 @@ class WayBack:
             creds = credentials_for_threads()   # resolved here: a worker inherits no context
         except Exception:  # noqa: BLE001 (no token: the old order, which says so where it fails)
             return
-        from .drive_folder import spec, use_folder
-        where = spec()   # (so is the folder a `--backup drive` copy goes into)
+        from .drive_folder import hidden, spec, use_folder, use_hidden
+        where, hide = spec(), hidden()   # (so is where a `--backup drive` copy goes)
 
         def make() -> JsonObject | None:
-            with use_folder(where):
+            with use_folder(where), use_hidden(hide):
                 return fn(slides_service(creds), drive_service(creds))
 
         self.make = make
@@ -676,8 +742,9 @@ class WayBack:
 def way_back_kept(backup: JsonObject) -> bool:
     """Whether this backup can actually be put back: a .pptx file that is there and not empty, or
     .pptx parts that are all there and hold every slide (`export_parts`), or a Drive copy.
-    `backup_deck` only warns when Drive refuses the export or the copy."""
-    if backup.get("drive"):
+    `backup_deck` only warns when Drive refuses the export or the copy. A copy or .pptx in the app's
+    hidden space (`hidden`) is one too."""
+    if backup.get("drive") or backup.get("hidden"):
         return True
 
     def there(name: Json) -> bool:
@@ -798,13 +865,16 @@ def prune_backups(out: Path, keep: int, older_than_days: float | None, delete: b
 def drive_backups(drive: DriveService, pid: str) -> list[DriveFile]:
     """The Drive copies `copy_in_drive` made of this presentation, oldest first. Found by their
     `b2sBackupOf` tag, so a copy somebody made by hand is never among them (and drive.file only
-    lists what this app made anyway)."""
+    lists what this app made anyway). With hidden storage on, those in the app's hidden space too
+    (`hidden_copy`, `hidden_pptx`): listing that space needs the scope the mode asks for."""
+    from .drive_folder import APPDATA, hidden
     found: list[DriveFile] = []
     token: str | None = None
     query = (f"appProperties has {{ key='b2sBackupOf' and value='{pid}' }} and trashed = false")
+    spaces = "drive" if hidden() == "off" else f"drive,{APPDATA}"
     while True:
-        r = execute(drive.files().list(q=query, spaces="drive", pageSize=100, pageToken=token,
-                                       fields="nextPageToken,files(id,name,createdTime)"))
+        r = execute(drive.files().list(q=query, spaces=spaces, pageSize=100, pageToken=token,
+                                       fields="nextPageToken,files(id,name,createdTime,mimeType,spaces)"))
         found += r.get("files", [])
         token = r.get("nextPageToken")
         if not token:
@@ -900,13 +970,19 @@ def restore_hint(entry: JsonObject, what: str) -> list[str]:
                      "--deck ... --from PART); Slides' File > Import slides puts them together")
     if drive:
         lines.append(f"  backup copy in Drive: {_object(drive).get('url')}")
+    hidden = _object(backup.get("hidden"))
+    if hidden:
+        kind = "a copy of the deck" if hidden.get("kind") == "deck" else "the deck's .pptx"
+        lines.append(f"  backup in the app's hidden Drive storage: {kind}, {hidden.get('name')}")
+        lines.append(f"    put it back with: python tools/deck_backup.py restore --deck {entry.get('out', '<out folder>')} "
+                     f"--hidden {hidden.get('id')}")
     trashed = _array(backup.get("trashed"))
     if trashed:
         lines.append(f"  older backup copies moved to Drive's trash (the newest {DRIVE_BACKUPS_KEPT} are kept; "
                      f"the trash keeps them 30 days): {', '.join(str(t) for t in trashed)}")
     for w in _array(backup.get("warnings")):
         lines.append(f"  warning: {w}")
-    if pid and not file and not parts and not drive:
+    if pid and not file and not parts and not drive and not hidden:
         lines.append("  no backup file was kept (--backup file|drive|both keeps one); Drive's version history "
                      "cannot be read back through the API (docs/sync.md)")
     return lines

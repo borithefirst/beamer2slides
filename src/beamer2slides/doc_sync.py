@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar
 
 from . import doc_ir, doc_merge, google_auth
 from .doc_ir import U16, Block, Ir, Run
-from .gapi import HttpError, is_transient, media_upload, status_of
+from .gapi import HttpError, is_transient, media_upload, message_of, status_of
 from .google_auth import (credentials, credentials_for_threads, docs_service, drive_service,
                           shared_service)
 from .google_types import (DocsBatchUpdateBody, DocsBatchUpdateResponse, DocsRequest,
@@ -349,17 +349,27 @@ def save_drive(drive: DriveService, document: str, base: Mapping[str, object], k
     common case and saves the lookup below - a whole round trip at the end of a sync,
     where there is nothing left to overlap it with. A stale one costs nothing: the
     update is refused, and the lookup happens after all.
+
+    With hidden storage on (`drive_folder.hidden`) a new base goes into the app's hidden space and a
+    visible one is made anew there, the old moved to the trash once the document names the new one
+    (`BASE_HIDDEN_PROPERTY`; as `snapshot.save_drive` does a deck's). A refusal keeps it visible.
     """
+    from .drive_folder import APPDATA, hidden
     data = json.dumps(base, ensure_ascii=False).encode("utf-8")
     if known_fid:
         try:
-            drive.files().update(fileId=known_fid, body={"name": base_name(document)}, fields="id",
-                                 media_body=media_upload(io.BytesIO(data), JSON_MIME)).execute()
-            return known_fid
+            wrote = drive.files().update(fileId=known_fid, body={"name": base_name(document)}, fields="id,spaces",
+                                         media_body=media_upload(io.BytesIO(data), JSON_MIME)).execute()
+            if hidden() == "off" or APPDATA in wrote.get("spaces", []):
+                return known_fid
+            # (written, but where a person sees it: made anew in the hidden space below)
         except HttpError:
             pass  # deleted, or somebody else's now: ask the document below
     info = _read(drive.files().get(fileId=document, fields="name,parents,appProperties"))
     fid = _base_property(info)
+    retire: str | None = None
+    if fid and hidden() != "off" and (info.get("appProperties") or {}).get(BASE_HIDDEN_PROPERTY) != "1":
+        retire, fid = fid, None
     if fid:
         try:
             drive.files().update(fileId=fid, body={"name": base_name(document)}, fields="id",
@@ -367,17 +377,58 @@ def save_drive(drive: DriveService, document: str, base: Mapping[str, object], k
         except HttpError:
             fid = None  # deleted, or somebody else's now: a new one is made below
     if not fid:
-        body: FileBody = {"name": base_name(document), "mimeType": JSON_MIME, "appProperties": {"b2sBaseOf": document}}
+        made = _hidden_base(drive, document, data) if hidden() != "off" else None
+        if made is None and retire:
+            # (the hidden space refused: the visible base it was to replace is written in place)
+            drive.files().update(fileId=retire, body={"name": base_name(document)}, fields="id",
+                                 media_body=media_upload(io.BytesIO(data), JSON_MIME)).execute()
+            return retire
+        in_hiding = made is not None
         parents = info.get("parents")
-        from .drive_folder import place
-        place(body, drive, [p for p in parents if isinstance(p, str)]
-              if isinstance(parents, list) else None)
-        from .google_types import file_id
-        fid = file_id(drive.files().create(body=body, fields="id", media_body=media_upload(
-            io.BytesIO(data), JSON_MIME)).execute(), "the base file")
-        drive.files().update(fileId=document, fields="id",
-                             body={"appProperties": {BASE_PROPERTY: fid}}).execute()
+        fid = made or _visible_base(drive, document, data, [p for p in parents if isinstance(p, str)]
+                                    if isinstance(parents, list) else None)
+        drive.files().update(fileId=document, fields="id", body={"appProperties": {
+            BASE_PROPERTY: fid, BASE_HIDDEN_PROPERTY: "1" if in_hiding else None}}).execute()
+    if retire:
+        try:
+            drive.files().update(fileId=retire, body={"trashed": True}, fields="id").execute()
+        except HttpError as e:
+            print(f"warning: the visible docs base {retire} could not be moved to the trash "
+                  f"({message_of(e)}); the document names the hidden one now")
     return fid
+
+
+BASE_HIDDEN_PROPERTY = "b2sBaseHidden"
+"""Set to "1" on a document whose base file is in the app's hidden Drive space (`save_drive`)."""
+
+
+def _base_body(document: str) -> FileBody:
+    return {"name": base_name(document), "mimeType": JSON_MIME, "appProperties": {"b2sBaseOf": document}}
+
+
+def _hidden_base(drive: DriveService, document: str, data: bytes) -> str | None:
+    """A new base file holding `data` in the app's hidden space: its id, or None (said) where the
+    space refuses it."""
+    from .drive_folder import APPDATA
+    from .google_types import file_id
+    body = _base_body(document)
+    body["parents"] = [APPDATA]
+    try:
+        return file_id(drive.files().create(body=body, fields="id", media_body=media_upload(
+            io.BytesIO(data), JSON_MIME)).execute(), "the base file")
+    except HttpError as e:
+        print(f"warning: the docs base could not go into the app's hidden Drive storage ({message_of(e)}); "
+              f"it is kept where it goes with hidden files off")
+        return None
+
+
+def _visible_base(drive: DriveService, document: str, data: bytes, beside: list[str] | None) -> str:
+    """A new base file holding `data` where `drive_folder.place` puts it: its id."""
+    from .drive_folder import place
+    from .google_types import file_id
+    return file_id(drive.files().create(body=place(_base_body(document), drive, beside), fields="id",
+                                        media_body=media_upload(io.BytesIO(data), JSON_MIME)).execute(),
+                   "the base file")
 
 
 def rename_document(drive: DriveService, document: str, name: str,

@@ -85,6 +85,27 @@ SCOPES = [
 ]
 
 
+def wanted_scopes() -> list[str]:
+    """The scopes this context's work needs: `SCOPES`, and the app's hidden Drive space's while
+    hidden storage is on (`drive_folder.hidden`)."""
+    from .drive_folder import APPDATA_SCOPE, hidden
+    return [*SCOPES, APPDATA_SCOPE] if hidden() != "off" else list(SCOPES)
+
+
+def token_scopes(path: Path) -> list[str]:
+    """The scopes a token file says were granted ([]: it says none, or cannot be read). A token
+    is loaded with these, never with more: a refresh asking for a scope never granted is refused."""
+    import json
+
+    from .json_types import Json
+    try:
+        written: Json = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    scopes = written.get("scopes") if isinstance(written, dict) else None
+    return [s for s in scopes if isinstance(s, str)] if isinstance(scopes, list) else []
+
+
 def restrict_to_current_user(path: Path) -> None:
     """Remove inherited ACLs so only the current user can read the file."""
     if os.name == "nt":
@@ -319,8 +340,17 @@ def credentials() -> Credentials:
     except ImportError:
         raise ModuleNotFoundError(gapi.MISSING) from None
     creds = None
+    wanted = wanted_scopes()
+    granted: list[str] = []
     if TOKEN.exists():
-        creds = UserCredentials.from_authorized_user_file(str(TOKEN), SCOPES)
+        granted = token_scopes(TOKEN) or wanted
+        creds = UserCredentials.from_authorized_user_file(str(TOKEN), granted)
+        if any(s not in granted for s in wanted):
+            # (hidden storage asked for a scope the token never had: the browser asks once more,
+            # for everything granted before as well)
+            print(f"Google access: asking for {', '.join(s for s in wanted if s not in granted)} "
+                  f"as well; a browser opens for the consent")
+            creds = None
     if creds and creds.valid:
         return creds
     if creds and creds.expired and creds.refresh_token:
@@ -336,7 +366,8 @@ def credentials() -> Credentials:
                 f"in a Google Cloud project with the Slides and Drive APIs enabled, download its JSON "
                 f"and save it there (or point $B2S_CLIENT_SECRET at it). See docs/install.md.")
         from google_auth_oauthlib.flow import InstalledAppFlow  # the browser flow, and only here
-        flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET), SCOPES)
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(CLIENT_SECRET), [*wanted, *(s for s in granted if s not in wanted)])
         creds = flow.run_local_server(port=0, open_browser=True)
     TOKEN.parent.mkdir(parents=True, exist_ok=True)
     TOKEN.write_text(creds.to_json(), encoding="utf-8")

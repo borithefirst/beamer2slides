@@ -26,6 +26,20 @@ Backup copies go one level further down, into a "Backups" folder inside that fol
 (`backup_parents`), so the folder a person opens holds their decks and the copies kept of them sit
 out of the way. The base files are named for the app, not the deck (`snapshot.base_name`): a person
 searching Drive for their talk's name finds the talk.
+
+**Hidden storage** (`use_hidden`, `$B2S_HIDDEN_FILES`, the CLI's `--hidden-files`; off by
+default; an agent harness sets the variable - AgentContext's defaulted fields are capped): the base files and the backups go into Drive's
+appDataFolder - the app's own space, which the Drive UI and its search never show (Settings >
+Manage apps lists only its size, and can delete it) - and only the decks and documents are where
+a person looks. It needs one more scope, `drive.appdata` (`APPDATA_SCOPE`, asked for only while
+the mode is on: `google_auth.wanted_scopes`). Two modes, to be measured against each other:
+- `deck`: a backup is a native Slides copy in appDataFolder (`guard.hidden_copy`): no size limit,
+  and a restore from it keeps every objectId, so the restored deck can still be synced;
+- `pptx`: a backup is the deck's .pptx uploaded there (`guard.hidden_pptx`): Drive's 10 MB
+  export limit applies, and a restore is an import, which renumbers the deck's objects.
+Whatever the hidden space refuses (the scope not granted, a file kind it does not take, a deck too
+large to export) is kept where it would have gone with the mode off, with a warning: a way back is
+never lost over where it is kept. A base is read by the id its deck carries, wherever it is.
 """
 
 from __future__ import annotations
@@ -34,7 +48,7 @@ import os
 from collections.abc import Generator, Mapping, MutableMapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TypeVar, overload
+from typing import Literal, TypeVar, overload
 
 from .google_types import DriveService, FileBody, file_id
 from .json_types import as_optional_str
@@ -65,6 +79,42 @@ def use_folder(spec: str | None) -> Generator[None, None, None]:
 def spec() -> str:
     """The folder asked for in this context, else `$B2S_DRIVE_FOLDER`, else `auto`."""
     return _spec.get() or os.environ.get(FOLDER_ENV) or AUTO
+
+
+HIDDEN_ENV = "B2S_HIDDEN_FILES"
+HiddenMode = Literal["off", "deck", "pptx"]
+HIDDEN_MODES: tuple[HiddenMode, ...] = ("off", "deck", "pptx")
+APPDATA = "appDataFolder"
+"""The parent, and the `spaces` value, of the app's hidden Drive space."""
+APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
+
+_hidden: ContextVar[HiddenMode | None] = ContextVar("beamer2slides.hidden_files", default=None)
+
+
+def hidden_mode(text: str) -> HiddenMode:
+    """`text` as a hidden-storage mode; anything else is refused by name."""
+    for mode in HIDDEN_MODES:
+        if mode == text:
+            return mode
+    raise SystemExit(f"hidden files: {text!r} is not one of {', '.join(HIDDEN_MODES)}")
+
+
+@contextmanager
+def use_hidden(mode: HiddenMode | None) -> Generator[None, None, None]:
+    """Keep bases and backups in the app's hidden space inside this block (`mode`; None: as outside)."""
+    token = _hidden.set(mode)
+    try:
+        yield
+    finally:
+        _hidden.reset(token)
+
+
+def hidden() -> HiddenMode:
+    """The hidden-storage mode asked for in this context, else `$B2S_HIDDEN_FILES`, else `off`."""
+    mode = _hidden.get()
+    if mode is not None:
+        return mode
+    return hidden_mode(os.environ.get(HIDDEN_ENV) or "off")
 
 
 def folder_id(drive: DriveService) -> str | None:

@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, NoReturn
 import pytest
 from googleapiclient.errors import HttpError
 
-from beamer2slides import google_types, guard, snapshot, sync_model
-from beamer2slides.google_types import (DriveFile, Empty, FileList, Files, Presentation, Presentations,
+from beamer2slides import drive_folder, google_types, guard, snapshot, sync_model
+from beamer2slides.google_types import (DriveFile, Empty, FileBody, FileList, Files, Presentation, Presentations,
                                         SlidesService, DriveService)
 from beamer2slides.json_types import Json, JsonObject
 from beamer2slides.typing_compat import override
@@ -346,16 +346,24 @@ class FakeFiles(NoFiles):
     @override
     def copy(self, **kw: Unpack[CopyFile]) -> google_types.Request[DriveFile]:
         self.drive.calls.append(("copy", kw["fileId"]))
+        body = kw.get("body") or {}
+        self.drive.bodies.append(body)
         if self.drive.copy_error is not None:
             return Answer(self.drive.copy_error)
-        name = (kw.get("body") or {}).get("name")
+        if self.drive.hidden_error is not None and body.get("parents") == [drive_folder.APPDATA]:
+            return Answer(self.drive.hidden_error)
+        name = body.get("name")
         assert name is not None, "a copy is named"
         return Answer(DriveFile(id="COPY1", name=name))
 
     @override
     def create(self, **kw: Unpack[CreateFile]) -> google_types.Request[DriveFile]:
-        self.drive.calls.append(("create", kw["body"].get("name")))
-        return Answer(DriveFile(id="NEW1"))
+        body = kw["body"]
+        self.drive.calls.append(("create", body.get("name")))
+        self.drive.bodies.append(body)
+        if self.drive.hidden_error is not None and body.get("parents") == [drive_folder.APPDATA]:
+            return Answer(self.drive.hidden_error)
+        return Answer(DriveFile(id="NEW1", name=body.get("name", "")))
 
     @override
     def update(self, **kw: Unpack[UpdateFile]) -> google_types.Request[DriveFile]:
@@ -369,20 +377,24 @@ class FakeFiles(NoFiles):
 
     @override
     def list(self, **kw: Unpack[ListFiles]) -> google_types.Request[FileList]:
-        self.drive.calls.append(("list", None))
+        self.drive.calls.append(("list", kw.get("spaces")))
         return Answer(self.drive.backups)
 
 
 class FakeDrive(NoDrive):
     """Drive holding `file` (the deck), whose export answers `export` and whose copy fails with
     `copy_error` (None: works); `calls` what was asked of it, as (call, file id or name).
-    `backups`: what a listing of the deck's backup copies answers (none, until a test says)."""
+    `backups`: what a listing of the deck's backup copies answers (none, until a test says);
+    `hidden_error`: what the app's hidden space answers a file put there (None: it takes it);
+    `bodies`: every copy's and create's body."""
 
     def __init__(self, file: DriveFile, export: bytes | HttpError, copy_error: HttpError | None) -> None:
         self.file = file
         self.export, self.copy_error = export, copy_error
         self.calls: list[tuple[str, str | None]] = []
         self.backups: FileList | HttpError = FileList(files=[])
+        self.hidden_error: HttpError | None = None
+        self.bodies: list[FileBody] = []
 
     @override
     def files(self) -> Files:
@@ -689,6 +701,57 @@ def test_a_listing_drive_refuses_keeps_the_copy_and_says_so(tmp_path: Path) -> N
     result = guard.backup_deck(drive, "P1", tmp_path / "talk", "drive", "", True, None)
     assert jat(result, "drive", "presentationId") == "COPY1" and "trashed" not in result
     assert "none was moved to the trash" in jstr(result, "warnings", 0) and guard.way_back_kept(result)
+
+
+def test_a_hidden_deck_backup_is_a_native_copy_in_the_apps_hidden_space(tmp_path: Path) -> None:
+    """`--hidden-files deck`: the copy is made where Drive's UI and search never show it, and the
+    restore hint names it by id (`tools/deck_backup.py restore --hidden`)."""
+    drive = a_drive()
+    with drive_folder.use_hidden("deck"):
+        result = guard.backup_deck(drive, "P1", tmp_path / "talk", "drive", "", True, None)
+    assert drive.bodies[-1].get("parents") == [drive_folder.APPDATA]
+    assert (jstr(result, "hidden", "id"), jstr(result, "hidden", "kind")) == ("COPY1", "deck")
+    assert "drive" not in result and guard.way_back_kept(result)
+    assert ("list", "drive,appDataFolder") in drive.calls   # (its older copies are trimmed there too)
+    hint = "\n".join(guard.restore_hint({"presentationId": "P1", "backup": result}, "sync"))
+    assert "--hidden COPY1" in hint and "no backup file" not in hint
+
+
+def test_a_hidden_pptx_backup_uploads_the_export_this_backup_already_made(tmp_path: Path) -> None:
+    drive = a_drive()
+    with drive_folder.use_hidden("pptx"):
+        result = guard.backup_deck(drive, "P1", tmp_path / "talk", "both", "", True, None)
+    assert [c for c in drive.calls if c[0] in ("export", "copy")] == [("export", "P1")]
+    made = drive.bodies[-1]
+    assert (made.get("parents"), made.get("mimeType")) == ([drive_folder.APPDATA], guard.PPTX_MIME)
+    assert (jstr(result, "hidden", "kind"), jnum(result, "hidden", "bytes")) == ("pptx", 4)
+    assert jstr(result, "hidden", "name").endswith(".pptx") and "file" in result
+
+
+def test_a_hidden_space_that_refuses_leaves_the_visible_copy(tmp_path: Path) -> None:
+    """No drive.appdata grant, a file kind the space does not take, an export over 10 MB: the way
+    back is kept where it went with the mode off, and the person is told why."""
+    for mode, drive in (("deck", a_drive()), ("pptx", a_drive()),
+                        ("pptx", FakeDrive(talk(False), http_error(403, "exportSizeLimitExceeded"), None))):
+        drive.hidden_error = http_error(403, "insufficientScopes")
+        with drive_folder.use_hidden(drive_folder.hidden_mode(mode)):
+            result = guard.backup_deck(drive, "P1", tmp_path / "talk", "drive", "", True, None)
+        assert jat(result, "drive", "presentationId") == "COPY1" and "hidden" not in result, mode
+        assert drive.bodies[-1].get("parents") != [drive_folder.APPDATA]
+        assert "hidden Drive storage" in jstr(result, "warnings", 0) and guard.way_back_kept(result)
+
+
+def test_with_hidden_files_off_the_listing_stays_in_drive(tmp_path: Path) -> None:
+    drive = a_drive()
+    with drive_folder.use_hidden("off"):
+        guard.backup_deck(drive, "P1", tmp_path / "talk", "drive", "", True, None)
+    assert ("list", "drive") in drive.calls
+
+
+def test_a_hidden_mode_is_one_of_three() -> None:
+    assert [drive_folder.hidden_mode(m) for m in ("off", "deck", "pptx")] == ["off", "deck", "pptx"]
+    with pytest.raises(SystemExit, match="not one of"):
+        drive_folder.hidden_mode("yes")
 
 
 def a_backup(out: Path, name: str, age_days: float) -> JsonObject:
