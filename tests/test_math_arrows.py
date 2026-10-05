@@ -332,3 +332,24 @@ def test_an_arrows_labels_are_in_its_picture():
     assert "120" not in text and "vacuo" not in text and "Anneal the crystals" in text
     (hole,) = holes(slide)
     assert hole["bbox"][1] < 92.5 - 0.75 * 7.97 + 0.5 and hole["bbox"][3] > 106.5
+
+
+def test_a_display_arrows_labels_are_in_the_formulas_picture():
+    """real_beamer-derived-cat s7: Ch(Ab) --Módulo homotopía--> K(Ab) as a display, each label
+    words of the text face over its \\xrightarrow. The labels stayed text and the formula under
+    them, tangled with their lines, was left in the background: words movable without their
+    arrows. The whole display is one picture."""
+    p = Page()
+    p.words("The construction takes two steps:", 30, 60)
+    for text, font, x0, w in (("Ch", "CMBX12", 50.0, 15.8), ("(", "CMR12", 66.2, 4.0), ("Ab", "CMBX12", 70.7, 15.3),
+                              (")", "CMR12", 86.0, 4.0), ("−−−−−−−−−−−−−−→", "CMSY10", 93.9, 75.3),
+                              ("K", "CMBX12", 170.0, 11.3), ("(", "CMR12", 181.9, 4.0), ("Ab", "CMBX12", 186.4, 15.3),
+                              (")", "CMR12", 201.7, 4.0)):
+        p.text(text, x0, 88.0, 11.96, font=font, w=w)
+    p.text("Módulo homotopía", 96.6, 79.0, 8.77, font="CMR9", w=68.5)
+    p.words("The first step is natural and convenient for the reader.", 30, 130)
+    body_text(p)
+    slide = deck(p)["slides"][0]
+    assert "homotop" not in runs_text(slide["elements"]) and "two steps" in runs_text(slide["elements"])
+    (formula,) = [e for e in images(slide["elements"]) if e.get("role") == "math"]
+    assert formula["bbox"][1] < 79.0 - 0.7 * 8.77 and formula["bbox"][2] > 205.0

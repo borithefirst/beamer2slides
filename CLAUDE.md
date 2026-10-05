@@ -212,7 +212,8 @@ a line's added spaces only if Slides sets it within 1% of its PDF width, `emit_t
   (`wrapped_formula`) but its own paragraph (`wrapped_formulas_apart`), one hole when it has no
   prose and holds symbols Slides was never measured on (`unmeasured_symbols`; an operator
   written in its measured face, `fonts.written_advance`, is measured, as in `guessed_chars`); a long arrow
-  (⟶ ⟹ ⟺ ↪, mhchem) is a hole at its PDF length, its labels in its picture (`long_arrow_groups`);
+  (⟶ ⟹ ⟺ ↪, mhchem) is a hole at its PDF length, its labels in its picture (`long_arrow_groups`),
+  and a display formula's arrow labels, words or not, are in the formula's picture;
   a figure label beside a column is no line (`figure_label_apart`), nor one of a row of like
   labels a plot title (`in_label_row`). A list's balls and a photo under a hole stay whole
   whatever box reaches them; a hole's picture on a photo is its glyphs on a clear ground

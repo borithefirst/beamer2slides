@@ -678,12 +678,14 @@ class ReasonsMixin(FiguresMixin):
         # small lines of their own inside the arrow's length: its picture's, or they stayed text
         # printed over the formula Slides sets at other widths (r1_sci_v3 s3). A label between
         # two arrows is the nearer one's (r1_math_v2 s7: Lp over the third line's arrow is also
-        # just under the second's).
+        # just under the second's). So are those of an arrow in a display formula, which is one
+        # picture: as words they stayed text and the formula under them was left in the
+        # background, the labels movable without their arrows (real_beamer-derived-cat s7).
         near: dict[int, tuple[float, Line, Line]] = {}
         for host in lines:
             size, held = host.size, {id(s) for h in host.holes for s in h}
             for g in long_arrow_groups(host.content):
-                if not any(id(s) in held for s in g):
+                if host.reason != "math" and not any(id(s) in held for s in g):
                     continue
                 arrow = union_all(s.rect for s in g)
                 for l in lines:

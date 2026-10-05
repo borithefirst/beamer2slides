@@ -5499,3 +5499,12 @@ class on a fresh conversion before working on it.
   62 built PDFs only those pages changed. Open: decision-tree s27's eqnarray rows (a CMMI decimal
   point splits digit runs, sized apart; emit run sizes) and cat s3/s17's blackboard-bold
   superscripts sitting tight (script placement): both need live measurement.
+  (6, 2026-10-05) (1) mended the symptom; the cause was the split. cat s7's display
+  Ch(Ab) --Módulo homotopía--> K(Ab) --Invertir casi-isos--> D(Ab) has labels in the text face:
+  they stayed native text boxes, and the formula under them, its picture blocked by their lines,
+  was left in the background. The labels moved without their arrows, and the formula could be
+  neither moved nor synced. The `\xrightarrow` label rule (`classify_reasons`, labels a small
+  line within an arrow's length half an em over or under it) took only arrows in an inline
+  hole; it now also takes those of a display formula's line (reason `math`), so the labels
+  join the formula and it is one picture, as the slide's other display already was. Over 27
+  real and 62 built PDFs only that page changed.
