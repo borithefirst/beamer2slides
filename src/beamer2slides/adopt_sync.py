@@ -828,7 +828,7 @@ def store(base: Mapping[str, object], out: Path, drive: DriveService | None) -> 
     """Write the base where `sync --deck <folder>` looks for it. Drive only when asked for."""
     path = snapshot.save_local(base, Path(out))
     if drive is not None:
-        snapshot.save_drive(drive, base, None, None)
+        snapshot.save_drive(drive, base, None)
     return path
 
 

@@ -28,6 +28,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -493,14 +494,17 @@ def write_whole(path: Path, data: bytes) -> None:
 
 
 def copy_in_drive(drive: DriveService, pid: str, name: str | None) -> JsonObject:
-    """A Drive copy of the presentation, which stays a full deck with its own URL. `name`: the
-    copy's (None: the deck's own, stamped as a backup)."""
+    """A Drive copy of the presentation, which stays a full deck with its own URL, in the Backups
+    folder (`drive_folder.backup_parents`). `name`: the copy's (None: the deck's own, stamped as a
+    backup)."""
     info = execute(drive.files().get(fileId=pid, fields="name,parents"))
     body: FileBody = {"name": name or f"{info.get('name', 'deck')} (beamer2slides backup "
                                       f"{time.strftime('%Y-%m-%d %H:%M')})",
                       "appProperties": {"b2sBackupOf": pid}}
-    from .drive_folder import place
-    place(body, drive, info.get("parents"))
+    from .drive_folder import backup_parents
+    where = backup_parents(drive, info.get("parents"))
+    if where:
+        body["parents"] = where
     copy = execute(drive.files().copy(fileId=pid, body=body, fields="id,name"))
     cid = file_id(copy, f"its copy of {pid}")
     return {"presentationId": cid, "name": copy.get("name"), "url": deck_url(cid)}
@@ -563,9 +567,21 @@ def backup_deck(drive: DriveService, pid: str, out: Path, mode: str | None, note
                                 f"(tools/drive_usage.py --delete-staging)")
     if mode in ("drive", "both"):
         try:
-            result["drive"] = copy_in_drive(drive, pid, None)
+            copy = copy_in_drive(drive, pid, None)
         except HttpError as e:
             warnings.append(f"could not copy the deck in Drive ({api_message(e)})")
+        else:
+            result["drive"] = copy
+            made = copy.get("presentationId")
+            try:
+                trimmed = trim_drive_backups(drive, pid, made if isinstance(made, str) else "")
+            except HttpError as e:
+                warnings.append(f"could not list the deck's older backup copies ({api_message(e)}); "
+                                f"none was moved to the trash")
+            else:
+                if trimmed.moved:
+                    result["trashed"] = [n for n in trimmed.moved]
+                warnings += [f"could not move {r} to the trash" for r in trimmed.refused]
     if note:
         result["note"] = note
     return result
@@ -812,16 +828,49 @@ def prune_drive_backups(drive: DriveService, pid: str, keep: int, older_than_day
     listed: list[Json] = [as_json(c, "a Drive backup") for c in doomed]
     result: JsonObject = {"copies": len(copies), "doomed": listed, "trashed": False, "warnings": warnings}
     if trash and doomed:
-        for c in doomed:
-            cid = c.get("id")
-            if cid is None:   # (listed with `files(id,...)`: never so)
-                continue
-            try:
-                execute(drive.files().update(fileId=cid, body={"trashed": True}, fields="id"))
-            except HttpError as e:
-                warnings.append(f"could not move {c.get('name', cid)} to the trash ({api_message(e)})")
+        warnings += [f"could not move {r} to the trash" for r in trash_copies(drive, doomed).refused]
         result["trashed"] = True
     return result
+
+
+DRIVE_BACKUPS_KEPT = 3
+"""How many Drive copies of one deck a backup leaves: the one it made and the two before it. Every
+sync whose way back is a Drive copy (a detached agent's `auto`, `--backup drive`) made one more full
+deck, and a person searching Drive for their talk found it once per sync; the older ones now go to
+Drive's trash as each new one is made, where they stay restorable for 30 days."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class Trashed:
+    """What moving Drive copies to the trash did: the names of those moved, and of those Drive
+    refused, each with why."""
+    moved: list[str]
+    refused: list[str]
+
+
+def trash_copies(drive: DriveService, copies: Sequence[DriveFile]) -> Trashed:
+    """Move `copies` to Drive's trash - never a permanent delete."""
+    moved: list[str] = []
+    refused: list[str] = []
+    for c in copies:
+        cid = c.get("id")
+        if cid is None:   # (listed with `files(id,...)`: never so)
+            continue
+        name = c.get("name", cid)
+        try:
+            execute(drive.files().update(fileId=cid, body={"trashed": True}, fields="id"))
+            moved.append(name)
+        except HttpError as e:
+            refused.append(f"{name} ({api_message(e)})")
+    return Trashed(moved=moved, refused=refused)
+
+
+def trim_drive_backups(drive: DriveService, pid: str, made: str) -> Trashed:
+    """After `copy_in_drive` made `made`: the deck's older copies past `DRIVE_BACKUPS_KEPT` go to
+    the trash. The new copy is never one of them, even when Drive's listing does not show it yet
+    (then one more old copy stays, never one fewer)."""
+    older = [c for c in drive_backups(drive, pid) if c.get("id") != made]
+    return trash_copies(drive, older[:max(0, len(older) - (DRIVE_BACKUPS_KEPT - 1))])
 
 
 def restore_hint(entry: JsonObject, what: str) -> list[str]:
@@ -851,6 +900,10 @@ def restore_hint(entry: JsonObject, what: str) -> list[str]:
                      "--deck ... --from PART); Slides' File > Import slides puts them together")
     if drive:
         lines.append(f"  backup copy in Drive: {_object(drive).get('url')}")
+    trashed = _array(backup.get("trashed"))
+    if trashed:
+        lines.append(f"  older backup copies moved to Drive's trash (the newest {DRIVE_BACKUPS_KEPT} are kept; "
+                     f"the trash keeps them 30 days): {', '.join(str(t) for t in trashed)}")
     for w in _array(backup.get("warnings")):
         lines.append(f"  warning: {w}")
     if pid and not file and not parts and not drive:

@@ -53,6 +53,7 @@ class FakeDrive(NoFiles, NoDrive):
         self.created: list[Mapping[str, object]] = []
         self.pointed: list[tuple[str, Mapping[str, str | None]]] = []
         self.written: list[tuple[str, bytes]] = []
+        self.names: dict[str, str] = {}
 
     # the client's shape: drive.files().get(...).execute()
     @override
@@ -81,6 +82,8 @@ class FakeDrive(NoFiles, NoDrive):
                 raise http_error(404)
             self.blobs[fid] = media_body.getbytes(0, media_body.size())
             self.written.append((fid, self.blobs[fid]))
+        if body and "name" in body:
+            self.names[fid] = body["name"]
         if body and "appProperties" in body:
             props = self.props.setdefault(fid, {})
             for k, v in body["appProperties"].items():
@@ -97,6 +100,7 @@ class FakeDrive(NoFiles, NoDrive):
         assert media_body is not None, "the base goes up with its content"
         fid = f"base-{len(self.created) + 1}"
         self.created.append(body)
+        self.names[fid] = body.get("name", "")
         self.props[fid] = {k: v for k, v in body.get("appProperties", {}).items() if v is not None}
         self.blobs[fid] = media_body.getbytes(0, media_body.size())
         return Answer(DriveFile(id=fid))
@@ -238,7 +242,7 @@ def test_a_flag_drive_will_not_take_is_said_so_the_base_can_go_up_instead(tmp_pa
 
 def test_saving_updates_the_file_the_deck_points_at(tmp_path: Path) -> None:
     drive = drive_with_base(base(PID, 1), PID)
-    fid = snapshot.save_drive(drive, base(PID, 2), None, None)
+    fid = snapshot.save_drive(drive, base(PID, 2), None)
     assert (fid, drive.created) == ("base-0", [])
     assert json.loads(gzip.decompress(drive.blobs["base-0"]))["generation"] == 2
     assert loaded(snapshot.load_base(PID, None, drive, None, None))[1]["generation"] == 2
@@ -272,7 +276,7 @@ def test_a_gzip_base_is_read() -> None:
 
 def test_what_goes_up_is_gzip_of_the_same_json_and_far_smaller() -> None:
     drive = drive_with_base(big_base(1), PID)
-    snapshot.save_drive(drive, big_base(2), None, None)
+    snapshot.save_drive(drive, big_base(2), None)
     up = drive.written[-1][1]
     assert up.startswith(snapshot.GZIP_MAGIC)
     plain = json.dumps(big_base(2), ensure_ascii=False).encode("utf-8")
@@ -284,15 +288,27 @@ def test_what_goes_up_is_gzip_of_the_same_json_and_far_smaller() -> None:
 def test_an_old_plain_file_is_overwritten_in_place_and_read_back() -> None:
     """The deck keeps naming the same file: a plain one is replaced by the gzip form, not orphaned."""
     drive = drive_with_base(big_base(5), PID)
-    assert snapshot.save_drive(drive, big_base(6), None, None) == "base-0" and drive.created == []
+    assert snapshot.save_drive(drive, big_base(6), None) == "base-0" and drive.created == []
     assert loaded(snapshot.load_base(PID, None, drive, None, None))[1] == big_base(6)
 
 
 def test_a_new_base_file_says_what_it_holds() -> None:
     drive = no_drive_base()
-    snapshot.save_drive(drive, base(PID, 1), "Talk", None)
+    snapshot.save_drive(drive, base(PID, 1), None)
     assert drive.created[0]["mimeType"] == snapshot.BASE_MIME == "application/gzip"
-    assert str(drive.created[0]["name"]).endswith("sync base.json.gz")
+    assert drive.created[0]["name"] == snapshot.base_name(PID) == "beamer2slides sync base (deck-1).json.gz"
+
+
+def test_the_base_is_not_named_after_the_deck() -> None:
+    """A person searching Drive for their talk ("A talk") found its base beside it: the file is
+    named for the app now, and one named the old way is renamed when the base is next stored."""
+    drive = no_drive_base()
+    fid = snapshot.save_drive(drive, base(PID, 1), None)
+    assert "A talk" not in drive.names[fid]
+    old = drive_with_base(base(PID, 1), PID)
+    old.names["base-0"] = "A talk - beamer2slides sync base.json.gz"
+    snapshot.save_drive(old, base(PID, 2), None)
+    assert old.names["base-0"] == snapshot.base_name(PID) and old.created == []
 
 
 def test_a_broken_gzip_base_is_no_base_and_the_cache_stands_in(tmp_path: Path) -> None:
@@ -315,7 +331,7 @@ def test_a_base_given_as_text_is_still_read() -> None:
 
 def test_saving_creates_the_file_and_points_the_deck_at_it(tmp_path: Path) -> None:
     drive = no_drive_base()
-    fid = snapshot.save_drive(drive, base(PID, 1), None, None)
+    fid = snapshot.save_drive(drive, base(PID, 1), None)
     assert drive.created and drive.created[0]["parents"] == ["folder-1"]  # (beside the presentation)
     assert drive.props[PID][snapshot.BASE_PROPERTY] == fid
     assert loaded(snapshot.load_base(PID, None, drive, None, None))[1]["generation"] == 1
@@ -324,7 +340,7 @@ def test_saving_creates_the_file_and_points_the_deck_at_it(tmp_path: Path) -> No
 def test_a_vanished_base_file_is_replaced_not_lost(tmp_path: Path) -> None:
     """The recorded file was deleted: the save makes a new one and repoints the presentation."""
     drive = FakeDrive({PID: {snapshot.BASE_PROPERTY: "base-gone"}}, {}, True)
-    fid = snapshot.save_drive(drive, base(PID, 4), None, None)
+    fid = snapshot.save_drive(drive, base(PID, 4), None)
     assert fid != "base-gone" and drive.props[PID][snapshot.BASE_PROPERTY] == fid
     assert loaded(snapshot.load_base(PID, None, drive, None, None))[1]["generation"] == 4
 

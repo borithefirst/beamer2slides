@@ -1430,11 +1430,19 @@ def read_stored_base(data: bytes | str) -> Json:
     return parsed
 
 
-def save_drive(drive: DriveService, base: Mapping[str, object], title: str | None, info: DriveFile | None) -> str:
+def base_name(pid: str) -> str:
+    """The name of a deck's base file in Drive: the app's, and the start of the deck's id to tell
+    them apart. Until 2026-10-05 it began with the deck's name, so a person searching Drive for
+    their talk found its base beside it; `save_drive` renames an old one when it next stores it."""
+    return f"beamer2slides sync base ({pid[:8]}).json.gz"
+
+
+def save_drive(drive: DriveService, base: Mapping[str, object], info: DriveFile | None) -> str:
     """The base as a file next to the presentation (drive.file scope), its id in the
-    presentation's appProperties.b2sBase. Returns the file id. The file holds the base's JSON
-    gzip-compressed (`stored_base`); a file an older version wrote as plain JSON is overwritten in
-    place, and read in either form (`read_stored_base`).
+    presentation's appProperties.b2sBase, named `base_name`. Returns the file id. The file holds
+    the base's JSON gzip-compressed (`stored_base`); a file an older version wrote as plain JSON or
+    under the deck's name is overwritten and renamed in place, and read in either form
+    (`read_stored_base`).
 
     `info`: the presentation's name, parents and appProperties, where a caller has already read
     them (`deck_info` - they need nothing but the id, so a caller may fetch them while it is doing
@@ -1451,13 +1459,12 @@ def save_drive(drive: DriveService, base: Mapping[str, object], title: str | Non
     fid = base_file(info)
     if fid:
         try:
-            execute(drive.files().update(fileId=fid, media_body=media_upload(io.BytesIO(data), BASE_MIME),
-                                         fields="id"))
+            execute(drive.files().update(fileId=fid, body={"name": base_name(pid)},
+                                         media_body=media_upload(io.BytesIO(data), BASE_MIME), fields="id"))
         except HttpError:
             fid = None
     if not fid:
-        body: FileBody = {"name": f"{title or info.get('name', pid)} - beamer2slides sync base.json.gz",
-                          "mimeType": BASE_MIME, "appProperties": {"b2sBaseOf": pid}}
+        body: FileBody = {"name": base_name(pid), "mimeType": BASE_MIME, "appProperties": {"b2sBaseOf": pid}}
         from .drive_folder import place
         place(body, drive, info.get("parents"))
         fid = file_id(execute(drive.files().create(body=body, fields="id", media_body=media_upload(
@@ -1592,7 +1599,7 @@ def store_base(base: Mapping[str, object], out: Path, drive: DriveService | None
         return "no Drive service"
     fail_at(f"{label}:drive")
     try:
-        save_drive(drive, base, None, info)
+        save_drive(drive, base, info)
     except (HttpError, OSError) as e:
         return f"{type(e).__name__}: {e}"
     return None

@@ -873,6 +873,9 @@ def _report_way_back(j: Job, note: "JsonObject | None") -> None:
         j.artifact(as_str(backup["file"], "the backup's file"), "pptx", "the deck as it was before this sync")
     if backup.get("drive"):
         j.data["backup_copy"] = backup["drive"]
+    if backup.get("trashed"):
+        # (older copies of this deck, past the newest guard.DRIVE_BACKUPS_KEPT: in Drive's trash for 30 days)
+        j.data["backups_trashed"] = backup["trashed"]
     j.data["backup_mode"] = backup.get("mode")
 
 

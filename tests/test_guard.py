@@ -359,7 +359,7 @@ class FakeFiles(NoFiles):
 
     @override
     def update(self, **kw: Unpack[UpdateFile]) -> google_types.Request[DriveFile]:
-        self.drive.calls.append(("update", kw["fileId"]))
+        self.drive.calls.append(("trash" if kw.get("body") == {"trashed": True} else "update", kw["fileId"]))
         return Answer(DriveFile(id=kw["fileId"]))
 
     @override
@@ -367,15 +367,22 @@ class FakeFiles(NoFiles):
         self.drive.calls.append(("delete", kw["fileId"]))
         return Answer(Empty())
 
+    @override
+    def list(self, **kw: Unpack[ListFiles]) -> google_types.Request[FileList]:
+        self.drive.calls.append(("list", None))
+        return Answer(self.drive.backups)
+
 
 class FakeDrive(NoDrive):
     """Drive holding `file` (the deck), whose export answers `export` and whose copy fails with
-    `copy_error` (None: works); `calls` what was asked of it, as (call, file id or name)."""
+    `copy_error` (None: works); `calls` what was asked of it, as (call, file id or name).
+    `backups`: what a listing of the deck's backup copies answers (none, until a test says)."""
 
     def __init__(self, file: DriveFile, export: bytes | HttpError, copy_error: HttpError | None) -> None:
         self.file = file
         self.export, self.copy_error = export, copy_error
         self.calls: list[tuple[str, str | None]] = []
+        self.backups: FileList | HttpError = FileList(files=[])
 
     @override
     def files(self) -> Files:
@@ -647,6 +654,41 @@ def test_a_refused_export_falls_back_to_a_drive_copy(tmp_path: Path) -> None:
     result = guard.backup_deck(drive, "P1", tmp_path / "talk", "file", "", True, None)
     assert "file" not in result and jat(result, "drive", "presentationId") == "COPY1"
     assert result["warnings"] and "10 MB" in jstr(result, "warnings", 0)
+
+
+def backup_copy(cid: str, day: int) -> DriveFile:
+    return DriveFile(id=cid, name=f"Talk (beamer2slides backup {day})", createdTime=f"2026-09-{day:02d}T00:00:00Z")
+
+
+def test_a_drive_backup_leaves_the_newest_copies_and_trashes_the_rest(tmp_path: Path) -> None:
+    """Every sync whose way back is a Drive copy made one more full deck, and a search for the
+    talk found them all: the newest `DRIVE_BACKUPS_KEPT` stay, the rest go to the trash (never a
+    permanent delete), and the person is told which."""
+    drive = a_drive()
+    drive.backups = FileList(files=[backup_copy("COPY1", 30), backup_copy("C3", 3), backup_copy("C1", 1),
+                                    backup_copy("C4", 4), backup_copy("C2", 2)])
+    result = guard.backup_deck(drive, "P1", tmp_path / "talk", "drive", "", True, None)
+    assert guard.DRIVE_BACKUPS_KEPT == 3
+    assert [c for c in drive.calls if c[0] in ("trash", "delete")] == [("trash", "C1"), ("trash", "C2")]
+    assert jarr(result, "trashed") == ["Talk (beamer2slides backup 1)", "Talk (beamer2slides backup 2)"]
+    hint = "\n".join(guard.restore_hint({"presentationId": "P1", "backup": result}, "sync"))
+    assert "moved to Drive's trash" in hint and "backup 2" in hint and "COPY1" in hint
+
+
+def test_a_new_copy_drive_does_not_list_yet_is_never_trashed(tmp_path: Path) -> None:
+    """Drive's listing may not show the copy just made: then one more old copy stays, never one fewer."""
+    drive = a_drive()
+    drive.backups = FileList(files=[backup_copy("C1", 1), backup_copy("C2", 2), backup_copy("C3", 3)])
+    guard.backup_deck(drive, "P1", tmp_path / "talk", "drive", "", True, None)
+    assert [c for c in drive.calls if c[0] == "trash"] == [("trash", "C1")]
+
+
+def test_a_listing_drive_refuses_keeps_the_copy_and_says_so(tmp_path: Path) -> None:
+    drive = a_drive()
+    drive.backups = http_error(403, "insufficientFilePermissions")
+    result = guard.backup_deck(drive, "P1", tmp_path / "talk", "drive", "", True, None)
+    assert jat(result, "drive", "presentationId") == "COPY1" and "trashed" not in result
+    assert "none was moved to the trash" in jstr(result, "warnings", 0) and guard.way_back_kept(result)
 
 
 def a_backup(out: Path, name: str, age_days: float) -> JsonObject:

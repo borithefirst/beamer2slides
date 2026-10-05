@@ -83,10 +83,10 @@ class _Drive(_DriveService):
         def run() -> DriveFile:
             answer = inner.execute()
             # Drive and Docs are two views of one document: a rename shows in both.
-            if "name" in body:
+            # (the base file is renamed to its own name as it is stored: no rename of the document)
+            if "name" in body and kw["fileId"] == self.document:
                 self.names.append(body["name"])
-                if kw["fileId"] == self.document:
-                    self.world.title = body["name"]
+                self.world.title = body["name"]
             return answer
         return _Reply(run)
 

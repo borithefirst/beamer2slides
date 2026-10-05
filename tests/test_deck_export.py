@@ -394,7 +394,11 @@ def test_a_backup_too_large_to_export_whole_is_kept_in_parts(tmp_path: Path, mon
         def copy_in_drive(drive: DriveService, pid: str, name: str | None) -> JsonObject:
             copied.append(pid)
             return {"url": "u"}
+
+        def trim_drive_backups(drive: DriveService, pid: str, made: str) -> guard.Trashed:
+            return guard.Trashed(moved=[], refused=[])
         monkeypatch.setattr(guard, "copy_in_drive", copy_in_drive)
+        monkeypatch.setattr(guard, "trim_drive_backups", trim_drive_backups)
         rebuild = guard.backup_deck(world.drive, "P", out, "file", "", True, world.slides)
         assert copied == ["P"] and rebuild["drive"] == {"url": "u"} and len(as_array(rebuild["parts"], "parts")) == 2
         result = guard.backup_deck(world.drive, "P", out, "file", "", False, world.slides)   # a sync's

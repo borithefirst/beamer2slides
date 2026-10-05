@@ -21,6 +21,11 @@ nothing else. `use_folder(spec)` (per context), `$B2S_DRIVE_FOLDER`, the CLI's `
 
 A deck found by its URL keeps finding its base wherever either is: the base is looked up by the
 id the deck carries, never by folder.
+
+Backup copies go one level further down, into a "Backups" folder inside that folder
+(`backup_parents`), so the folder a person opens holds their decks and the copies kept of them sit
+out of the way. The base files are named for the app, not the deck (`snapshot.base_name`): a person
+searching Drive for their talk's name finds the talk.
 """
 
 from __future__ import annotations
@@ -38,6 +43,9 @@ FOLDER_ENV = "B2S_DRIVE_FOLDER"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 HOME_PROPERTY = "b2sHome"
 HOME_NAME = "beamer2slides"
+BACKUPS_PROPERTY = "b2sBackups"
+"""The appProperty of a folder backup copies go into; its value is the id of the folder it is in."""
+BACKUPS_NAME = "Backups"
 AUTO = "auto"
 NONE = "none"
 
@@ -103,6 +111,34 @@ def parents(drive: DriveService, beside: list[str] | None) -> list[str] | None:
     if fid:
         return [fid]
     return list(beside) if beside else None
+
+
+def backup_parents(drive: DriveService, beside: list[str] | None) -> list[str] | None:
+    """What a backup copy's `parents` should be: the "Backups" folder inside the folder new files
+    go into, found by its `b2sBackups` appProperty (the id of the folder it is in, so it is that
+    folder's own) and made the first time. With no folder (`none`, or none could be had) the copy
+    goes beside its deck, as it always did; a Backups folder Drive will not list or make leaves the
+    copy in the folder itself, with a warning - a backup is never lost over where it lands."""
+    from .gapi import HttpError
+    from .gslides import execute
+    fid = folder_id(drive)
+    if not fid:
+        return list(beside) if beside else None
+    q = (f"appProperties has {{ key='{BACKUPS_PROPERTY}' and value='{fid}' }} and mimeType='{FOLDER_MIME}' "
+         f"and trashed=false")
+    try:
+        found = execute(drive.files().list(q=q, spaces="drive", fields="files(id)", pageSize=10)).get("files", [])
+        for folder in found:
+            bid = folder.get("id")
+            if bid:
+                return [bid]
+        made = execute(drive.files().create(body={"name": BACKUPS_NAME, "mimeType": FOLDER_MIME, "parents": [fid],
+                                                  "appProperties": {BACKUPS_PROPERTY: fid}}, fields="id"))
+        return [file_id(made, "the backups folder")]
+    except (HttpError, OSError) as e:
+        print(f"warning: no '{BACKUPS_NAME}' folder in Drive ({type(e).__name__}: {e}); the backup copy goes "
+              f"into the folder itself")
+        return [fid]
 
 
 Body = TypeVar("Body", bound=Mapping[str, object])

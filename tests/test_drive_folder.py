@@ -5,13 +5,14 @@ cannot use refused before anything is created. No Google calls."""
 from __future__ import annotations
 
 import io
+import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import pytest
 
 from beamer2slides import drive_folder, guard, snapshot
-from beamer2slides.drive_folder import FOLDER_MIME, HOME_PROPERTY
+from beamer2slides.drive_folder import BACKUPS_NAME, BACKUPS_PROPERTY, FOLDER_MIME, HOME_PROPERTY
 from beamer2slides.google_types import DriveFile, FileBody, FileList, Files, Presentation, Presentations
 from beamer2slides.typing_compat import override
 
@@ -56,9 +57,10 @@ class Drive(NoFiles, NoDrive):
     @override
     def list(self, **kw: Unpack[ListFiles]) -> google_types.Request[FileList]:
         q = kw.get("q", "")
-        assert f"key='{HOME_PROPERTY}'" in q and "trashed=false" in q
+        tag = re.search(r"key='(\w+)' and value='([^']*)'", q)
+        assert tag and tag[1] in (HOME_PROPERTY, BACKUPS_PROPERTY) and "trashed=false" in q
         return Answer(FileList(files=[DriveFile(id=i) for i, f in self.files_.items()
-                                      if (f.get("appProperties") or {}).get(HOME_PROPERTY) == "1"
+                                      if (f.get("appProperties") or {}).get(tag[1]) == tag[2]
                                       and not f.get("trashed")]))
 
     @override
@@ -142,13 +144,41 @@ def test_a_folder_the_app_cannot_see_is_refused_by_name() -> None:
 def test_the_base_and_a_backup_copy_go_into_the_folder_asked_for() -> None:
     drive = Drive({"DECK": {"name": "Talk", "parents": ["P0"]}, "FOLD": {"mimeType": FOLDER_MIME}})
     with drive_folder.use_folder("none"):
-        snapshot.save_drive(drive, {"presentationId": "DECK"}, None, {"name": "Talk", "parents": ["P0"]})
+        snapshot.save_drive(drive, {"presentationId": "DECK"}, {"name": "Talk", "parents": ["P0"]})
     assert drive.created[-1].get("parents") == ["P0"]                 # beside the deck, as before
     with drive_folder.use_folder("FOLD"):
-        snapshot.save_drive(drive, {"presentationId": "DECK"}, None, {"name": "Talk", "parents": ["P0"]})
+        snapshot.save_drive(drive, {"presentationId": "DECK"}, {"name": "Talk", "parents": ["P0"]})
         assert drive.created[-1].get("parents") == ["FOLD"]
+
+
+def test_a_backup_copy_goes_into_the_folders_backups_folder() -> None:
+    """The folder a person opens holds their decks; the copies kept of them sit one level down,
+    in a "Backups" folder made the first time and found again by its tag (not its name)."""
+    drive = Drive({"DECK": {"name": "Talk", "parents": ["P0"]}, "FOLD": {"mimeType": FOLDER_MIME}})
+    with drive_folder.use_folder("FOLD"):
         guard.copy_in_drive(drive, "DECK", None)
-        assert drive.created[-1].get("parents") == ["FOLD"] and "backup" in drive.created[-1].get("name", "")
+        folder, copy = drive.created
+        assert (folder.get("name"), folder.get("parents"), folder.get("mimeType")) == (BACKUPS_NAME, ["FOLD"], FOLDER_MIME)
+        assert copy.get("parents") == ["F1"] and "backup" in copy.get("name", "")
+        drive.files_["F1"]["name"] = "renamed by the person"
+        guard.copy_in_drive(drive, "DECK", None)
+        assert len(drive.created) == 3 and drive.created[-1].get("parents") == ["F1"]
+    with drive_folder.use_folder("none"):
+        guard.copy_in_drive(drive, "DECK", None)
+        assert drive.created[-1].get("parents") == ["P0"], "no folder: beside the deck, as before"
+
+
+def test_a_backups_folder_drive_will_not_make_leaves_the_copy_in_the_folder(capsys: pytest.CaptureFixture[str]) -> None:
+    class Refusing(Drive):
+        @override
+        def list(self, **kw: Unpack[ListFiles]) -> google_types.Request[FileList]:
+            return Answer(http_error(403, "insufficient scope"))
+
+    drive = Refusing({"DECK": {"name": "Talk"}, "FOLD": {"mimeType": FOLDER_MIME}})
+    with drive_folder.use_folder("FOLD"):
+        guard.copy_in_drive(drive, "DECK", None)
+    assert drive.created[-1].get("parents") == ["FOLD"]
+    assert f"no '{BACKUPS_NAME}' folder" in capsys.readouterr().out
 
 
 class Slides(NoPresentations, NoSlides):

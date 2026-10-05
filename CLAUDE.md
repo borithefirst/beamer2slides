@@ -343,6 +343,10 @@ a line's added spaces only if Slides sets it within 1% of its PDF width, `emit_t
   `auto` = the app's own "beamer2slides" folder (appProperty `b2sHome`; refused -> `none` with a
   warning); `none` = root, a base/backup beside its file. A thread that creates files carries the
   spec over (`guard.WayBack`). Offline tests run with `none` (conftest), live ones with `auto`.
+  Backup copies go into its "Backups" folder (`drive_folder.backup_parents`, `b2sBackups`) and
+  each new one trims the deck's copies to the newest `guard.DRIVE_BACKUPS_KEPT` (3; the rest to the
+  trash, `trim_drive_backups`); base files are named for the app, never the deck
+  (`snapshot.base_name`, `doc_sync.base_name`), so a search for a talk finds the talk.
 - **Fonts without internet**: a local google/fonts copy (`$B2S_FONT_SOURCE`, `fontfetch.use_source`,
   `AgentContext.font_source`), or font files handed to adopt (`--fonts`, `deck_adopt(fonts=)`,
   .ttf/.otf/.ttc/.woff/.woff2 named by their name table, `fontfiles.py`, `adopt.use_fonts`).

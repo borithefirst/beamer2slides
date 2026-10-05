@@ -335,7 +335,8 @@ class _Storage:
                         self.props.pop(name, None)
                     else:
                         self.props[name] = value
-            if body and (name := body.get("name")) is not None:
+            # (the base file is renamed to its own name as it is stored: no rename of the document)
+            if body and (name := body.get("name")) is not None and fileId == self.document:
                 if self.refuse_rename:
                     raise _http(403)
                 self.names.append(name)
@@ -397,7 +398,7 @@ def test_a_checkout_with_no_state_folder_finds_the_base_in_drive(tmp_path: Path)
     before the base went to Drive that dropped the sync into the `--assume-base`
     dialog, where both answers throw somebody's work away."""
     drive = _Storage("doc-1")
-    doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), title=None, known_fid=None)
+    doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), known_fid=None)
     problems: list[str] = []
     base, where = doc_sync.load_base(tmp_path / "doc.html", "doc-1", drive.drive(), problems, found=None)
     assert where == "drive" and key_of(_found(base)["blocks"][0]) == "p:drive"
@@ -405,11 +406,19 @@ def test_a_checkout_with_no_state_folder_finds_the_base_in_drive(tmp_path: Path)
     assert drive.props[doc_sync.BASE_PROPERTY] == "base-1"   # the document names it
 
 
+def test_the_base_file_is_named_for_the_app_not_the_document() -> None:
+    """Searching Drive for "The report" found its base beside it, named after it."""
+    drive = _Storage("doc-1")
+    doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), known_fid=None)
+    assert drive.created[0].get("name") == doc_sync.base_name("doc-1") == "beamer2slides docs base (doc-1).json"
+    assert drive.names == [], "the document is not renamed"
+
+
 def test_the_base_in_drive_beats_a_stale_copy_beside_the_file(tmp_path: Path) -> None:
     path = tmp_path / "doc.html"
     drive = _Storage("doc-1")
     doc_sync.save_base(path, _base(3, "p:stale"))
-    doc_sync.save_drive(drive.drive(), "doc-1", _base(5, "p:drive"), title=None, known_fid=None)
+    doc_sync.save_drive(drive.drive(), "doc-1", _base(5, "p:drive"), known_fid=None)
     problems: list[str] = []
     base, where = doc_sync.load_base(path, "doc-1", drive.drive(), problems, found=None)
     assert where == "drive" and key_of(_found(base)["blocks"][0]) == "p:drive"
@@ -420,7 +429,7 @@ def test_a_copy_newer_than_drives_is_the_one_used(tmp_path: Path) -> None:
     """What a sync whose Drive upload failed leaves behind: the cache is ahead."""
     path = tmp_path / "doc.html"
     drive = _Storage("doc-1")
-    doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), title=None, known_fid=None)
+    doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), known_fid=None)
     doc_sync.save_base(path, _base(4, "p:local"))
     problems: list[str] = []
     base, where = doc_sync.load_base(path, "doc-1", drive.drive(), problems, found=None)
@@ -444,7 +453,7 @@ def test_a_base_drive_names_but_cannot_serve_is_said_out_loud(tmp_path: Path) ->
     document, and that is the person's to know."""
     path = tmp_path / "doc.html"
     drive = _Storage("doc-1")
-    doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), title=None, known_fid=None)
+    doc_sync.save_drive(drive.drive(), "doc-1", _base(2, "p:drive"), known_fid=None)
     drive.blobs.clear()
     doc_sync.save_base(path, _base(1, "p:local"))
     problems: list[str] = []
@@ -456,7 +465,7 @@ def test_a_base_drive_names_but_cannot_serve_is_said_out_loud(tmp_path: Path) ->
 def test_a_base_from_another_document_is_ignored_wherever_it_sits(tmp_path: Path) -> None:
     path = tmp_path / "doc.html"
     drive = _Storage("doc-1")
-    doc_sync.save_drive(drive.drive(), "doc-1", {"document": "elsewhere", "blocks": []}, title=None,
+    doc_sync.save_drive(drive.drive(), "doc-1", {"document": "elsewhere", "blocks": []},
                         known_fid=None)
     doc_sync.save_base(path, {"document": "elsewhere", "blocks": []})
     problems: list[str] = []

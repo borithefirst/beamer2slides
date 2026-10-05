@@ -330,10 +330,16 @@ def _read_base_file(drive: DriveService, fid: str) -> Json | None:
         return None
 
 
-def save_drive(drive: DriveService, document: str, base: Mapping[str, object],
-               title: str | None, known_fid: str | None) -> str:
+def base_name(document: str) -> str:
+    """The name of a document's base file in Drive: the app's, and the start of the document's id.
+    Until 2026-10-05 it began with the document's name, so searching Drive for the document found
+    its base beside it; `save_drive` renames an old one when it next stores it."""
+    return f"beamer2slides docs base ({document[:8]}).json"
+
+
+def save_drive(drive: DriveService, document: str, base: Mapping[str, object], known_fid: str | None) -> str:
     """The base as a JSON file in the document's own folder, its id in the
-    document's `appProperties.b2sBase`. Returns the file id.
+    document's `appProperties.b2sBase`, named `base_name`. Returns the file id.
 
     `drive.file` reaches both: the document because this tool created it (or was
     given it), the base file because this tool created it. Nothing here asks for a
@@ -347,8 +353,8 @@ def save_drive(drive: DriveService, document: str, base: Mapping[str, object],
     data = json.dumps(base, ensure_ascii=False).encode("utf-8")
     if known_fid:
         try:
-            drive.files().update(fileId=known_fid, fields="id", media_body=media_upload(
-                io.BytesIO(data), JSON_MIME)).execute()
+            drive.files().update(fileId=known_fid, body={"name": base_name(document)}, fields="id",
+                                 media_body=media_upload(io.BytesIO(data), JSON_MIME)).execute()
             return known_fid
         except HttpError:
             pass  # deleted, or somebody else's now: ask the document below
@@ -356,15 +362,12 @@ def save_drive(drive: DriveService, document: str, base: Mapping[str, object],
     fid = _base_property(info)
     if fid:
         try:
-            drive.files().update(fileId=fid, fields="id", media_body=media_upload(
-                io.BytesIO(data), JSON_MIME)).execute()
+            drive.files().update(fileId=fid, body={"name": base_name(document)}, fields="id",
+                                 media_body=media_upload(io.BytesIO(data), JSON_MIME)).execute()
         except HttpError:
             fid = None  # deleted, or somebody else's now: a new one is made below
     if not fid:
-        name = info.get("name")
-        body: FileBody = {"name": f"{title or (name if isinstance(name, str) else document)}"
-                                  f" - beamer2slides docs base.json",
-                          "mimeType": JSON_MIME, "appProperties": {"b2sBaseOf": document}}
+        body: FileBody = {"name": base_name(document), "mimeType": JSON_MIME, "appProperties": {"b2sBaseOf": document}}
         parents = info.get("parents")
         from .drive_folder import place
         place(body, drive, [p for p in parents if isinstance(p, str)]
@@ -498,7 +501,7 @@ def store_base(path: Path, base: Ir, drive: DriveService | None,
     if not document:
         return "the base does not say which document it belongs to"
     try:
-        fid = save_drive(drive, document, _without(stamped, "uri"), known_fid=base_fid, title=None)
+        fid = save_drive(drive, document, _without(stamped, "uri"), known_fid=base_fid)
     except (HttpError, OSError) as err:
         return f"{type(err).__name__}: {err}"
     if fid and fid != known:

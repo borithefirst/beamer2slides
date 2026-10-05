@@ -2021,6 +2021,20 @@ workspace makes one per sync): found by their `b2sBackupOf` tag, never a hand-ma
 to Drive's trash rather than deleted, so a mistake comes back for 30 days
 (`guard.prune_drive_backups`).
 
+**Drive copies prune themselves, out of the way** (2026-10-05). A person searching Drive for their
+talk found one full copy per sync beside it, and the base file too, named after the deck. Now:
+- each new copy is followed by a trim to the newest `guard.DRIVE_BACKUPS_KEPT` (3), the rest to
+  the trash (`trim_drive_backups`; the copy just made is never one of them, even when Drive's
+  listing does not show it yet); what went is in the backup's `trashed`, the restore hint and the
+  agent's `data["backups_trashed"]`;
+- copies go into a "Backups" folder inside the beamer2slides folder (`drive_folder.backup_parents`,
+  tagged `b2sBackups=<its parent's id>`; `none` keeps them beside the deck; a folder Drive will
+  not make leaves them in the folder itself, with a warning);
+- base files are named for the app, `beamer2slides sync base (<id start>).json.gz` /
+  `beamer2slides docs base (<id start>).json` (`snapshot.base_name`, `doc_sync.base_name`), and an
+  old one named after its deck is renamed by the same request that next stores it. Drive's
+  full-text search still reads a docs base's plain JSON; a sync base is gzip, which it does not.
+
 **A backup that did not happen stops the rebuild** (`guard.demand_way_back`). Drive can refuse both
 kinds: the `.pptx` export over 10 MB, the copy when the Drive is full or over quota; `backup_deck`
 only collected warnings, and the forced rebuild then went ahead and replaced a deck nothing could

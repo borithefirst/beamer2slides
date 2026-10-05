@@ -610,7 +610,7 @@ def repaint_pictures(out: Path) -> int:
             el["ir_hash"], el["fields"] = h, fields
             painted += 1
     snapshot.save_local(base, out)
-    snapshot.save_drive(drive_service(None), base, None, None)
+    snapshot.save_drive(drive_service(None), base, None)
     return painted
 
 
