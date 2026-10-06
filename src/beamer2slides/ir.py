@@ -356,7 +356,10 @@ class _ImageOptional(TypedDict, total=False):
     """Alt text: the words the picture shows."""
     anchor: str
     """The text element it belongs to (a hole's formula, an icon bullet, an overlay): emit groups
-    them and places the picture on the words."""
+    them and places the picture on the words. Or the diagram that holds it (a logo, photo, icon
+    glyph or math in a box, an icon on an arrow; written before the diagram): emit groups it with
+    the box holding it, over the box and under its words, and leaves one the diagram's labels
+    lie on at the back."""
     drawings: list[str]
     """An overlay's own drawings: render subscripts them for an overlay's crop."""
     image: str

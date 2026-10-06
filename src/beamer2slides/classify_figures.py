@@ -15,11 +15,11 @@ from .classify_model import (
 )
 from .classify_paragraphs import ParagraphsMixin
 from .classify_shapes import preset_shape, split_rectangle, turned_rounded, turned_shape
-from .classify_state import DiagramRefusal, Refusal, StandingFigure
+from .classify_state import DiagramRefusal, Drafted, Refusal, StandingFigure
 from .classify_text import EQ_NUMBER_RE, card_text, family_of, math_text, span_runs
 from .classify_turned import SpanFrame, holds, moved, reframe, same_turn, span_frame, turn, unturned_spans
 from .ir import (
-    Arrow, BeforeWord, Dash, DiagramElement, DiagramLine, Element, ImageElement, Mark, Node, ShapeElement,
+    Arrow, BeforeWord, Dash, DiagramElement, DiagramLine, Element, ImageElement, ImageRole, Mark, Node, ShapeElement,
     TemplateKind, TextElement,
 )
 from .raw_types import DrawingType, PathItem, RawDrawing, RawImage, RawSpan
@@ -60,7 +60,17 @@ class Tip:
     on: tuple[DiagramLine, End] | None
 
 
+def is_painted(im: RawImage) -> bool:
+    """A shading (or a block shadow's piece) rather than a picture: extract reports those on
+    whole points, one pixel per point (`PdfPage.images`)."""
+    x0, y0, x1, y1 = im["bbox"]
+    return all(v == round(v) for v in (x0, y0, x1, y1)) and im["px"] == [x1 - x0, y1 - y0]
+
+
 TIP_SIZE = 6.0  # pt: an arrow head is a separate path no larger than this
+BADGE_SHARE = 0.2  # a node over another's edge at most this share of its area is a badge on it
+FLAT_BAR = 1.0     # pt: a stroke in a box no taller than this, not at a line's end, is a fraction bar
+ART_SHARE = 0.6    # paths of no known shape in a box, smaller than this share of it, are a logo on it
 CENTRED_HEADS: frozenset[Arrow] = frozenset(
     {"FILL_CIRCLE", "OPEN_CIRCLE", "FILL_SQUARE", "OPEN_SQUARE", "FILL_DIAMOND", "OPEN_DIAMOND"})
 """Heads Slides centres on the line's end, where TikZ stops the line at the head's back."""
@@ -378,14 +388,14 @@ class FiguresMixin(ParagraphsMixin):
                 continue
             drafted = DiagramRefusal(box=c, reason="over_text", detail="") if over_text \
                 else self.diagram_from(c, label_spans, len(out))
-            if not isinstance(drafted, DiagramRefusal) and self.splits_cells(drafted, label_spans):
+            if not isinstance(drafted, DiagramRefusal) and self.splits_cells(drafted.diagram, label_spans):
                 # a ruled grid table_from could not read: a picture, not merged rows
                 drafted = DiagramRefusal(box=c, reason="splits_cells", detail="")
             diagram = None if isinstance(drafted, DiagramRefusal) else drafted
             if isinstance(drafted, DiagramRefusal):
                 self.diagram_refusals.append(drafted)
-            if diagram and any(n["text"] for n in diagram["nodes"]):
-                out.append(diagram)  # frames around their own text (a framed paragraph), not marks on prose
+            if diagram and any(n["text"] for n in diagram.diagram["nodes"]):
+                out += [*diagram.pictures, diagram.diagram]  # frames around their own text (a framed paragraph), not marks on prose
                 continue
             overlay = self.overlay(c, label_spans, lines, len(out), over_text)
             captions = {sid for f in self.standing if c.expand(0.5).contains_rect(f.drawing, tol=0.5) for sid in f.caption}
@@ -409,7 +419,8 @@ class FiguresMixin(ParagraphsMixin):
                 out.append(table)
                 continue
             if diagram:
-                out.append(diagram)
+                # (its pictures first: a sync creates them before the diagram groups them)
+                out += [*diagram.pictures, diagram.diagram]
                 continue
             bars = self.plain_rectangles(c, label_spans, len(out))
             if bars:
@@ -791,29 +802,37 @@ class FiguresMixin(ParagraphsMixin):
                                            stroke=top["stroke"], width=top["width"], radius=None, dash=top.get("dash"),
                                            adjust=None, rotation=None))
 
-    def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> DiagramElement | DiagramRefusal:
-        """A figure cluster made only of simple nodes (rectangles, rounded rectangles, ellipses)
-        with their text inside, straight lines and arrow tips: rebuilt from native Slides
-        shapes and lines. Anything else (curves, images, math, loose labels) keeps it a picture,
-        and the refusal says which."""
+    def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> Drafted | DiagramRefusal:
+        """A figure cluster made of nodes (rectangles, rounded rectangles, ellipses, presets)
+        with their text inside, lines and arrow tips: rebuilt from native Slides shapes and
+        lines. What a shape or a run cannot say but a box holds - a logo, a photo, an icon-font
+        glyph, a label of big math - is a picture of its own grouped with the box (`Drafted`),
+        in a cluster that is a diagram (an arrow, or two boxes). Anything else (shadings,
+        see-through drawings, crossing nodes...) keeps it a picture, and the refusal says which."""
         box = c.expand(0.5)
+        did = f"p{self.raw['index']}dg{index}"
 
         def refused(reason: Refusal, detail: str) -> DiagramRefusal:
             return DiagramRefusal(box=c, reason=reason, detail=detail)
         inside = [im for im in self.raw["images"] if box.contains_rect(Rect.of(im["bbox"]), tol=0.5)]
-        if inside:
-            return refused("image_inside", f"{len(inside)} image(s), {inside[0]['id']}")
+        painted = [im for im in inside if is_painted(im)]
+        if painted:
+            return refused("image_inside", f"{len(painted)} shading(s), {painted[0]['id']}")
         if self.holds_other_text(c, label_spans):
             return refused("other_text", "")
+        # (a fraction's or a radical's bar is part of its label's math, no arrow tip)
+        bars = [b for b in self.bars if box.contains_rect(b, tol=0.5)]
         nodes: list[DraftNode] = []
         lines: list[DiagramLine] = []
         tips: list[Tip] = []
         # Small circles, a Circle tip or a dot: (where in nodes, the node, its drawing's index)
         rims: list[tuple[int, DraftNode, int]] = []
         drawn: dict[int, int] = {}  # id of a line -> the index of the drawing it came from
+        art: list[tuple[Rect, str]] = []  # paths of no shape we know: their box, what they are
         for k, d in enumerate(self.raw["drawings"]):
             r = Rect.of(d["bbox"])
-            if not box.contains_rect(r, tol=0.5) or r.w * r.h >= 0.95 * self.W * self.H:
+            if not box.contains_rect(r, tol=0.5) or r.w * r.h >= 0.95 * self.W * self.H \
+                    or any(b.expand(0.5).contains_rect(r, tol=0.5) for b in bars):
                 continue
             path = d.get("path")
             if path is None:
@@ -906,9 +925,12 @@ class FiguresMixin(ParagraphsMixin):
                 # A stroked curve (bend left, out/in, a loop, a brace) as circular arcs and
                 # straight pieces; one no chain of `MAX_PIECES` follows (a coil) stays a picture.
                 pieces = curves.path_pieces(path, curves.ARC_TOLERANCE) if curve else None
+                if pieces is None and not curve:
+                    # (a vector logo's paths, if a box holds them: `art` below)
+                    art.append((r, f"{d['id']} {d['type']} {ops[:24]} {r.w:.0f}x{r.h:.0f} pt"))
+                    continue
                 if pieces is None:
-                    return refused("curve" if curve else "unknown_shape",
-                                   f"{d['id']} {d['type']} {ops[:24]} {r.w:.0f}x{r.h:.0f} pt")
+                    return refused("curve", f"{d['id']} {d['type']} {ops[:24]} {r.w:.0f}x{r.h:.0f} pt")
                 width = d["width"] or 0.4
                 first = len(lines)
                 lines += curve_lines(pieces, d["stroke"] or "#000000", width)
@@ -932,19 +954,41 @@ class FiguresMixin(ParagraphsMixin):
             else:
                 nodes.insert(at, node)
         self.closed_frames(nodes, lines)
-        if not nodes:
+        # Paths of no shape we know inside a box (a vector logo: \includegraphics of a PDF or an
+        # SVG) are one picture on it, with whatever node shapes and arrow heads their drawing
+        # makes (its triangles, its dots); anywhere else they keep the cluster a picture.
+        logos: dict[int, Rect] = {}  # id of the box -> the art on it
+        for r, detail in art:
+            hosts = [n for n in nodes if n.shape is not None and n.rotation is None and n.rect.contains_rect(r, tol=0.5)
+                     and r.w * r.h < ART_SHARE * n.rect.w * n.rect.h]
+            if not hosts:
+                return refused("unknown_shape", detail)
+            host = id(min(hosts, key=lambda n: n.rect.w * n.rect.h))
+            logos[host] = logos[host].union(r) if host in logos else r
+        if logos:
+            nodes = [n for n in nodes if not any(l.contains_rect(n.rect, tol=0.5) for l in logos.values())]
+            tips = [t for t in tips if not any(l.contains_rect(t.rect, tol=0.5) for l in logos.values())]
+        if not nodes and not inside:  # (logos joined by arrows are nodes enough)
             return refused("no_nodes", f"{len(lines)} line(s)")
         # Shapes that cross each other (a Venn diagram): its words are placed by region - the
-        # lens, one circle's own part - and a node's text is set centred in all of it.
+        # lens, one circle's own part - and a node's text is set centred in all of it. A badge
+        # on a box's corner (a step number) is no region of it: it lies over the box.
         for i, a in enumerate(nodes):
             for b in nodes[i + 1:]:
                 ra, rb = a.rect, b.rect
-                if overlap(ra, rb) > 0.05 * min(ra.w * ra.h, rb.w * rb.h) and \
+                small, large = sorted((ra.w * ra.h, rb.w * rb.h))
+                if overlap(ra, rb) > 0.05 * small and small >= BADGE_SHARE * large and \
                         not ra.contains_rect(rb, tol=0.5) and not rb.contains_rect(ra, tol=0.5):
                     return refused("nodes_cross", f"{a.shape} {ra.as_list()} and {b.shape} {rb.as_list()}")
         for t in tips:
             tip, head, points, outline = t.rect, t.head, t.points, t.outline
             ends = [t.on] if t.on else [(ln, end) for ln in lines for end in ENDS if tip.expand(1).contains(*ln[end])]
+            if not ends and tip.h <= FLAT_BAR and tip.w >= 3 * tip.h and \
+                    any(n.shape is not None and holds(n.rect, n.rotation, tip.cx, tip.cy) for n in nodes):
+                # a fraction bar in a box (\frac{1}{n}) the page's analysis took for a stroke, as
+                # it touches the box: its label's math (`math_nodes` below)
+                bars.append(tip)
+                continue
             if not ends:
                 return refused("loose_arrow_tip", f"{head} at {tip.as_list()}")
             ln, end = ends[0]
@@ -973,23 +1017,37 @@ class FiguresMixin(ParagraphsMixin):
                     ln[end] = [round(ln[end][0] + reach * ux, 2), round(ln[end][1] + reach * uy, 2)]
 
         spans = [s for s in label_spans if box.contains_rect(s.rect, tol=0.5)]
-        # Simple math in a label is runs as in a table cell (`span_runs`: Greek, operators, x_t
-        # set SUBSCRIPT); a big operator, a fraction or a radical's bar is no run of text.
-        if any(box.contains_rect(b, tol=0.5) for b in self.bars):
-            return refused("math_label", "a fraction or radical bar")
         free: list[Span] = []
 
         def area(n: DraftNode) -> float:
             return n.rect.w * n.rect.h
+
+        def owner_of(x: float, y: float) -> DraftNode | None:
+            """The node a point is in: the last drawn of the smallest around it."""
+            owners = [n for n in nodes if n.shape is not None and holds(n.rect, n.rotation, x, y)]
+            if not owners:
+                return None
+            smallest = min(map(area, owners))
+            return [n for n in owners if area(n) <= 1.02 * smallest + 0.01][-1]
+        # Simple math in a label is runs as in a table cell (`span_runs`: Greek, operators, x_t
+        # set SUBSCRIPT); a big operator, a fraction or a radical's bar is no run of text: such
+        # a box's label is a picture on it (`math_nodes`: id of the node -> its bars).
+        math_nodes: dict[int, list[Rect]] = {}
+        for b in bars:
+            held = owner_of(b.cx, b.cy)
+            if held is None:
+                return refused("math_label", "a fraction or radical bar")
+            math_nodes.setdefault(id(held), []).append(b)
+        icons: list[Span] = []
         seen: list[Span] = []
         sloped: list[Span] = []
         for s in spans:
-            # (an icon font's glyph has no Unicode: as a node's label it read U+FFFD, a
-            # diamond with a question mark, where the picture shows the icon)
-            if s.info.family == "math" and extension_font(s.font):
-                return refused("math_label", repr(s.text))
+            # An icon font's glyph has no Unicode (as a node's label it read U+FFFD, a diamond
+            # with a question mark, where the picture shows the icon): a picture of its own.
             if s.info.family == "icon" or "�" in s.text:
-                return refused("icon_label", repr(s.text))
+                icons.append(s)
+                continue
+            big = s.info.family == "math" and extension_font(s.font)
             if not s.horizontal:
                 sloped.append(s)  # (set along its turn below: sloped_labels)
                 continue
@@ -1010,9 +1068,42 @@ class FiguresMixin(ParagraphsMixin):
                     # shape turns with it in Slides)
                     return refused("rotated_node", f"a level label {s.text!r} in a turned {owner.shape}")
                 owner.spans.append(s)
+                if big:
+                    math_nodes.setdefault(id(owner), [])
+            elif big:
+                return refused("math_label", repr(s.text))
             else:
                 free.append(s)  # edge labels and captions: a text box in the group
-        empty = sum(n.shape is not None and not n.spans for n in nodes)
+        pictures: list[ImageElement] = []
+
+        def picture(role: ImageRole, rect: Rect, held: list[Span]) -> ImageElement:
+            return {"id": f"{did}p{len(pictures)}", "kind": "image", "role": role, "bbox": rect.as_list(),
+                    "spans": [s.id for s in held], "anchor": did}
+        for k, n in enumerate(nodes):
+            if id(n) in math_nodes:
+                # the box's whole label, its bars with it
+                rect = union_all([s.rect for s in n.spans] + math_nodes[id(n)]).expand(0.5)
+                pictures.append(picture("math", rect, n.spans))
+                nodes[k] = replace(n, spans=[])
+        for s in icons:
+            pictures.append(picture("icon", s.rect, [s]))  # (render grows it to the glyph's ink)
+        for im in inside:
+            logo = picture("figure", Rect.of(im["bbox"]), [])
+            logo["image"] = im["id"]  # (render may keep the author's file: render.embedded_picture)
+            pictures.append(logo)
+        for r in logos.values():
+            pictures.append(picture("figure", r.expand(0.5), []))  # (a vector logo's paths)
+        if pictures and not any(ln["arrow_from"] or ln["arrow_to"] for ln in lines) \
+                and sum(n.shape is not None for n in nodes) < 2:
+            # Not a diagram that holds pictures: a framed photo, a heatmap in its axes, an icon in
+            # a callout. One picture, as before.
+            first = pictures[0]
+            reason: Refusal = "math_label" if first["role"] == "math" else "icon_label" if first["role"] == "icon" \
+                else "image_inside" if first.get("image") else "unknown_shape"
+            return refused(reason, f"{len(pictures)} picture(s) and no arrow, {len(nodes)} node(s)")
+        held_at = [Rect.of(p["bbox"]) for p in pictures]
+        holding = {id(owner) for r in held_at if (owner := owner_of(r.cx, r.cy)) is not None}
+        empty = sum(n.shape is not None and not n.spans and id(n) not in holding for n in nodes)
         if empty > MAX_PLAIN_RECTANGLES:
             return refused("too_many_rectangles", f"{empty} empty nodes")  # a QR code, a pixel grid
         # Free labels close together on one line are one label, a script with its letter. (Close
@@ -1052,9 +1143,10 @@ class FiguresMixin(ParagraphsMixin):
                 **({"adjust": n.adjust} if n.adjust is not None else {}),
                 **({"rotation": round(n.rotation, 2)} if n.rotation is not None else {}),
             })
-        return {"id": f"p{self.raw['index']}dg{index}", "kind": "diagram", "role": "figure",
-                "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,
-                "spans": [s.id for s in spans]}
+        diagram: DiagramElement = {"id": did, "kind": "diagram", "role": "figure", "bbox": c.expand(1.0).as_list(),
+                                   "nodes": out_nodes, "lines": lines,
+                                   "spans": [s.id for s in spans if not any(s.id in p["spans"] for p in pictures)]}
+        return Drafted(diagram=diagram, pictures=pictures)
 
 
 def scripted(a: Span, b: Span) -> bool:

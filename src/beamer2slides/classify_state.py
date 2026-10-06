@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .classify_model import Line, Paragraph, Rect, Span
+from .ir import DiagramElement, ImageElement
 from .raw_types import RawColor, RawDrawing, RawImage, RawPage
 
 Refusal = Literal[
@@ -53,6 +54,16 @@ class DiagramRefusal:
     box: Rect
     reason: Refusal
     detail: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class Drafted:
+    """A figure cluster read as a diagram (`classify_figures.diagram_from`), and the pictures it
+    holds: logos and photos in or between its boxes, icon-font glyphs, and a box's label of math
+    no run can say (a fraction, a big operator). They are image elements anchored to the diagram,
+    which emit groups with the box each lies in (`emit_diagrams.diagram_requests_of`)."""
+    diagram: DiagramElement
+    pictures: list[ImageElement]
 
 
 @dataclass(frozen=True, kw_only=True)

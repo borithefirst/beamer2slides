@@ -1,7 +1,7 @@
 """The diagram scoreboard (`devtools/diagram_score.py`) on `tests/decks/29_tikz_diagrams.tex`: one
 way of drawing TikZ per frame, and what each became. A change that makes a frame native, or
 moves its refusal on to the next cause, updates `BOARD` here on purpose; a frame falling back
-from native fails."""
+from native fails. `BOX_BOARD` does the same for `tests/decks/31_box_diagrams.tex`."""
 
 from pathlib import Path
 from typing import get_args
@@ -55,6 +55,39 @@ BOARD: dict[str, tuple[Outcome, set[Refusal]]] = {
     "A system architecture": ("native", set()),
 }
 
+BOX_PDF = Path(__file__).parent / "decks" / "out" / "31_box_diagrams.pdf"
+
+# `tests/decks/31_box_diagrams.tex`: boxes holding pictures, logos and glyphs, joined by annotated
+# arrows. What a box holds is a picture the diagram groups; the boxes, arrows and words are native.
+BOX_BOARD: dict[str, tuple[Outcome, set[Refusal]]] = {
+    "A logo above the label in each box": ("native", set()),
+    "Logos alone in boxes": ("native", set()),
+    "A logo left of the label": ("native", set()),
+    "Logo nodes without a frame, joined by arrows": ("native", set()),
+    "A photo as a framed node": ("native", set()),
+    "A badge on a box’s corner": ("native", set()),
+    "A vector logo in a box": ("native", set()),
+    "An icon on an arrow": ("native", set()),
+    "Icon-font glyphs in boxes": ("native", set()),
+    "Icon-font glyphs beside labels": ("native", set()),
+    "Icon-font glyphs above labels": ("native", set()),
+    "Dingbats and symbols in boxes": ("native", set()),
+    "Big math in boxes": ("native", set()),
+    "Numbered step circles on arrows": ("native", set()),
+    "Two-line labels on arrows": ("native", set()),
+    "Labels sitting on the line": ("native", set()),
+    "Request and response arrows": ("native", set()),
+    "Math on arrows": ("native", set()),
+    "Coloured and italic labels on dashed arrows": ("native", set()),
+    "Labels beside vertical arrows": ("native", set()),
+    "An icon and words on one arrow label": ("native", set()),
+    "A cloud architecture with logos": ("native", set()),
+    "A data pipeline with icons and step numbers": ("native", set()),
+    "Swimlanes with logo headers": ("native", set()),
+    "A system context diagram": ("native", set()),
+    "A smartdiagram flow": ("picture", {"image_inside"}),
+}
+
 
 def test_every_refusal_and_outcome_is_listed() -> None:
     assert REFUSALS == get_args(Refusal)
@@ -68,3 +101,9 @@ def test_the_tikz_board() -> None:
     assert got == BOARD
     again = diagram_score.board_of(diagram_score.board_json(board), "board")
     assert [(f.title, f.outcome, f.refusals) for f in again] == [(f.title, f.outcome, f.refusals) for f in board]
+
+
+@pytest.mark.needs_decks("out/31_box_diagrams.pdf")
+def test_the_box_board() -> None:
+    board = diagram_score.score(BOX_PDF)
+    assert {f.title: (f.outcome, {r.reason for r in f.refusals}) for f in board} == BOX_BOARD

@@ -2884,12 +2884,17 @@ class Sync:
         chosen = set(units)
         reqs: list[SlidesRequest] = []
         objects: dict[int, list[str]] = {}
+        # (pictures this sync creates: a diagram holding one brings it over its box before grouping
+        # them, among objects as new as it is, so that z-order stays)
+        pictures = {new_oid[i] for i, (el, _) in enumerate(parts[1:1 + len(element_ids)])
+                    if i in chosen and el is not None and el["kind"] == "image" and i not in in_place}
         for i, (el, rs) in enumerate(parts[1:1 + len(element_ids)]):
             if i not in chosen:
                 continue
             rs = rename_requests(rs, order)
             if not new_slide:
-                rs = [r for r in rs if "updatePageElementsZOrder" not in r]
+                rs = [r for r in rs if (z := r.get("updatePageElementsZOrder")) is None
+                      or (el is not None and el["kind"] == "diagram" and set(z["pageElementObjectIds"]) <= pictures)]
             if el is not None and el["kind"] == "image":
                 path = self.ours_out / as_str(el["file"], "image file")
                 box = [v * self.scale for v in _nums(self.plan.placed(source[i], n)["bbox"], "image bbox")]

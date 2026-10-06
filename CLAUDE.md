@@ -113,7 +113,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   become `°`/`*` at line size, primes ′ ″ unscripted too, `unscripted_mark`, a script's own at its
   size, `prime_size`; a glyph right after a script gets U+200A hair spaces for Slides' short
   advance there, `script_space`, `script_tail`, added spaces read as nothing) and Unicode,
-  links, code. Frame titles use the layout's TITLE placeholder. Hanging labels are `label<TAB>text`.
+  links, code. Frame titles use the layout's TITLE placeholder (the body size counts the top
+  `TITLE_BAND` of a page only when nothing else has words, `classify_text.body_size`: a diagram
+  page's letters are mostly its title's). Hanging labels are `label<TAB>text`.
   RTL (Hebrew/Arabic) is turned into logical order (`bidi.py`) and written `RIGHT_TO_LEFT` with
   mirrored alignment: a line is read whole (`classify.read_lines`, `bidi.logical_line`: the logical
   text whose UAX#9 display is the page, LRM/RLM where needed, the page's direction for mixed
@@ -259,9 +261,16 @@ a line's added spaces only if Slides sets it within 1% of its PDF width, `emit_t
   (`table_margins`); sync refills such a table in place when its words or place changed, or rows and columns that
   inserts beside a neighbour can give (`sync.table_refill`, `table_steps`), and otherwise creates an API table (`DeckPlan(pptx_tables=False)`).
 - `diagram`: node/line/arrow clusters as grouped shapes, connectors and labels (`diagram_from`).
-  It refuses (the drawing stays a picture) when a node holds other text, nodes cross, or a label
-  holds a big operator, fraction or radical (simple math and scripts are runs, as in cells; a
-  script is on its letter's line, `classify_figures.text_rows`/`scripted`); a turned ellipse,
+  It refuses (the drawing stays a picture) when a node holds other text, or nodes cross (a badge
+  under `BADGE_SHARE` of a box on its corner does not cross) (simple math and scripts are runs,
+  as in cells; a script is on its letter's line, `classify_figures.text_rows`/`scripted`). What
+  a box holds that no shape says (a logo or photo, vector art under `ART_SHARE` of it, an
+  icon-font glyph, a big operator, fraction or radical; an icon on an arrow) is a picture the
+  diagram holds: an image `anchor`ed to the diagram, written before it (`diagram.pictures`),
+  grouped in its box's group over the box and under its words (`emit_diagrams.HeldPicture`,
+  `holder_of`), one the labels lie on left at the back (`grounds_nodes`); sync z-orders only those
+  it creates. A flat bar in a box is a rule, not a tip (`FLAT_BAR`). Torture: `tests/decks/31_box_diagrams.tex`,
+  `BOX_BOARD` in `tests/test_diagram_score.py`. A turned ellipse,
   rectangle or rounded box and a sloped label carry node `rotation` (degrees clockwise, bbox the
   unturned box; `classify_turned`, `classify_shapes.turned_shape`, `emit_diagrams.turned_transform`,
   sites turned by `site_point`); a redrawn node keeps its label on the top copy. See-through (opacity, blend) drawings and clusters of more than `MAX_PLAIN_RECTANGLES`

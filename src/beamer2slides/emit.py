@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Callable, TypedDict, TypeVar
 from . import emit_state
 from .emit_state import Emitted
 from .emit_diagrams import (
-    block_groups, block_stacking, diagram_requests_of, element_template_keys_on, rule_groups,
+    HeldPicture, block_groups, block_stacking, diagram_requests_of, element_template_keys_on, rule_groups,
 )
 from .emit_diagrams import (  # noqa: F401 (callers take these from here)
     bend_template_key, connection, diagram_requests, element_template_keys, label_inside, node_template_key,
@@ -1030,7 +1030,9 @@ class DeckPlan:
                     return table_element_requests(typed, slide_id, oid, scale, fonts, self.pptx_tables)
                 case DiagramElement():
                     return diagram_requests_of(typed, slide_id, oid, scale, fonts, template_record if keys else None,
-                                               bounds)
+                                               bounds, held.get(typed.id, []))
+                case ImageElement() if typed.id in in_diagrams:
+                    return []  # (its diagram brings it over its box and groups it: diagram_requests_of)
                 case ImageElement() | FallbackImage():
                     # The picture came with the slide: move it to its place in the z-order.
                     reqs: list[SlidesRequest] = [
@@ -1071,6 +1073,16 @@ class DeckPlan:
                     assert_never(typed)
 
         elements = _elements(slide)
+        # The pictures a diagram holds (anchored to it), which go into its groups.
+        diagrams = {el["id"] for el in elements if el["kind"] == "diagram"}
+        held: dict[str, list[HeldPicture]] = {}
+        in_diagrams: set[str] = set()
+        for i, el in enumerate(elements):
+            anchor = el.get("anchor")
+            if el["kind"] == "image" and isinstance(anchor, str) and anchor in diagrams:
+                held.setdefault(anchor, []).append(HeldPicture(object_id=f"{slide_id}_{_object_prefix(el)}{i}",
+                                                               bbox=box_of(el["bbox"], "picture bbox")))
+                in_diagrams.add(as_str(el["id"], "picture id"))
         element_ids: list[str] = []
         for i, el in enumerate(elements):  # shapes, then pictures, then text on top
             oid = f"{slide_id}_{_object_prefix(el)}{i}"
@@ -1095,12 +1107,15 @@ class DeckPlan:
             if isinstance(eid, str):
                 by_id[eid] = oid
         anchored: dict[str, list[str]] = {}
-        for el, oid in zip(elements, element_ids):
-            anchor = el.get("anchor")
-            if isinstance(anchor, str) and anchor in by_id and by_id[anchor] not in (title_oid, subtitle_oid):
-                anchored.setdefault(by_id[anchor], []).extend([oid, f"{oid}n"] if el.get("number") else [oid])
         grouped: set[str] = set()
         tops: dict[str, str] = {}  # object id -> the group it went into
+        for el, oid in zip(elements, element_ids):
+            anchor = el.get("anchor")
+            if isinstance(anchor, str) and anchor in diagrams:
+                grouped.add(oid)  # (in its diagram's group already)
+                tops[oid] = by_id[anchor]
+            elif isinstance(anchor, str) and anchor in by_id and by_id[anchor] not in (title_oid, subtitle_oid):
+                anchored.setdefault(by_id[anchor], []).extend([oid, f"{oid}n"] if el.get("number") else [oid])
         for text_oid, pictures in anchored.items():
             extra.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid, *pictures]}})
             grouped |= {text_oid, *pictures}

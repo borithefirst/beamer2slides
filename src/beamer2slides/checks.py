@@ -373,6 +373,7 @@ def moving_units(slide: RenderedSlide, page: RawPage) -> list[tuple[str, Box]]:
     """(element id, box) of what Slides sets or places relative to the text: line boxes of
     native words (text, tables, diagrams), bullets and the pictures anchored to text."""
     spans = {s.id: s for s in page.spans}
+    diagrams = diagram_ids(slide)
     out: list[tuple[str, Box]] = []
     for el in slide.elements:
         match el:
@@ -381,7 +382,7 @@ def moving_units(slide: RenderedSlide, page: RawPage) -> list[tuple[str, Box]]:
                 out += [(el.id, l) for l in text_lines(boxes)]
                 out += [(el.id, b) for b in bullet_boxes(el)]
             case RenderedImage():
-                if el.anchor and not el.overlay:
+                if el.anchor and el.anchor not in diagrams and not el.overlay:
                     out.append((el.id, el.bbox))
             case FallbackImage() | ShapeElement() | RenderedMarkedShape():
                 pass
@@ -390,9 +391,16 @@ def moving_units(slide: RenderedSlide, page: RawPage) -> list[tuple[str, Box]]:
     return out
 
 
+def diagram_ids(slide: RenderedSlide) -> set[str]:
+    """The slide's diagrams: a picture anchored to one (a logo in its box) stands where the PDF
+    has it, as an unanchored one does."""
+    return {el.id for el in slide.elements if isinstance(el, DiagramElement)}
+
+
 def covered(slide: RenderedSlide) -> list[Box]:
     """Areas Slides hides behind something that does not move with the text: opaque shapes and
     pictures that are not anchored to text."""
+    diagrams = diagram_ids(slide)
     out: list[Box] = []
     for el in slide.elements:
         match el:
@@ -405,7 +413,7 @@ def covered(slide: RenderedSlide) -> list[Box]:
                 if not el.opacity:
                     out.append(el.bbox)
             case RenderedImage():
-                if not el.anchor and not el.overlay:
+                if (not el.anchor or el.anchor in diagrams) and not el.overlay:
                     out.append(el.bbox)
             case FallbackImage():
                 out.append(el.bbox)  # (a picture of its own, anchored to nothing)
@@ -631,8 +639,10 @@ def structure_problems(rendered: Rendered, slide: JsonObject | RenderedSlide) ->
         problem(None, "duplicate element ids", None)
     for el in elements:
         anchor = el.anchor if isinstance(el, (RenderedImage, ShapeElement)) else None
-        if anchor is not None and not isinstance(by_id.get(anchor), RenderedText):
-            problem(el, f"anchor {anchor} is no text element on the slide", None)
+        held = by_id.get(anchor) if anchor is not None else None
+        if anchor is not None and not isinstance(held, RenderedText) and not (
+                isinstance(el, RenderedImage) and isinstance(held, DiagramElement)):
+            problem(el, f"anchor {anchor} is no text element or diagram on the slide", None)
         missing = [i for i in element_spans(el) if i not in spans] + \
                   [i for i in element_drawings(el) if i not in drawings]
         if missing:

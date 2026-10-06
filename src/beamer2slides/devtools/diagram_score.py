@@ -80,8 +80,11 @@ def title_of(slide: Slide) -> str:
 def frame_score(page: int, slide: Slide, refusals: list[DiagramRefusal]) -> FrameScore:
     """A frame's score from its slide and the refusals classify kept: a refusal counts when a
     figure picture holds its cluster (one that became a table or an overlay has no picture), or
-    when it left the figure in the background."""
-    pictures = [Rect.of(e["bbox"]) for e in slide["elements"] if e["kind"] == "image" and e["role"] == "figure"]
+    when it left the figure in the background. A picture a diagram holds (a logo in a box,
+    anchored to it) is part of that diagram."""
+    diagrams = {e["id"] for e in slide["elements"] if e["kind"] == "diagram"}
+    pictures = [Rect.of(e["bbox"]) for e in slide["elements"] if e["kind"] == "image" and e["role"] == "figure"
+                and e.get("anchor") not in diagrams]
     kept = [r for r in refusals if r.reason == "too_large"
             or any(p.expand(1.5).contains(r.box.cx, r.box.cy) for p in pictures)]
     return FrameScore(page=page, title=title_of(slide),

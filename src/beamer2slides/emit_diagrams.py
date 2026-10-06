@@ -53,6 +53,34 @@ ADJUSTED: dict[str, float] = {"CAN": 0.25, "HEXAGON": 0.25, "OCTAGON": 0.29289}
 LABEL_ROOM = 1.08  # the substitute font may run this much wider
 
 
+@dataclass(frozen=True, kw_only=True)
+class HeldPicture:
+    """A picture a diagram holds (an image element anchored to it: a logo in a box, an icon-font
+    glyph, a box's math), which came with the slide: its object id and box (PDF pt)."""
+    object_id: str
+    bbox: Box
+
+
+def holder_of(picture: HeldPicture, nodes: Sequence[ir_types.Node]) -> int | None:
+    """The index of the smallest shaped node holding `picture`'s middle, if any, and no smaller than
+    it (a label box on a photo does not hold the photo)."""
+    x0, y0, x1, y1 = picture.bbox
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    held = [(n.bbox[2] - n.bbox[0]) * (n.bbox[3] - n.bbox[1]) for n in nodes]
+    inside = [j for j, n in enumerate(nodes)
+              if n.shape is not None and n.bbox[0] <= cx <= n.bbox[2] and n.bbox[1] <= cy <= n.bbox[3]
+              and (x1 - x0) * (y1 - y0) <= held[j]]
+    return min(inside, key=lambda j: held[j]) if inside else None
+
+
+def grounds_nodes(picture: HeldPicture, nodes: Sequence[ir_types.Node]) -> bool:
+    """Whether `picture` lies under the diagram (a photo its labels and arrows are drawn on): it
+    holds a shaped node's middle."""
+    x0, y0, x1, y1 = picture.bbox
+    return any(n.shape is not None and x0 <= (n.bbox[0] + n.bbox[2]) / 2 <= x1 and y0 <= (n.bbox[1] + n.bbox[3]) / 2 <= y1
+               for n in nodes)
+
+
 def label_inside(node: JsonMap) -> bool:
     """`label_inside_of` a node dict (sync's base diagrams, the tests)."""
     return label_inside_of(node_look_of(node))
@@ -314,7 +342,7 @@ def diagram_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, f
         raise TypeError(f"element {el.get('id')!r} is not a diagram")
     tpl = template
     return diagram_requests_of(typed, slide_id, object_id, scale, fonts,
-                               None if tpl is None else (lambda key: template_of(tpl(key))), None)
+                               None if tpl is None else (lambda key: template_of(tpl(key))), None, ())
 
 
 def _transform(oid: str, sx: float, sy: float, x: float, y: float) -> SlidesRequest:
@@ -695,12 +723,15 @@ def on_filled_node(start: Point, end: Point, nodes: Sequence[ir_types.Node]) -> 
 
 
 def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                        template: Callable[[TemplateKey], Template] | None, page: Page | None) -> list[SlidesRequest]:
+                        template: Callable[[TemplateKey], Template] | None, page: Page | None,
+                        pictures: Sequence[HeldPicture]) -> list[SlidesRequest]:
     """Nodes become shapes, edges become lines with arrow heads; the parts are grouped so the
     diagram moves as one piece but stays editable. A label that fits goes inside its node (a
     template shape without text padding, see label_inside); one that doesn't gets a text box
     grouped with its node. Line ends on a node's connection site are connected to it, so edges
     follow nodes moved in Slides. `template(key)` gives this slide's template shape for a key.
+    `pictures` (which came with the slide) are brought over the node holding them, under its
+    label, and grouped with it; one in no node joins the diagram's group over its lines.
     With `page`, nothing is written past it that the diagram does not draw there: an arc whose
     circle's box would reach past it is written as `arc_plan` says (upright, elliptical pieces,
     else fine chords; its heads on the end pieces), and a label's box narrows about its middle.
@@ -784,6 +815,7 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
     for oid, start_at, end_at, ln in segments:
         if oid not in on_nodes:
             draw(oid, start_at, end_at, ln)
+    holders = [holder_of(p, el.nodes) for p in pictures]
     for j, node in enumerate(el.nodes):
         oid = node_oids[j]
         x0, y0, x1, y1 = (v * scale for v in node.bbox)
@@ -816,6 +848,11 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                     "transform": box_transform((x0, y0, x1, y1), node.rotation)}}})
             reqs.append({"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}})
             members.append(oid)
+        for p, at in zip(pictures, holders):
+            if at == j:  # (over its box, under its words)
+                reqs.append({"updatePageElementsZOrder": {"pageElementObjectIds": [p.object_id],
+                                                          "operation": "BRING_TO_FRONT"}})
+                members.append(p.object_id)
         if card:
             for k, box in enumerate(card):
                 label = f"{object_id}_x{j}" + (f"_{k}" if k else "")
@@ -881,6 +918,12 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
     for oid, start_at, end_at, ln in segments:
         if oid in on_nodes:
             draw(oid, start_at, end_at, ln)
+    for p, at in zip(pictures, holders):
+        if at is None:  # (an icon on an arrow, a logo standing for a node; a photo stays under)
+            if not grounds_nodes(p, el.nodes):
+                reqs.append({"updatePageElementsZOrder": {"pageElementObjectIds": [p.object_id],
+                                                          "operation": "BRING_TO_FRONT"}})
+            children.append(p.object_id)
     # Edges follow the nodes they start or end on.
     sites = [(n.bbox, n.shape, n.adjust, n.rotation) for n in el.nodes]
     for oid, start_at, end_at, ln in segments:

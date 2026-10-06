@@ -1,6 +1,7 @@
 """Visual hunt, fixer W: pictures, overlays and math pictures against the native text around
 them - on synthetic pages."""
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -248,9 +249,10 @@ def test_holes_with_no_word_between_them_are_one_hole():
     assert len(line.holes) == 2
 
 
-def test_a_node_labelled_with_an_icon_keeps_its_diagram_a_picture():
+def test_a_node_labelled_with_an_icon_holds_its_picture():
     """r1_design_v2/v3 s4: \\faSearch in a TikZ node. The icon font's glyph has no Unicode, and as
-    a native node's label it read U+FFFD (a diamond with a question mark)."""
+    a native node's label it read U+FFFD (a diamond with a question mark). The glyph is a picture
+    the diagram holds (anchored to it); its words stay the node's."""
     from .test_charts_diagrams import Page, body_text, elements, lines, rect
 
     def page(icon: bool) -> Page:
@@ -266,8 +268,11 @@ def test_a_node_labelled_with_an_icon_keeps_its_diagram_a_picture():
         return p
 
     assert [e["kind"] for e in elements(page(False)) if e["kind"] in ("diagram", "image")] == ["diagram"]
-    kinds = [e["kind"] for e in elements(page(True))]
-    assert "diagram" not in kinds and "image" in kinds
+    found = elements(page(True))
+    [d] = [e for e in found if e["kind"] == "diagram"]
+    [icon] = [e for e in found if e["kind"] == "image"]
+    assert icon.get("anchor") == d["id"]
+    assert "�" not in json.dumps(d) and "Query" in json.dumps(d)
 
 
 def test_a_line_opening_with_an_icon_stays_text():

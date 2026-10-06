@@ -433,13 +433,29 @@ def test_a_superscript_label_is_on_its_letter_s_line():
     assert [(r["text"].strip(), r["script"]) for r in runs] == [("x", None), ("2", "super"), ("+", None)]
 
 
-def test_a_big_operator_keeps_a_diagram_a_picture():
+def test_a_box_labelled_with_a_big_operator_holds_its_picture():
+    """A box's label no run can say (a big operator) is a picture of the whole label on the box,
+    anchored to the diagram; the box stays a shape."""
     p = Page()
     p.draw(rect(60, 150, 140, 190), type="s", stroke="#000000", width=0.8)
     p.draw(lines((140, 170), (200, 170)), type="s", stroke="#000000", width=0.4)
     p.draw(rect(200, 160, 240, 180), type="s", stroke="#000000", width=0.8)
     p.text("∑", 80, 178, 10.9, font="CMEX10")
     p.text("x", 92, 172, 10.9, font="CMMI10")
+    body_text(p)
+    found = elements(p)
+    [d] = diagrams(found)
+    [picture] = [e for e in found if e["kind"] == "image"]
+    assert picture.get("anchor") == d["id"] and picture["role"] == "math"
+    assert [n["paragraphs"] for n in d["nodes"] if n["shape"]] == [[], []]
+
+
+def test_a_big_operator_between_boxes_keeps_a_diagram_a_picture():
+    p = Page()
+    p.draw(rect(60, 150, 140, 190), type="s", stroke="#000000", width=0.8)
+    p.draw(lines((140, 170), (200, 170)), type="s", stroke="#000000", width=0.4)
+    p.draw(rect(200, 160, 240, 180), type="s", stroke="#000000", width=0.8)
+    p.text("∑", 165, 166, 10.9, font="CMEX10")
     body_text(p)
     assert not diagrams(elements(p))
 

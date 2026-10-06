@@ -983,8 +983,9 @@ def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_sha
                 w, h = crop_overlay(eraser, fig, [spans[sid] for sid in _ids(fig, "spans")], path, writer)
                 fig["px"] = [w, h]
             else:
-                # A region that is one `\includegraphics` keeps the embedded file itself.
-                own = None if fig.get("anchor") or not fig.get("image") else embedded_picture(eraser, fig, path)
+                # A region that is one `\includegraphics` keeps the embedded file itself (a logo
+                # in a diagram's box too, anchored to the diagram).
+                own = None if not fig.get("image") else embedded_picture(eraser, fig, path)
                 path = own or path
                 if own is None:
                     # (an icon glyph too: FontAwesome's advance box under xelatex is half its
@@ -1024,7 +1025,7 @@ def _render_slides(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path, kept_sha
                 # bullets came out in each item's first word's colour; and a photo under a hole
                 # stays whole, the hole's ground: cut out, it left a white box that showed, over
                 # the next word, wherever Slides set the words off the PDF's place)
-                ground = [key for key, po in eraser.objects.items() if fig.get("anchor") and
+                ground = [key for key, po in eraser.objects.items() if fig.get("anchor") and not fig.get("image") and
                           po.type in (OBJ_IMAGE, OBJ_SHADING) and _inside(_grow(b, -0.5), eraser.bounds[key])]
                 eraser.remove_images_in(b, bullet_objects + ground)
                 # Stroked paths reach past the figure box by half their width, arrow tips further.

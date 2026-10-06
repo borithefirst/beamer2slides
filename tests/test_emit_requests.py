@@ -495,10 +495,44 @@ def test_anchored_pictures_share_a_group_with_their_text(decks: tuple[Emitted, .
                 text = oids[anchor]
                 if text in d.title_oids(slide):
                     continue  # (placeholders can't be grouped)
+                if any(jstr(a, "id") == anchor and a["kind"] == "diagram" for a in elements):
+                    # (a logo in a diagram's box: its diagram's group, the diagram's own id, holds
+                    # it, or its box's group in that)
+                    up = d.top(oid)
+                    while up is not None and up != text:
+                        up = d.top(up)
+                    if up is None:
+                        found.append(f"{d.name} {slide_id} {e['id']}: {oid} in group {d.top(oid)}, not in its diagram {text}")
+                    continue
                 for member in [oid] + ([f"{oid}n"] if e.get("number") else []):
                     if d.top(member) is None or d.top(member) != d.top(text):
                         found.append(f"{d.name} {slide_id} {e['id']}: {member} in group {d.top(member)}, "
                                      f"its text {text} in {d.top(text)}")
+    assert not found, report(found)
+
+
+def test_a_diagrams_pictures_cover_none_of_its_words(decks: tuple[Emitted, ...]) -> None:
+    """A picture a diagram holds comes to the front (over its box) only when it lies under none of
+    the diagram's other labelled nodes: a photo the labels are drawn on stays at the back."""
+    found: list[str] = []
+    for d in decks:
+        for slide_id, page, parts, element_ids in d.result["slides"]:
+            elements = jobjs(d.slides[page], "elements")
+            oids = {jstr(e, "id"): oid for e, oid in zip(elements, element_ids)}
+            for e in elements:
+                if e["kind"] != "diagram":
+                    continue
+                fronted = {jstr(r, "updatePageElementsZOrder", "pageElementObjectIds", 0)
+                           for r in d.part_requests(slide_id, jstr(e, "id")) if "updatePageElementsZOrder" in r}
+                for p in elements:
+                    if p.get("anchor") != e["id"] or oids[jstr(p, "id")] not in fronted:
+                        continue
+                    x0, y0, x1, y1 = jnums(p, "bbox")
+                    for j, n in enumerate(jobjs(e, "nodes")):
+                        nx0, ny0, nx1, ny1 = jnums(n, "bbox")
+                        if n.get("paragraphs") and x0 <= (nx0 + nx1) / 2 <= x1 and y0 <= (ny0 + ny1) / 2 <= y1 \
+                                and (x1 - x0) * (y1 - y0) > (nx1 - nx0) * (ny1 - ny0):
+                            found.append(f"{d.name} {slide_id} {p['id']}: brought over node {j}")
     assert not found, report(found)
 
 

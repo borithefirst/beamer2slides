@@ -242,7 +242,7 @@ def copies(el: DiagramElement, page: Page) -> tuple[list[Copy], list[JsonObject]
     def template(key: TemplateKey) -> Template:
         keys.append(key)
         return Template(id=f"tpl{len(keys) - 1}", w=TEMPLATE.w, h=TEMPLATE.h)
-    reqs = [slides_json(r) for r in diagram_requests_of(el, "s", "d", SCALE, FONTS, template, page)]
+    reqs = [slides_json(r) for r in diagram_requests_of(el, "s", "d", SCALE, FONTS, template, page, ())]
     out: list[Copy] = []
     for r, move in zip(reqs, reqs[1:]):
         if "duplicateObject" in r:

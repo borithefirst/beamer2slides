@@ -1247,7 +1247,10 @@ def body_size(raw: RawDoc) -> float:
     the same place on at least half the frames (and three of them) is a footline or headline
     ("Author (Inst.)  Short title  date"). In a Madrid/Boadilla deck with little prose - a deck
     of charts - the \\tiny footline outweighed the words, the body came out 6 pt, and every
-    size gate measured against it (tick labels belong to their chart) failed on 11 pt ticks."""
+    size gate measured against it (tick labels belong to their chart) failed on 11 pt ticks.
+    Nor the frame titles, the words in the top `TITLE_BAND` of a page, while there are words
+    below it: in a deck of diagrams with titles the titles outweighed the boxes' short labels,
+    the body came out the titles' size, and no frame had a title."""
     def key(s: RawSpan) -> tuple[str, int, int, float]:
         return s["text"].strip(), round(s["bbox"][0]), round(s["bbox"][1]), round(s["size"], 1)
     frames_of: dict[tuple[str, int, int, float], set[str | None]] = {}
@@ -1256,14 +1259,19 @@ def body_size(raw: RawDoc) -> float:
             frames_of.setdefault(key(s), set()).add(page.get("label"))
     frames = len({page.get("label") for page in raw["pages"]})
     counts: Counter[float] = Counter()
+    titles: Counter[float] = Counter()
     furniture: Counter[float] = Counter()
     for page in raw["pages"]:
         for s in page["spans"]:
             if font_info(s["font"]).family != "math":
                 repeated = frames >= 3 and len(frames_of[key(s)]) >= max(3, 0.5 * frames)
-                (furniture if repeated else counts)[round(s["size"], 1)] += len(s["text"].strip())
-    counts = counts or furniture
+                top = s["bbox"][1] < TITLE_BAND * page["size"][1]
+                (furniture if repeated else titles if top else counts)[round(s["size"], 1)] += len(s["text"].strip())
+    counts = counts or titles or furniture
     return counts.most_common(1)[0][0] if counts else 10.0
+
+
+TITLE_BAND = 0.2  # share of a page's height from its top where frame titles stand (`paragraphs`' title gate too)
 
 
 BULLET_GLYPHS = set("▶►▸‣•◦▪■□○●★⋆✓∗–")
