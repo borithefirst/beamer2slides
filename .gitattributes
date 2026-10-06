@@ -1,0 +1,3 @@
+# A PDF written by hand is ASCII: as text, a checkout would turn its line ends to CRLF and move
+# every xref offset.
+*.pdf binary
