@@ -93,7 +93,8 @@ class World:
     """Drive files as lists of slide ids, one picture per slide. `limit`: an export of more slides
     than that is too large; `huge`: a slide whose export is too large whatever else is with it;
     `broken`: copies whose export raises this; `renumber`: copies get ids of their own;
-    `refusing`: what an export of a file raises before any of that (None: nothing)."""
+    `refusing`: what an export of a file raises before any of that (None: nothing); `bare`: slides
+    with no picture at all."""
 
     def __init__(self, n: int, limit: int, huge: set[str], renumber: bool) -> None:
         self.lock = threading.Lock()
@@ -101,6 +102,7 @@ class World:
         self.pictures = {f"S{k}": png(k) for k in range(1, n + 1)}
         self.limit, self.huge, self.renumber = limit, huge, renumber
         self.broken: BaseException | None = None
+        self.bare: set[str] = set()
         self.refusing: Callable[[str], BaseException | None] = lambda fid: None
         self.calls: list[tuple[str, ...]] = []
         self.bodies: list[Mapping[str, object]] = []
@@ -109,7 +111,7 @@ class World:
         self.drive, self.slides = FakeDrive(self), FakeSlides(self)
 
     def pres(self) -> Presentation:
-        slides: list[Json] = [{"objectId": s, "pageElements": [
+        slides: list[Json] = [{"objectId": s, "pageElements": [] if s in self.bare else [
             {"objectId": f"i{s}", "image": {"contentUrl": f"u-i{s}"},
              "size": {"width": {"magnitude": 40 * EMU, "unit": "EMU"},
                       "height": {"magnitude": 20 * EMU, "unit": "EMU"}}}]}
@@ -134,7 +136,7 @@ class World:
             time.sleep(self.delay)
             if len(slides) > self.limit or self.huge & set(slides):
                 raise too_large()
-            return pptx([(PIC, {"r1": self.pictures[s]}, None) for s in slides])
+            return pptx([("", {}, None) if s in self.bare else (PIC, {"r1": self.pictures[s]}, None) for s in slides])
         finally:
             with self.lock:
                 self.running -= 1
@@ -271,7 +273,7 @@ def refuse(url: str) -> bytes:
 
 
 def every_picture(world: World) -> dict[str, bytes]:
-    return {f"i{s}": world.pictures[s] for s in world.decks["P"]}
+    return {f"i{s}": world.pictures[s] for s in world.decks["P"] if s not in world.bare}
 
 
 def texts(v: Json, where: str) -> list[str]:
@@ -293,6 +295,35 @@ def test_a_deck_too_large_to_export_whole_gives_every_picture_from_its_parts() -
     assert all(b["appProperties"] == {"b2sStaging": "P"} for b in world.bodies)
 
 
+def test_parts_hold_only_the_slides_owning_a_picture() -> None:
+    """Slides 2, 3 and 5 own no picture: no part holds them, so the halves are of 1, 4 and 6 alone,
+    each part's pictures still go to their own slides' ids, and a slide too large alone is
+    reported by its own place and id."""
+    world = World(n=6, limit=3, huge={"S4"}, renumber=False)
+    world.bare = {"S2", "S3", "S5"}
+    with google_auth.use_services(world.services()):
+        live = LivePictures(world.pres(), world.drive, refuse, 8, None, world.slides)
+        assert live.get(["iS1", "iS4", "iS6"]) == {k: v for k, v in every_picture(world).items() if k != "iS4"}
+    # whole (6) refused; (1, 4) refused, (6) out; (1) out, (4) refused alone
+    assert live.copies == 4 and live.parts == 2 and live.unexported == ["S4"]
+    assert world.left() == []
+    with google_auth.use_services(world.services()):
+        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None,
+                                       workers=deck_export.WORKERS, clients=None, only=["S1", "S4", "S6"])
+    assert [p.slides for p in done.parts] == [(0,), (5,)]
+    assert done.missing == [{"slides": [4, 4], "ids": ["S4"], "reason": "HTTP 403: This file is too large to be exported."}]
+    assert done.summary()["parts"] == [[1], [6]]
+
+
+def test_a_deck_with_no_slide_owning_a_picture_exports_one_slide_for_its_layouts() -> None:
+    world = World(n=3, limit=1, huge=set(), renumber=False)
+    world.bare = {"S1", "S2", "S3"}
+    with google_auth.use_services(world.services()):
+        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None,
+                                       workers=deck_export.WORKERS, clients=None, only=[])
+    assert done.complete and [p.slides for p in done.parts] == [(0,)] and world.copies() == ["C1"]
+
+
 def test_parts_are_exported_on_threads_three_at_a_time() -> None:
     world = World(n=9, limit=1, huge=set(), renumber=False)
     world.delay = 0.05
@@ -302,7 +333,7 @@ def test_parts_are_exported_on_threads_three_at_a_time() -> None:
         made.append(threading.get_ident())
         return world.clients()
     done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=1, workers=3,
-                                   clients=clients)
+                                   clients=clients, only=None)
     assert 1 < len(made) <= 3, "a client pair per thread"
     assert done.complete and [p.first for p in done.parts] == list(range(9))
     assert done.pictures(world.pres(), None) == every_picture(world)
@@ -313,7 +344,7 @@ def test_a_timeout_is_a_size_too() -> None:
     world = World(n=2, limit=1, huge=set(), renumber=False)
     world.refusing = lambda fid: TimeoutError("timed out") if fid == "P" else None
     with google_auth.use_services(world.services()):
-        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None)
+        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None, only=None)
     assert done.complete and len(done.parts) == 2 and done.refused is None
 
 
@@ -325,14 +356,14 @@ def test_a_permission_refusal_makes_no_copy() -> None:
         assert live.get(["iS1"]) == {}
     assert world.copies() == [] and live.exports == 1 and live.copies == 0
     assert live.unexported == ["S1", "S2", "S3", "S4"]
-    done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None)
+    done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None, only=None)
     assert done.refused is not None and "sufficient permissions" in done.refused and not done.parts
 
 
 def test_a_slide_too_large_alone_is_reported_and_the_rest_come_out() -> None:
     world = World(n=4, limit=4, huge={"S3"}, renumber=False)
     with google_auth.use_services(world.services()):
-        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None)
+        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None, only=None)
     assert [(p.first, p.end) for p in done.parts] == [(0, 2), (3, 4)]
     assert done.missing == [{"slides": [3, 3], "ids": ["S3"], "reason": "HTTP 403: This file is too large to be exported."}]
     got = done.pictures(world.pres(), None)
@@ -344,13 +375,13 @@ def test_copies_are_deleted_even_when_their_export_raises() -> None:
     world = World(n=4, limit=2, huge=set(), renumber=False)
     world.broken = api_error(400, "badRequest", "no")
     with google_auth.use_services(world.services()):
-        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None)
+        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None, only=None)
     assert not done.parts and [m["slides"] for m in done.missing] == [[1, 2], [3, 4]]
     assert world.left() == [] and done.copies == done.deleted == 2
     # whatever it raises: the copy goes, and what it raised is the caller's to hear
     world.broken = RuntimeError("a bug")
     with google_auth.use_services(world.services()), pytest.raises(RuntimeError):
-        deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None)
+        deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None, only=None)
     assert world.left() == []
 
 
@@ -362,14 +393,14 @@ def test_no_slides_client_is_the_whole_export_or_nothing() -> None:
     # a function that cannot make one is no client either
     def no_client() -> SlidesService:
         raise RuntimeError("no credentials on this thread")
-    done = deck_export.export_deck(world.drive, no_client, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None)
+    done = deck_export.export_deck(world.drive, no_client, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None, only=None)
     assert not done.parts and world.copies() == []
 
 
 def test_a_copy_with_ids_of_its_own_is_cut_by_place() -> None:
     world = World(n=3, limit=2, huge=set(), renumber=True)
     with google_auth.use_services(world.services()):
-        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None)
+        done = deck_export.export_deck(world.drive, world.slides, world.pres(), per_part=None, workers=deck_export.WORKERS, clients=None, only=None)
     assert done.complete and done.pictures(world.pres(), None) == every_picture(world)
     assert world.left() == []
 

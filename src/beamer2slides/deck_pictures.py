@@ -74,6 +74,17 @@ def picture_urls(pres: Presentation) -> dict[str, str]:
     return urls
 
 
+def picture_slides(pres: Presentation) -> list[str]:
+    """The slides (objectIds, in order) owning a picture of their own: a background picture, or an
+    image anywhere among their elements. What a master or layout holds comes with any slide."""
+    out: list[str] = []
+    for kind, page in pages(pres):
+        if kind == "slide" and (background_url(page) or any(
+                image_url(e) for e in all_elements(page.get("pageElements", []), object_id(page)))):
+            out.append(object_id(page))
+    return out
+
+
 @dataclass(frozen=True, kw_only=True)
 class Exported:
     """One object of an exported shape tree: its alt-text title and the relationship of its own
@@ -210,7 +221,8 @@ class LivePictures:
 
     `slides`: a Slides client (or a function making one, called only then), which lets a deck
     Drive will not export whole (its size, a timeout) come out in parts
-    (`deck_export.export_deck`); None: the whole export or nothing. What it took
+    (`deck_export.export_deck`), of the slides owning a picture alone (`picture_slides`); None: the
+    whole export or nothing. What it took
     is counted for reports: `exports` (export calls), `copies` (temporary copies made),
     `parts` (exports that came back), `unexported` (slide ids no export brought)."""
 
@@ -245,7 +257,8 @@ class LivePictures:
             self.exported = {}
             if self.drive is not None and self.pres.get("presentationId"):
                 from .deck_export import WORKERS as EXPORTS, export_deck
-                done = export_deck(self.drive, self.slides, self.pres, per_part=None, workers=EXPORTS, clients=None)
+                done = export_deck(self.drive, self.slides, self.pres, per_part=None, workers=EXPORTS, clients=None,
+                                   only=picture_slides(self.pres))
                 self.exports += done.exports
                 self.copies += done.copies
                 self.parts += len(done.parts)

@@ -1269,34 +1269,47 @@ def recover_pictures(elements: Sequence[TargetElement], a: SignedRGB | None, px:
     return out
 
 
+#: The eight neighbours of a pixel, (dy, dx), in the order `inpaint` adds them up.
+NEIGHBOURS = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
+
+
 def inpaint(sub: Floats32, hole: Mask) -> Floats32:
-    """`sub` with the pixels `hole` filled in from their neighbours, ring by ring inwards."""
+    """`sub` with the pixels `hole` filled in from their neighbours, ring by ring inwards: a pixel of
+    the hole next to a known one takes the mean of its known neighbours, and is known for the next
+    ring; 64 rings at most, the rest the median of what was known. Each ring reads only its own
+    pixels and their neighbours (the page around a hole is never shifted whole: that was 17 s a
+    slide at 1600 px, measured 2026-10-07), adding them up in `NEIGHBOURS`' order as ever."""
     out = sub.copy()
-    todo = hole.copy()
+    h, w = hole.shape
+    # known and still to fill, framed by a ring of pixels that are neither
+    known = np.zeros((h + 2, w + 2), dtype=bool)
+    known[1:-1, 1:-1] = ~hole
+    todo = np.zeros_like(known)
+    todo[1:-1, 1:-1] = hole
+    near = np.zeros((h, w), dtype=bool)
+    for dy, dx in NEIGHBOURS:
+        near |= known[1 - dy:1 - dy + h, 1 - dx:1 - dx + w]
+    ys, xs = np.nonzero(hole & near)
     for _ in range(64):
-        if not todo.any():
+        if not len(ys):
             break
-        known = ~todo
-        acc = np.zeros_like(out)
-        cnt = np.zeros(out.shape[:2], dtype=np.float32)
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
-            k = np.roll(np.roll(known, dy, 0), dx, 1)
-            v = np.roll(np.roll(out, dy, 0), dx, 1)
-            if dy == -1:
-                k[-1, :] = False
-            if dy == 1:
-                k[0, :] = False
-            if dx == -1:
-                k[:, -1] = False
-            if dx == 1:
-                k[:, 0] = False
-            acc += v * k[..., None]
+        acc = np.zeros((len(ys), out.shape[2]), dtype=out.dtype)
+        cnt = np.zeros(len(ys), dtype=np.float32)
+        for dy, dx in NEIGHBOURS:
+            ny, nx = ys - dy, xs - dx
+            k = known[ny + 1, nx + 1]
+            acc += out[np.clip(ny, 0, h - 1), np.clip(nx, 0, w - 1)] * k[:, None]
             cnt += k
-        fill = todo & (cnt > 0)
-        out[fill] = acc[fill] / cnt[fill][:, None]
-        todo &= ~fill
-    if todo.any() and (~hole).any():
-        out[todo] = np.median(sub[~hole], axis=0)
+        out[ys, xs] = acc / cnt[:, None]
+        known[ys + 1, xs + 1] = True
+        todo[ys + 1, xs + 1] = False
+        # the next ring: what is left to fill next to what was just filled
+        at = np.concatenate([(ys + 1 + dy) * (w + 2) + xs + 1 + dx for dy, dx in NEIGHBOURS])
+        at = np.unique(at[todo.ravel()[at]])
+        ys, xs = at // (w + 2) - 1, at % (w + 2) - 1
+    left = todo[1:-1, 1:-1]
+    if left.any() and (~hole).any():
+        out[left] = np.median(sub[~hole], axis=0)
     return out
 
 

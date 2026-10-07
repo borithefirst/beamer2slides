@@ -758,8 +758,10 @@ markers.
   (`guard.write_whole`). A deck too large to export whole (403 `exportSizeLimitExceeded`, or a
   timeout; never a permission refusal) comes out in parts where a Slides client is at hand
   (`deck_export.export_deck`: Drive copies, which keep every objectId, cut to half the slides and
-  halved again, deleted in a `finally`, tagged `b2sStaging`): `LivePictures(slides=)`, backups in
-  parts (a rebuild still also gets its Drive copy), `tools/deck_export.py`.
+  halved again, deleted in a `finally`, tagged `b2sStaging`; `only` names the slides the parts
+  hold, every other one cut from each copy): `LivePictures(slides=)` (only the slides owning a
+  picture, `deck_pictures.picture_slides`), backups in parts (a rebuild still also gets its Drive
+  copy), `tools/deck_export.py`.
 - PowerShell 5.1 mangles double quotes inside native-command arguments: keep them out of git
   commit messages. `Get-Content -Raw` reads BOM-less UTF-8 as ANSI: edit text files with the
   editor tools.

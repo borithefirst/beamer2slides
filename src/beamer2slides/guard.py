@@ -473,7 +473,8 @@ def export_parts(drive: DriveService, slides: SlidesService, pid: str, path: Pat
     n = len(deck_ids(pres)[1])
     if n < 2:
         return {"parts": [], "missing": [{"slides": [1, n], "reason": "a deck of one slide has no parts"}]}
-    done = export_deck(drive, slides, pres, per_part=(n + 1) // 2, workers=EXPORTS, clients=None)
+    done = export_deck(drive, slides, pres, per_part=(n + 1) // 2, workers=EXPORTS, clients=None,
+                       only=None)
     parts: list[PartFile] = []
     for part in done.parts:
         file = path.with_name(f"{path.stem}-{part.name}.pptx")

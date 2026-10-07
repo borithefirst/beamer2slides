@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from beamer2slides import adopt, adopt_shapes, deck_fills
-from beamer2slides.arrays import RGB, Floats, Mask, SignedRGB
+from beamer2slides.arrays import RGB, Floats, Floats32, Mask, SignedRGB
 from beamer2slides.deck_ir import Fetch, page_size_for
 from beamer2slides.deck_ir_types import TargetImage, TargetShape, parse_page_gradient
 from beamer2slides.google_types import presentation
@@ -1271,3 +1271,49 @@ def test_pull_writes_a_round_picture_clipped_and_outlined_round():
     tex = picture_latex(te, Picture("p.png", Path("p.png"), (50.0, 30.0)), fresh_context(BEAMER_PT), None)
     assert "\\clip (0pt,0pt) ellipse [x radius=50.00pt,y radius=30.00pt]" in tex, tex
     assert "\\draw[draw=" in tex and tex.count("ellipse [") == 2, tex
+
+
+def shifted_inpaint(sub: Floats32, hole: Mask) -> Floats32:
+    """`deck_fills.inpaint` as it was until 2026-10-07: every ring shifts the whole page eight ways."""
+    out = sub.copy()
+    todo = hole.copy()
+    for _ in range(64):
+        if not todo.any():
+            break
+        known = ~todo
+        acc = np.zeros_like(out)
+        cnt = np.zeros(out.shape[:2], dtype=np.float32)
+        for dy, dx in deck_fills.NEIGHBOURS:
+            k = np.roll(np.roll(known, dy, 0), dx, 1)
+            v = np.roll(np.roll(out, dy, 0), dx, 1)
+            if dy == -1:
+                k[-1, :] = False
+            if dy == 1:
+                k[0, :] = False
+            if dx == -1:
+                k[:, -1] = False
+            if dx == 1:
+                k[:, 0] = False
+            acc += v * k[..., None]
+            cnt += k
+        fill = todo & (cnt > 0)
+        out[fill] = acc[fill] / cnt[fill][:, None]
+        todo &= ~fill
+    if todo.any() and (~hole).any():
+        out[todo] = np.median(sub[~hole], axis=0)
+    return out
+
+
+def test_inpaint_reads_only_its_rings_and_paints_the_same_bytes():
+    rng = np.random.default_rng(1)
+    cases: list[tuple[Floats32, Mask]] = []
+    for _ in range(30):
+        h, w = int(rng.integers(3, 40)), int(rng.integers(3, 40))
+        cases.append((rng.uniform(0, 255, (h, w, 3)).astype(np.float32), rng.random((h, w)) < rng.uniform(0.1, 0.99)))
+    # a hole on the page's edges, deeper than the 64 rings: its middle is the median
+    deep = np.zeros((90, 160), dtype=bool)
+    deep[5:, 10:-3] = True
+    cases.append((rng.uniform(0, 255, (90, 160, 3)).astype(np.float32), deep))
+    cases.append((rng.uniform(0, 255, (8, 8, 3)).astype(np.float32), np.ones((8, 8), dtype=bool)))
+    for sub, hole in cases:
+        assert deck_fills.inpaint(sub, hole).tobytes() == shifted_inpaint(sub, hole).tobytes()
