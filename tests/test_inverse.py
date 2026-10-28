@@ -28,6 +28,7 @@ from beamer2slides.inverse import (BEAMER_PT, TITLE_STYLE, Candidate, Planner, R
                                    enclosing_group, ensure_preamble, frame_latex, fresh_context, latex_escape, loop_run, loop_texts,
                                    runs_latex, size_switch)
 from beamer2slides.json_types import Json, JsonObject, as_optional_str
+from beamer2slides import pieces
 from beamer2slides.texmap import (OPAQUE, Frame, Source, build_visible, locate_words, mask_comments, page_frames,
                                   read_args, synctex_pages, visible_text)
 
@@ -671,12 +672,20 @@ def outline_pages(path: Path) -> list[tuple[int, bytes, int]]:
 
 
 @pytest.mark.skipif(lualatex_missing() is not None, reason="lualatex not found")
-def test_a_compile_in_pieces_is_the_pages_of_a_whole_one(tmp_path: Path) -> None:
+def test_a_compile_in_pieces_is_the_pages_of_a_whole_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The converge loop cuts a lualatex compile into pieces on as many cores (`pieces`,
     `Workspace.compile_in_pieces`). Each tree below is compiled so, then whole and cold in a
     workspace of its own: the same pages to the pixel, the same outline, and SyncTeX's pages
-    for every page. A body edit, and a frame and a section coming in ahead of every cut (the
-    pieces after it begin a page off, and passes go on until they read what they write)."""
+    for every page. The first compile's first pass is whole (no .aux to cut by) and its second
+    in pieces, settled at once. A body edit, and a frame and a section coming in ahead of every
+    cut (the pieces after it begin a page off, and passes go on until they read what they write)."""
+    passes: list[int] = []
+    piece_pass = Workspace.piece_pass
+
+    def counted(self: Workspace, cmd: list[str], job: str, plan: list[pieces.Cut]) -> tuple[str, bool, bool]:
+        passes.append(len(plan))
+        return piece_pass(self, cmd, job, plan)
+    monkeypatch.setattr(Workspace, "piece_pass", counted)
     src = tmp_path / "src"
     src.mkdir()
     main = src / "main.tex"
@@ -693,8 +702,9 @@ def test_a_compile_in_pieces_is_the_pages_of_a_whole_one(tmp_path: Path) -> None
             ws.main.write_text(tree, encoding="utf-8")
             split, error = ws.compile()
             assert split is not None, error
-            if n:
-                assert ws.piece_syncs is not None, f"tree {n} was compiled in pieces ({ws.split_refused})"
+            assert ws.piece_syncs is not None, f"tree {n} was compiled in pieces ({ws.split_refused})"
+            if n == 0:
+                assert passes == [3], "one pass in pieces after the whole first one"
             cold, error = Workspace(main, tmp_path / f"cold{n}", handout=False, engine="lualatex",
                                     fresh=True).compile()
             assert cold is not None, error

@@ -761,6 +761,7 @@ class Workspace:
             return pdf, ""
         self.compiled = None
         failed = False
+        cut = False
         if split:
             settled, failed = self.compile_in_pieces(cmd, job)
             if settled:
@@ -769,8 +770,11 @@ class Workspace:
                 if tree_digest(self.src, "\0".join(cmd)) == key:
                     self.compiled = key
                 return pdf, ""
-        error = self.compile_whole(cmd, job, 2 * self.pieces if split else 1)
-        if failed and not error:
+            # a first compile has no .aux to cut by: its first pass writes one, and the passes after
+            # it go in pieces when the source labels enough frames to cut at
+            cut = not (self.build_dir / f"{job}.aux").is_file() and labelled_frames(self.source) >= self.pieces
+        error, failed_late = self.compile_whole(cmd, job, 2 * self.pieces if split else 1, cut)
+        if (failed or failed_late) and not error:
             # a piece failed where the whole compiles: this source is not for cutting
             self.split_refused, self.pieces = "a piece failed where the whole compiles", 0
         # a compile that wrote into the tree it read (minted, an externalised picture) is not
@@ -779,12 +783,16 @@ class Workspace:
             self.compiled = key
         return (None, error) if error else (pdf, "")
 
-    def compile_whole(self, cmd: list[str], job: str, engines: int) -> str:
-        """Passes of the whole document until its auxiliary files settle: the error, or "".
-        `engines`: how many to start waiting for the next pass (`warm_up`)."""
+    def compile_whole(self, cmd: list[str], job: str, engines: int, cut: bool) -> tuple[str, bool]:
+        """Passes of the whole document until its auxiliary files settle: (the error or "", whether a
+        piece failed). `engines`: how many to start waiting for the next compile (`warm_up`).
+        `cut`: the passes after the first go in pieces (`compile_in_pieces`) once it wrote an .aux
+        to cut by, an engine per piece warming up on the other cores while it runs; when they do
+        not settle, the passes go on whole."""
         self.piece_syncs = None
         log = ""
         error = ""
+        failed = False
         before = aux_state(self.build_dir)
         kept = aux_files(self.build_dir)
         for attempt in range(3):
@@ -792,7 +800,9 @@ class Workspace:
             warm = taken[0] if taken else None
             for spare in taken[1:]:
                 stop_engine(spare.process)
-            if self.warm_up:
+            if cut:
+                self.start_warm(cmd, self.pieces)
+            elif self.warm_up:
                 self.start_warm(cmd, 1)
             given = aux_files(self.build_dir) if warm is not None else {}
             code = self.run_warm(warm, job) if warm is not None else None
@@ -824,11 +834,20 @@ class Workspace:
             before, after = aux_state(self.build_dir), before
             if (before == after and not needs_rerun(log)) or attempt == 2:
                 break
+            if cut:
+                cut = False
+                settled, failed = self.compile_in_pieces(cmd, job)
+                if settled:
+                    break
+                # refused, or not settled: whole from the folder these passes left
+                before = aux_state(self.build_dir)
         if not error and self.warm_up and engines > 1:
             # one engine waited for each pass; the next compile, in pieces, wants two a piece: one for
             # its first pass, one for the next when a page came or went
             self.start_warm(cmd, engines)
-        return error
+        elif not self.warm_up:
+            self.stop_warm()
+        return error, failed
 
     def compile_in_pieces(self, cmd: list[str], job: str) -> tuple[bool, bool]:
         """Passes in pieces (`pieces`) until the auxiliary files settle, cut where the last compile's
@@ -1030,6 +1049,7 @@ class Workspace:
                        B2S_WARM_LINE=str(at))
             process = subprocess.Popen(command, cwd=self.src, env=env, stdin=subprocess.PIPE,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            behind(process)
             WARM_ENGINES.add(process)
             self.warm.append(Warm(process=process, folder=folder, command=tuple(cmd), head=head, others=others))
 
@@ -1257,6 +1277,22 @@ def spec_file(folder: Path) -> Path:
     return folder.with_name(folder.name + ".spec")
 
 
+# How far a waiting engine stands back from the pass running beside it: its start-up and preamble
+# take the cores the pass leaves, and give way where they share one (a first compile's pass 1 ran
+# 0.5 s faster on water x8 beside four engines, docs/compile-latency.md). An engine keeps it for
+# the pass it is let go into: a process may not raise its own priority again.
+WARM_NICE = 10
+
+
+def behind(process: "subprocess.Popen[bytes]") -> None:
+    """Lower `process`'s priority by `WARM_NICE`, where the system has priorities."""
+    if os.name != "nt":
+        try:
+            os.setpriority(os.PRIO_PROCESS, process.pid, WARM_NICE)
+        except OSError:
+            pass   # gone already
+
+
 def stop_engine(process: "subprocess.Popen[bytes]") -> None:
     if process.poll() is None:
         process.kill()
@@ -1325,12 +1361,16 @@ def aux_state(folder: Path) -> dict[str, int]:
 
 
 def piece_state(folder: Path) -> dict[str, int]:
-    """`aux_state` with the lines `pieces` writes: where each piece begins is read from them."""
-    return {str(p.relative_to(folder)): zlib.crc32(language_switches(data)) for p, data in aux_files(folder).items()}
+    """`aux_state` with the lines `pieces` writes: where each piece begins is read from them. Not
+    the registers where the document began (`\\btwos@base`): no pass reads that line, each counts
+    them afresh, and a first pass found none of what its .aux gave the second (a pass more)."""
+    return {str(p.relative_to(folder)): zlib.crc32(language_switches(PIECE_BASE.sub(b"", data)))
+            for p, data in aux_files(folder).items()}
 
 
 # what `pieces.PIECES_LUA` writes to the .aux
 PIECE_LINES = re.compile(rb"^\\btwos@[^\n]*\n?", re.MULTILINE)
+PIECE_BASE = re.compile(rb"^\\btwos@base\{[^\n]*\n?", re.MULTILINE)
 
 
 # a line babel writes to the .aux / .toc where the text switches language
@@ -3801,10 +3841,17 @@ def uses_notes(source: Source) -> bool:
     return any(re.search(r"\\note\b", mask_comments(t)) for t in source.texts.values())
 
 
+def labelled_frames(source: Source) -> int:
+    """About how many frames the source labels (`label=` in an option list): a first compile warms
+    engines for pieces only when there is something to cut at (`pieces.cuts` decides)."""
+    return sum(len(re.findall(r"[\[,]\s*label\s*=", mask_comments(t))) for t in source.texts.values())
+
+
 def ir_from_tex(tex: Path, work: Path, handout: bool) -> JsonObject:
     """classify IR of a source as the loop sees it (slide keys from frame labels, pictures cropped
     into work/pictures so they can be hashed): a target made from another source."""
     ws = Workspace(tex, work, handout=handout, engine=None, fresh=True)
+    ws.pieces = piece_count()
     cand = ws.build(work / "classify", uses_notes(ws.source), None)
     if isinstance(cand, str):
         raise RuntimeError(f"{tex} does not compile:\n{cand}")

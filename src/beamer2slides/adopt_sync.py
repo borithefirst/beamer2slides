@@ -652,10 +652,12 @@ def convert_source_of(tex: Path, work: Path, engine: str | None, page_width: flo
     from .extract import select_overlays
     from .inverse import Workspace
     from .notes import read_with_notes
+    from .pieces import piece_count
     from .render import render_backgrounds
     from .sync import planned
 
     ws = Workspace(Path(tex), work / "compile", handout=False, engine=engine, fresh=True)
+    ws.pieces = piece_count()   # the passes after the first on every core (docs/compile-latency.md)
     pdf, err = ws.compile()
     if pdf is None:
         return None, err

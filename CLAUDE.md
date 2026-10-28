@@ -499,7 +499,8 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   and every other file's size and mtime are unchanged); a lualatex pass with an .aux to cut by runs
   in pieces on up to 4 cores (`pieces.py`, `Workspace.compile_in_pieces`: frames skipped to labelled
   checkpoints of count registers, .aux merged, PDFs joined by `pdf/pure/join.py`, settled as a
-  fixpoint, anything unknown compiled whole; `$B2S_COMPILE_PIECES`). Fonts go into a tree with `copy2`:
+  fixpoint, anything unknown compiled whole; `$B2S_COMPILE_PIECES`; a first compile's passes after
+  the first too, `compile_whole(cut=)`; waiting engines at nice 10, `WARM_NICE`). Fonts go into a tree with `copy2`:
   luaotfload caches by font name and mtime, a fresh mtime re-caches every font. Every lualatex
   compile (and adopt's preamble) carries `inverse.NO_GLYPH_STREAMS`: luaotfload writes a static
   font with a STAT table (every google/fonts cut) from its whole-font streams cache, a quarter of

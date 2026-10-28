@@ -631,3 +631,48 @@ writing its own .aux lines (refused by `KNOWN`, then whole). `\pageref` and link
 another piece read the merged .aux, so they are right once settled; a link's target inside the
 joined PDF is right when its name is. Overlay pages of one frame never split. pdflatex and xelatex
 always compile whole.
+
+## Done: a first compile on every core (2026-10-28)
+
+A compile in pieces needs the .aux of a compile before it, so a source's first compile (adopt's
+first round, adopt's base, every `convert_source` of a sync, `ir_from_tex`) was whole: two passes
+on one core. Now its first pass is whole, it writes the .aux with the checkpoints, and **the
+passes after it go in pieces** (`Workspace.compile_whole(cut=...)`). The engines for those pieces
+start while pass 1 runs, on the cores it leaves, when the source labels enough frames to cut at
+(`labelled_frames`, a guess from the text; `pieces.cuts` decides). Without `warm_up` they are
+stopped once the compile is done. Three changes made it pay:
+
+- **The settle test read a line no pass reads.** The pieces' first pass did not settle, so a
+  second ran cold (water x8: 8.5 s, the same as whole). The line was `\btwos@base` (the registers
+  where the document began), which counts what pass 1's empty .aux gave (two registers 0 -> 85 on
+  talk). TeX defines the command to do nothing, and every pass counts the start afresh, so
+  `piece_state` leaves the line out (`PIECE_BASE`). The test fails with it put back (`[3, 3]` piece passes).
+- **Waiting engines stand back** (`WARM_NICE` = 10, `behind`): four engines reading the preamble
+  beside pass 1 on four cores slowed it from 4.2 to 5.0 s; at nice 10 they took 0.5 s less
+  (A/B twice). An engine keeps that priority for the pass it then compiles, because a process may
+  not raise its own priority. Nothing else then runs on the machine during a compile.
+- `adopt_sync.convert_source_of` and `ir_from_tex` set `pieces` (one-shot: no engines kept after).
+
+| first compile, fresh folder (wall, 4 rounds interleaved, 4 cores) | whole | later passes in pieces |
+|---|---|---|
+| water x8 (48 slides)                    | 8.2-9.1 s | 6.0-6.6 s |
+| hashing x8 (48)                         | 5.8-6.0 s | 3.9-4.2 s |
+| talk x8 (40)                            | 4.4-4.7 s | 3.0-3.2 s |
+| tikz_diagrams (39 pages)                | 6.3-6.5 s | 4.0-4.2 s |
+| metropolis talk (9)                     | 3.3-3.5 s | 2.6-3.1 s |
+| hashing (6 slides)                      | 3.1-3.2 s | 2.0-2.1 s |
+
+The adopted decks were bootstrapped again with today's `slides.sty`. Pixels and the outline were
+the same on every deck. Handout mode (a labelled notes deck x3, water x8; first compile, a body
+edit, a frame and a section inserted) gave the same pixels in pieces as whole.
+
+**Notes shown are not cut.** A `\note` written after a frame, outside it, needs that frame's
+`\beamer@shortframetitle`. A piece starting right after that frame never defined it, so the piece
+fails. The compile goes on whole, with the same pixels (checked), and `pieces` is 0 for that workspace
+from then on: one wasted piece pass. Carrying macros across a skipped frame (not only count
+registers) would fix it. Not done.
+
+What is left of a first compile is pass 1 itself, one core (water x8: 4.2 s of 6.0). Cutting it too
+would mean pieces with no checkpoints, each starting from guessed numbers (a piece's sections are
+right, its pages are not), settled by `carried` over more piece passes. That is about 3 passes
+of ~1.2 s against one of 4.2, if `carried` learns to start from nothing. Not done.
