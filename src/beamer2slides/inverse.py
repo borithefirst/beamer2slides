@@ -703,6 +703,7 @@ class Workspace:
         self.patch_refused = ""   # why the last compile meant for pieces typeset more than the frames edited
         self.patched = 0   # compiles that typeset only the frames edited
         self.split_refused = ""   # why the last compile meant for pieces went whole
+        self.marks_apart = False   # the last piece pass's bookmarks did not follow on
         self.warmed = 0   # sets of engines started (`start_warm`)
         self.engines = 0   # engines started, each in a folder of its own
         self.warm_failures_real = False   # a failure of a waiting engine was seen to fail cold too
@@ -969,7 +970,10 @@ class Workspace:
             given = aux.read_text(encoding="utf-8", errors="replace")
             refused, failed, agree = self.piece_pass(cmd, job, plan)
             after = piece_state(self.build_dir)
-            if not refused and not agree and after == before:
+            if not refused and after == before and self.marks_apart:
+                # every piece began where the one before it ended: bookmarks of its own
+                refused = "the pieces' bookmarks do not follow on"
+            elif not refused and not agree and after == before:
                 # every piece began where the one before it ended, and still the pages do not add up
                 refused = "the pieces' pages and the .aux disagree"
             if refused:
@@ -1004,19 +1008,22 @@ class Workspace:
         if isinstance(opened, str):
             return opened, False, False
         # every piece writes the bookmarks of the sections up to where it stops: the last one's
-        # are the whole's, of which the others' are the start
+        # are the whole's, of which the others' are the start. Not yet, when a piece began at
+        # stale numbers (a section came in ahead of it, its anchor `Outline0.N` one off): a pass
+        # that has not settled, whose PDF nobody keeps - its .aux still starts the next nearer
         marks = [(out / f"{job}.out").read_bytes() if (out / f"{job}.out").is_file() else b"" for out in outs]
-        if any(not marks[-1].startswith(mine) for mine in marks):
-            return "the pieces' bookmarks do not follow on", False, False
+        self.marks_apart = any(not marks[-1].startswith(mine) for mine in marks)
         whole = pieces.merged([(out / f"{job}.aux").read_text(encoding="utf-8", errors="replace") for out in outs],
                               sorted(opened))
         if isinstance(whole, str):
             return whole, False, False
         from .pdf import PdfError, join_files
-        try:
-            pages = join_files([out / f"{job}.pdf" for out in outs], self.build_dir / f"{job}.pdf")
-        except PdfError as e:
-            return str(e), False, False
+        pages = -1
+        if not self.marks_apart:
+            try:
+                pages = join_files([out / f"{job}.pdf" for out in outs], self.build_dir / f"{job}.pdf")
+            except PdfError as e:
+                return str(e), False, False
         (self.build_dir / f"{job}.aux").write_text(whole.aux, encoding="utf-8")
         for ext, text in whole.contents.items():
             (self.build_dir / f"{job}.{ext}").write_text(text, encoding="utf-8")

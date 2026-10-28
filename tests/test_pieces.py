@@ -161,7 +161,8 @@ def test_an_edit_the_other_frames_pages_cannot_stand_through_is_refused() -> Non
         found = pieces.patches(PATCHED_TEX, after, aux, pieces_)
         assert isinstance(found, str), found
         return found
-    assert "structure" in refused(PATCHED_TEX.replace("words 3", "\\section{New} words 3"))
+    assert refused(PATCHED_TEX.replace("words 3\\end{frame}\n", "words 3\\end{frame}\n\\section{New}\n")) \
+        == "the edit changes the document's structure (\\section)"
     assert "structure" in refused(PATCHED_TEX.replace("words 3", "words \\pause 3"))
     assert "structure" in refused(PATCHED_TEX.replace("words 3", "\\label{x}words 3"))
     assert "structure" in refused(PATCHED_TEX.replace("\\section{S}", "\\section{Renamed}"))

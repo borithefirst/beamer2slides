@@ -501,7 +501,8 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   checkpoints of count registers, .aux merged, PDFs joined by `pdf/pure/join.py`, settled as a
   fixpoint, anything unknown compiled whole; `$B2S_COMPILE_PIECES`; a first compile's passes after
   the first too, `compile_whole(cut=)`; waiting engines at nice 10, `WARM_NICE`; a register set to a
-  page moves with the pages, `carried`). A compile whose edit stays inside frames typesets only those
+  page moves with the pages, `carried`; an unsettled pass whose bookmarks do not follow on merges
+  its .aux and joins nothing, `marks_apart`). A compile whose edit stays inside frames typesets only those
   (`compile_patched`, `pieces.patches`: pages per frame from `\btwos@shipped`, kept only when the
   pieces wrote the last .aux lines again; `pieces.STRUCTURE` refuses before compiling; the join
   gives a name to its earliest page). Fonts go into a tree with `copy2`:

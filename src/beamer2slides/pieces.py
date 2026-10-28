@@ -457,7 +457,8 @@ def patches(before: str, after: str, aux: str, pieces: int) -> list[Patch] | str
             was = [m.group(0) for m in STRUCTURE.finditer(mask_comments(a))]
             now = [m.group(0) for m in STRUCTURE.finditer(mask_comments(b))]
             if was != now:
-                changed = next((x for x, y in zip(was, now) if x != y), (was + now)[min(len(was), len(now))])
+                at = next((i for i, (x, y) in enumerate(zip(was, now)) if x != y), min(len(was), len(now)))
+                changed = (now if len(now) >= len(was) else was)[at]   # what came in, or went
                 return f"the edit changes the document's structure ({changed.split('{')[0]})"
 
     def first(a: int) -> int:

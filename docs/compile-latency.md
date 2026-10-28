@@ -736,6 +736,22 @@ cold whole pass followed (water x8, a frame inserted: up to 8.5 s instead of 4.4
 register set at a checkpoint to a page of the frame just typeset is moved with the pages, unless
 it was already there at the checkpoint before (then it counts along with the pages, like
 a frame number). Tests: `tests/test_pieces.py`.
+Scored against the settled checkpoints of 10 page and 3 section edits on water x8, this rule
+and the first one we tried (shift every register set at a checkpoint to a moved page) both guess
+every register exactly. We kept the one tested for registers that were not moving at the cut.
+
+**Bookmarks apart in a pass that has not settled.** Each piece writes its section bookmarks under
+anchors `Outline0.N`, which follow the section counter. In a pass whose checkpoints are still
+stale (a section just came in), the pieces' bookmarks do not follow on, and the join refused:
+"the pieces' bookmarks do not follow on". That refusal also switched pieces off for the rest of
+the session (`split_refused`), so every later compile was whole. Now such a pass merges its .aux
+anyway and joins no PDF (`Workspace.marks_apart`), so the next pass runs from settled
+checkpoints. Only a pass that has settled and still disagrees is refused. Water x8, six sections
+inserted one after another: the third went from 10.5 s to 5.7 s, and the ones after it from 8-10 s
+(whole) to 2.9-5.9 s (pieces). Every edit gave the whole compile's pixels: 6 section, 5 frame
+and 4 word edits, each compared with a whole compile of the same source
+(scratch `patch_each.py`). The refusal of a structure edit now names what came in
+(`\section`), not the first line that differs.
 
 **Tried, saved nothing: settling each piece apart.** A frame insert still takes three piece
 passes (1.1 + 1.1 + 2.2 s, the third cold). Reading each piece's .aux only up to where it starts
