@@ -618,3 +618,66 @@ def test_an_engine_waiting_on_the_preamble_compiles_what_a_cold_one_compiles(tmp
                 assert len(used) >= 2, "a body edit is compiled by the engine waiting on its preamble"
     finally:
         ws.stop_warm()
+
+
+def stat_font() -> bytes:
+    """A static font that keeps a STAT table, as every instance cut from a google/fonts variable
+    font does (`fontfetch`): no fvar, so no axes."""
+    import io
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.otlLib.builder import buildStatTable
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    fb = FontBuilder(1000, isTTF=True)
+    glyphs = [".notdef", "A"]
+    fb.setupGlyphOrder(glyphs)
+    fb.setupCharacterMap({ord(c): "A" for c in map(chr, range(33, 127))})
+    pen = TTGlyphPen(None)
+    pen.moveTo((0, 0)), pen.lineTo((0, 500)), pen.lineTo((500, 0)), pen.closePath()
+    glyph = pen.glyph()
+    fb.setupGlyf({g: glyph for g in glyphs})
+    fb.setupHorizontalMetrics({g: (600, 0) for g in glyphs})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Stat Sans", "styleName": "Regular"})
+    fb.setupOS2(usWeightClass=400)
+    fb.setupPost()
+    buildStatTable(fb.font, [{"tag": "wght", "name": "Weight",
+                              "values": [{"value": 400, "name": "Regular", "flags": 2}]}])
+    buf = io.BytesIO()
+    fb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.skipif(lualatex_missing() is not None, reason="lualatex not found")
+def test_a_static_font_with_a_stat_table_is_written_from_its_own_file(tmp_path: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch):
+    """luaotfload takes a STAT table for variation data and gives the font a glyph stream
+    provider, which loads the whole-font streams cache at PDF write: a quarter of a fetched-font
+    deck's pass. The loop's lualatex runs take that away (`inverse.NO_GLYPH_STREAMS`); the font
+    the page says it used reports the provider, and the pages are the same pixels either way."""
+    from beamer2slides import inverse
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "StatSans-Regular.ttf").write_bytes(stat_font())
+    main = src / "main.tex"
+    main.write_text("\\documentclass{article}\\usepackage{fontspec}\\setmainfont{StatSans-Regular.ttf}[Path=./]\n"
+                    "\\begin{document}ABC\\directlua{texio.write_nl('STREAM ' .. "
+                    "tostring(fonts.hashes.identifiers[font.current()].streamprovider))}\\end{document}\n",
+                    encoding="utf-8")
+
+    def compiled(name: str) -> tuple[str, list[bytes]]:
+        ws = Workspace(main, tmp_path / name, handout=False, engine="lualatex", fresh=True)
+        pdf, error = ws.compile()
+        assert pdf is not None, error
+        log = (pdf.with_suffix(".log")).read_text(encoding="utf-8", errors="replace")
+        said = [line.split()[1] for line in log.splitlines() if line.startswith("STREAM ")]
+        assert said, "the page reported its font"
+        return said[0], pages_of(pdf)
+
+    fixed = compiled("fixed")
+    monkeypatch.setattr(inverse, "NO_GLYPH_STREAMS", "")
+    plain = compiled("plain")
+    if plain[0] == "nil":
+        pytest.skip("this luaotfload gives a static font no stream provider")
+    assert plain[0] == "2"
+    assert fixed[0] == "nil"
+    assert fixed[1] == plain[1]

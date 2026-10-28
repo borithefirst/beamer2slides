@@ -121,9 +121,10 @@ A frame left out costs ~4 ms; a one-frame compile is the fixed cost and little e
 
 ## One-off costs
 
-The first lualatex run on a machine with an empty font cache (`/var/lib/texmf/luatex-cache` here)
-takes **10.5 s instead of 1.4 s**: luaotfload builds its name database and caches each font it
-parses. Every fresh container pays it - CI, and each new Cloud Run instance of the playground.
+The first lualatex run on a machine with an empty font cache takes **10.5 s instead of 1.4 s**:
+luaotfload builds its name database and caches each font it parses. Every fresh container pays
+it - CI, each new Cloud Run instance of the playground, a sandbox. See "A fresh machine" below
+for what it costs in parts and how an image avoids it.
 
 ## Compile against the rest of a round
 
@@ -156,8 +157,8 @@ Not worth it: SyncTeX, compression, draft mode, the PDF writer, Lua shaping call
 - The scaled decks repeat their own slides: the content mix of a real 50-slide talk differs.
   The corpus decks (devfest2020's 28 s for two passes) need Google to fetch and were not run.
 - Adopted sources ran with stand-in fonts (TeX Gyre): `define_font` took 1.4-3 ms a call,
-  0.015-0.063 s a deck. Real Google Fonts through fontspec, and decks with many faces, were not
-  measured.
+  0.015-0.063 s a deck. Real Google Fonts were measured later (water with its fetched fonts,
+  "Done: fonts with a STAT table" below).
 - Windows / MiKTeX was not measured.
 
 ## Deeper: is the CPU justified? (2026-10-28)
@@ -319,3 +320,112 @@ the font cache, though not measured in one sitting). Residuals per round are ide
 run. Per deck, one pass in each run missed its engine, rightly: `ensure_preamble` changed the
 preamble. On talk a warm pass takes 0.3-0.9 s. Water gains least: the engine saves the same start-up
 and preamble, but its passes are mostly body.
+
+## A fresh machine (2026-10-28)
+
+What the first lualatex run on a new machine pays, in parts (same VM, TeX Live 2023):
+
+| run | wall |
+|---|---|
+| article, no font cache at all (names database built) | 7-8 s on a warm disk, 53 s cold |
+| the same article again | 0.5 s |
+| talk (adopted, 5 faces), no cache at all | 9.5 s |
+| talk, names database present, no per-font caches | 2.2 s |
+| talk, everything cached | 1.4 s |
+| pdflatex, no cache at all | 0.58 s (no such cost) |
+
+**The cache must be built by the user who compiles.** luaotfload looks for its names database
+only under the first cache folder it may *write* (`luaotfload-configuration.lua`,
+`build_cache_paths`: the names path is `getwritablepath(...)`), never in a read-only one. A
+database built as root in `/var/lib/texmf/luatex-cache` is not read by user 1000: run as the
+`ubuntu` user, lualatex said "Font names database not found, generating new one" and took 8.2 s,
+with root's database sitting right there. So:
+
+- **The playground image** (`Dockerfile`) runs `luaotfload-tool -u` and one beamer + fontspec
+  compile *after* `USER player`. The database and the TeX Gyre / Latin Modern caches go into
+  the image under `/home/player`, and a new Cloud Run instance's first compile pays 1-2 s, not
+  9-55 s. (Cloud Run's writable layer is in memory: a font cache written at run time is lost
+  with the instance, the image's is not.)
+- **Any other sandbox** (`adopt_bench.sandbox` runs as the bench's own user; a gVisor or
+  container sandbox an agent runs in): either warm it the same way as the user it runs as, or
+  set `TEXMFCACHE` to one writable folder that is kept between runs and was filled once. A
+  read-only prefilled cache is no use for the names database (above); per-font caches in a
+  read-only folder are read.
+- **Fonts copied into a tree keep their mtime** (`copy2`, "Fonts were re-cached every run"
+  above): luaotfload's per-font cache is keyed by name, size and mtime, so a fresh mtime is a
+  fresh parse. The same holds when timing by hand: `cp -r` gives new mtimes and two trees
+  alternating thrash each other's cache (one A/B arm read 15 s instead of 6).
+
+## Done: fonts with a STAT table (2026-10-28)
+
+water with its real fonts (fetched from google/fonts, Latin + Arabic + Hebrew + CJK fallback)
+spent a quarter of each pass on something no page needs. luaotfload (`luaotfload-features.lua`)
+wraps `fonts.constructors.trytosharefont` so that any font with variation data gets a *glyph
+stream provider*: at PDF write the `glyph_stream_provider` callback loads that font's whole
+"streams" cache (5-18 MB for a CJK face, ~0.2 s each) to write the glyphs. That is right for a
+variable font used at some axis value. But the font reader (`readers.stat`) makes variation
+data out of a STAT table alone, and every static instance `fontfetch` cuts from a google/fonts
+variable font keeps its STAT table: a font with no axes at all was being written the slow way.
+The same code is in luaotfload's current main.
+
+The fix is one line of Lua before any font loads (`inverse.NO_GLYPH_STREAMS`): after the
+original, a font whose variation data has no `axis` and that is no named instance gets its
+stream provider taken away, and is written from its own file as any static font is. It is given
+on the command line of every lualatex compile `Workspace` runs, and written into the preamble
+`adopt` writes, so the person's own compiles of an adopted source get it too.
+
+| water (6 slides, fetched fonts), interleaved | before | after | |
+|---|---|---|---|
+| one pass (5 runs) | 5.8-6.0 s | 4.25-4.5 s | -26% |
+| `Workspace.compile` (passes until settled, 3 runs) | 13.25 s | 9.4 s | -29% |
+| + no CJK fallback lines (not done, see below) | | 3.7-3.9 s a pass | |
+
+Pages: 6/6 the same pixels, the same text and character boxes. The six showcase trees (TeX
+Gyre stand-ins, no STAT) render the same and take the same time. Stripping STAT from the
+font files instead gives the same speed and the same pages; the TeX-side line also covers fonts
+nobody fetched. `tests/test_inverse.py::test_a_static_font_with_a_stat_table_is_written_from_its_own_file`
+builds a STAT-only font, has the page report its font's stream provider (2 without the line, nil
+with it) and compares the pixels; with the line taken out of `compile` it fails.
+
+**Still open on fonts** (water, after the fix: start-up 0.4 s, preamble 1.25 s, frames 2.3 s,
+end 0.6 s; `define_font` 140 calls, 1.17 s, 60 of them in the body):
+
+- **The CJK fallback is attached to every face at every size.** NotoSansArabic with
+  `fallback=b2sscripts` costs ~37 ms per size because NotoSansSC (31k glyphs) is instantiated
+  with it, 30 times on water: ~0.6 s a pass. Scoping the fallback to the faces whose words need
+  it (scripts.py knows which runs are CJK) would remove most of it.
+- Each size of each face is a `define_font` of its own (1-40 ms). Fewer distinct sizes in what
+  adopt writes would help a little; not measured.
+
+## Going further: frames in parallel (analysis, 2026-10-28)
+
+A pass is one thread, and TeX has no way to run one document on several cores: every page
+depends on the counters, marks, floats and aux state left by the pages before it. The only
+parallelism there is is *several engines on pieces of the deck*:
+
+- **How**: beamer's `\includeonlyframes{a,b}` keeps only the named frames (adopted sources have
+  one label per frame). N engines, each pre-warmed on the preamble (as `start_warm` does), each
+  given a quarter of the labels, and their PDFs joined. Measured on water x8: one compile 4.6 s,
+  four pre-warmed pieces 1.14 s, 48/48 pages identical ("Idle cores" above).
+- **What it needs before it is right**: an excluded frame still steps `framenumber` (the step is
+  before the restriction test) but makes no page, so `page` differs between pieces: anything
+  printing the page number, `\pageref`, the navigation's page links and the aux written by each
+  piece must be stitched (the aux of piece k is only correct when pieces 1..k-1 ran first, i.e.
+  a second round, which the loop's passes already are). SyncTeX is per piece and must be
+  re-based on the joined PDF (inverse maps pages to frames by it; the labels would do instead).
+  Outlines and links across pieces need a merge.
+- **What it buys**: on the six showcase decks (5-6 frames) a converge round changes ~4 frames,
+  so compiling only the changed frames saves little; four pieces on four cores still cut a
+  6-slide pass to about a third (hashing 1.47 -> 0.47 s pre-warmed). On a 40-50 slide talk the
+  gain is 3-4x a pass.
+- **Not a fork**: LuaTeX has no `os.fork`; reaching `fork()` through `ffi` needs
+  `--shell-escape` or a `--lua` init script, which the playground forbids (`shell_escape=f`) and
+  which would let a source run anything. Pre-warmed separate engines need neither.
+- **pdflatex** has no fixed font cost and starts in 0.4 s; a format (`-ini`, `\dump`) cuts it
+  another 25-31%. Adopted sources need lualatex (fontspec, babel's providers), so this helps
+  only hand-written beamer sources.
+
+Order of work, by measured ceiling: (1) the CJK fallback scoped per face (-15% on CJK decks,
+small change); (2) N pre-warmed pieces with stitched aux and SyncTeX (3-4x on talk-length
+decks, a real project); (3) cheaper `slides.sty` drawing for plain shapes and tables (60-75%
+of an adopted body is these commands).

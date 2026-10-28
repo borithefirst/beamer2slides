@@ -43,7 +43,7 @@ from .deck_ir_types import (Absent, CellParagraph, PageGradient, TableBorder, Ta
                             TargetTable, TargetText, TextBox, Video, page_gradient_json, parse_target,
                             recolor_json)
 from .ir_types import Point
-from .inverse import (TEXTPOS, Picture, Result, TextStyle, colour_name, common_style, frame_latex,
+from .inverse import (NO_GLYPH_STREAMS, TEXTPOS, Picture, Result, TextStyle, colour_name, common_style, frame_latex,
                       paragraphs_latex, picture_block, script_paragraph, target_picture)
 from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
 from .typing_compat import assert_never
@@ -4406,6 +4406,10 @@ def preamble(deck: TargetDeck, target: JsonObject, ctx: AdoptContext, flow: bool
              # A deck is mostly pictures, and LuaTeX re-encodes every PNG with transparency at zlib
              # level 9: devfest2020's pass took 14.1 s, 8.4 s at level 1 (PDF 9.0 -> 12.7 MB).
              "\\pdfvariable compresslevel=1",
+             # static fonts written from their own files, not a whole-font streams cache: a quarter
+             # of a fetched-font deck's pass (`inverse.NO_GLYPH_STREAMS`); here too so the person's
+             # own compiles of the source are as quick as the loop's
+             NO_GLYPH_STREAMS,
              "\\usetheme{default}",
              "\\setbeamertemplate{navigation symbols}{}",
              "\\setbeamertemplate{footline}{}",

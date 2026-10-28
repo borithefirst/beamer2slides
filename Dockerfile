@@ -26,6 +26,16 @@ COPY --chown=player tests/decks/11_research_talk.tex tests/decks/13_inline_math.
 COPY --chown=player docs/media ./docs/media
 
 USER player
+# LuaLaTeX's first run on a machine builds luaotfload's font names database (8 s on a warm disk,
+# 53 s on a cold one) and then a cache per font. luaotfload reads that database only from a cache
+# folder it may write, so it is built here as the user the server runs as: built as root it would
+# sit in /var/lib/texmf, unread, and every new instance would build it again on a visitor's first
+# compile (docs/compile-latency.md "A fresh machine").
+RUN cd /tmp && luaotfload-tool -u \
+    && printf '%s\n' '\documentclass{beamer}\usepackage{fontspec}\setsansfont{TeX Gyre Heros}' \
+       '\begin{document}\begin{frame}{A}B \textbf{C} \emph{D} $x$\end{frame}\end{document}' > warm.tex \
+    && lualatex -interaction=nonstopmode -halt-on-error warm.tex > /dev/null \
+    && rm -f warm.*
 # `shell_escape=f` is the workbench's doing: its journeys compile LaTeX through the library
 # (`inverse.Compiler`), which passes no `-no-shell-escape` of its own.
 ENV B2S_PLAYGROUND_ROOT=/app B2S_PLAYGROUND_JOBS=/tmp/b2s-playground \

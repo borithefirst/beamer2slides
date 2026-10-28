@@ -497,7 +497,12 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   (`tree_digest`, docs/compile-latency.md); converge's passes run on a lualatex started early and
   waiting at the preamble's end (`Workspace.start_warm`, `WARM_LUA`; taken only while main's head
   and every other file's size and mtime are unchanged). Fonts go into a tree with `copy2`:
-  luaotfload caches by font name and mtime, a fresh mtime re-caches every font. **The loop's own view is no judge**: `frame_guard.py` ends
+  luaotfload caches by font name and mtime, a fresh mtime re-caches every font. Every lualatex
+  compile (and adopt's preamble) carries `inverse.NO_GLYPH_STREAMS`: luaotfload writes a static
+  font with a STAT table (every google/fonts cut) from its whole-font streams cache, a quarter of
+  a fetched-font pass. luaotfload reads its names database only from a cache it may write: a
+  container builds it as the user who compiles (`Dockerfile`, docs/compile-latency.md
+  "A fresh machine"). **The loop's own view is no judge**: `frame_guard.py` ends
   each frame at its best round, by ink against Google's thumbnail when the target carries one
   (`page_score.py`), else weighted residuals plus extract's words; `Result.restored`, report
   "Frames put back". On foreign decks no round has yet raised any slide's ink.

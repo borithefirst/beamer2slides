@@ -728,7 +728,7 @@ class Workspace:
         tree's; the next pass's engine is started on the tree as a pass begins, and warms up on
         another core while that one runs."""
         engine = self.engine or self.source.engine()
-        prefix = ""
+        prefix = NO_GLYPH_STREAMS if engine.startswith("lua") else ""
         if self.handout:
             prefix += r"\PassOptionsToClass{handout}{beamer}"
         if self.notes:
@@ -995,6 +995,22 @@ luatexbase.add_to_callback("open_read_file", function(name)
   }
 end, "b2s.warm")
 """
+
+# Lua for every LuaLaTeX run, given before any font loads. luaotfload (features.lua) gives any font
+# with variation data a glyph stream provider, and `readers.stat` makes variation data out of a STAT
+# table alone - which every static instance cut from a google/fonts variable font keeps. Each such
+# font then loads its whole-font streams cache at PDF write (5-18 MB for a CJK face): a quarter of
+# a fetched-font deck's pass (docs/compile-latency.md "Fonts with a STAT table"). A font with no
+# axes and no instance is static, so it is written from its own file; pages come out the same. One
+# line with no character TeX treats specially in \directlua (no % ~ #), set once per run.
+NO_GLYPH_STREAMS = (r"\directlua{local c = fonts and fonts.constructors "
+                    r"if c and c.trytosharefont and not c.b2sstatic then c.b2sstatic = true "
+                    r"local share = c.trytosharefont "
+                    r"function c.trytosharefont(t, d) share(t, d) "
+                    r"local v = d.resources and d.resources.variabledata "
+                    r"if t.streamprovider and v and not v.axis and not t.properties.instance "
+                    r"then t.streamprovider = nil end end end}")
+
 
 # every engine left waiting, stopped when Python exits; one whose workspace is gone (an exception
 # out of `converge`), or whose Python died, exits by itself at the wait: its stdin is closed
