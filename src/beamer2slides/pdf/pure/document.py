@@ -1223,6 +1223,11 @@ def _write_number(v: bool | int | float) -> bytes:
 
 def serialize(v: PdfObject, keep: Callable[[Ref], bool]) -> bytes:
     """An object in file syntax; references pass through `keep` (None drops them to null)."""
+    return serialize_refs(v, lambda ref: b"%d %d R" % (ref.num, ref.gen) if keep(ref) else b"null")
+
+
+def serialize_refs(v: PdfObject, ref_bytes: Callable[[Ref], bytes]) -> bytes:
+    """An object in file syntax, each reference written as `ref_bytes` gives it."""
     if v is None:
         return b"null"
     if isinstance(v, (bool, int, float)):
@@ -1230,15 +1235,16 @@ def serialize(v: PdfObject, keep: Callable[[Ref], bool]) -> bytes:
     if isinstance(v, Name):
         return _write_name(v)
     if isinstance(v, Ref):
-        return b"%d %d R" % (v.num, v.gen) if keep(v) else b"null"
+        return ref_bytes(v)
     if isinstance(v, bytes):
         return b"<" + bytes(v).hex().encode() + b">"
     if isinstance(v, str):
         return _write_name(v)
     if isinstance(v, list):
-        return b"[" + b" ".join(serialize(x, keep) for x in v) + b"]"
+        return b"[" + b" ".join(serialize_refs(x, ref_bytes) for x in v) + b"]"
     if isinstance(v, dict):
-        return b"<<" + b"".join(_write_name(k) + b" " + serialize(x, keep) + b"\n" for k, x in v.items()) + b">>"
+        return b"<<" + b"".join(_write_name(k) + b" " + serialize_refs(x, ref_bytes) + b"\n"
+                                for k, x in v.items()) + b">>"
     return b"null"
 
 
@@ -1342,4 +1348,4 @@ def read(source: str | Path | bytes | bytearray) -> PdfFile:
         raise PdfFileError(f"unreadable PDF: {e}") from e
 
 
-__all__ = ["PdfFile", "PdfFileError", "read", "text_string", "write_file", "serialize", "END"]
+__all__ = ["PdfFile", "PdfFileError", "read", "text_string", "write_file", "serialize", "serialize_refs", "END"]

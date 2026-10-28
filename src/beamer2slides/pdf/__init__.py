@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -73,6 +74,20 @@ def use_backend(new: PdfBackend | str):
         yield _backend
     finally:
         set_backend(old)
+
+
+def join_files(paths: Sequence[Path], out: Path) -> int:
+    """The PDFs at `paths` written as one to `out`, page after page (`pure.join`, docs/pdf-backend.md):
+    its page count. A file that does not read, or holds outlines, raises PdfError."""
+    from .pure.document import PdfFileError
+    from .pure.join import JoinError, join
+    from .pure.syntax import PdfSyntaxError
+    try:
+        joined = join([str(p) for p in paths])
+    except (OSError, PdfFileError, PdfSyntaxError, JoinError) as e:
+        raise PdfError(f"cannot join {len(paths)} files: {e}") from e
+    out.write_bytes(joined.data)
+    return joined.pages
 
 
 def Document(source: str | Path | bytes) -> PdfDocument:  # noqa: N802 - it stands for the document type

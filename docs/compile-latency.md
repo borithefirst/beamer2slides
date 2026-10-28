@@ -463,3 +463,76 @@ Order of work, by measured ceiling: (1) the CJK fallback on demand (done above: 
 (2) N pre-warmed pieces with stitched aux and SyncTeX (3-4x on talk-length
 decks, a real project); (3) cheaper `slides.sty` drawing for plain shapes and tables (60-75%
 of an adopted body is these commands).
+
+## Done: a compile in pieces (2026-10-28)
+
+Item (2) above. `converge` compiles a lualatex source on several cores at once
+(`Workspace.compile_in_pieces`, `pieces.py`, `pdf/pure/join.py`): N engines, each waiting on the
+preamble (`start_warm` keeps N of them), each typesetting its own share of the frames, the PDFs
+joined, the .aux files merged. N is `pieces.piece_count()`: one per core, at most 4;
+`$B2S_COMPILE_PIECES` sets it, `0` or `1` compiles whole.
+
+**How a piece skips what is not its own.** Every compile (whole or piece) loads `pieces.LOAD`
+before the source, which writes at the end of each labelled frame the count registers that differ
+from the document's start, `\btwos@ckpt{label}{0=12;5=3;...}`, and the start's own nonzero ones,
+`\btwos@base{...}`. A piece reads the last pass's .aux: frames before its cut are skipped like
+`\includeonlyframes` skips them (beamer's `\beamer@framerestriction`), and at each skipped labelled
+frame's end the registers are set to its checkpoint, so the piece's first own frame begins with
+the page, frame, section and subsection numbers a whole compile had there. LaTeX's allocation
+pointers (`\count10`-`22`, `256`-`263`) are left alone. What a skipped frame writes to the .aux goes
+to a void file (`\jobname.btwos`); a piece marks where its own part starts and ends
+(`\btwos@own{1}` / `{0}`). Cuts fall after labels recorded once, at even shares of the pages.
+
+**Merge.** `pieces.merged` puts the pieces' own parts end to end and rebuilds the contents files
+(.toc, .nav, .snm, ...) from their `\@writefile` lines, as `\end{document}` would, babel's
+`\babel@toc` line included. A line it does not know (`KNOWN`), a missing mark, or a piece whose
+bookmarks (.out) are not a prefix of the last piece's sends the compile back whole. The PDFs are
+joined by our own PDF writer (`pdf.join_files`): objects renumbered, one page tree, page labels per
+file, named destinations as one tree (a real destination beats LuaTeX's `[last page /Fit]`
+stand-in for a link its piece does not hold), and the outline taken from the first file when every
+file's (depth, title, destination name) list is the same. Each piece's SyncTeX is kept
+(`piece_syncs`); `sync_pages` reads them in order.
+
+**A fixpoint, like any LaTeX pass.** A piece pass is settled when the .aux files, checkpoints
+included, come out as they went in (`piece_state`). When a frame came or went, the pieces after
+it began at stale numbers; before the next pass, `pieces.carried` moves each later piece's
+checkpoints by how far its start moved (a register stops moving where the piece reset it, as a
+section resets its subsections). At most 3 piece passes; a page count that disagrees with the
+.aux once settled refuses (`split_refused` says why) and the compile finishes whole. `aux_state`,
+which decides when whole passes settle, ignores the `\btwos@` lines, so a first compile costs the
+passes it always did; a whole compile's .aux read by a source without `pieces.LOAD` has them
+dropped first (`drop_marks`). Fragile frames' `.vrb` scratch files are allowed in a piece's folder.
+
+**Checked.** `tests/test_inverse.py::test_a_compile_in_pieces_is_the_pages_of_a_whole_one`
+compiles a deck with sections, an outline, a fragile frame and a babel language, edits a frame's
+body, then inserts a frame and a section before the others, in 3 pieces and whole: same pixels on
+every page, same outline, a SyncTeX page per page, no refusal. Each of three deliberate breaks of the mechanism
+fails it. `tests/test_pieces.py` covers cuts, merge,
+refusals and `carried` without TeX.
+
+| converge-like edit, 4 cores, both arms pre-warmed (wall)  | whole | pieces |
+|---|---|---|
+| water x8 (50 pages), a frame's body edited            | 3.9 s  | 1.5 s |
+| hashing x8 (50 pages)                                 | 2.1-2.2 s | 0.9 s |
+| talk x8 (42 pages)                                    | 1.4 s  | 0.7 s |
+| a 6-9 page test deck                                  | 0.4 s  | 0.4 s |
+| water x8, a frame and a section inserted              | 7.8 s  | 6.1 s |
+| first compile (no .aux to cut by)                     | equal  | equal |
+
+Pixels, outline and page labels were identical whole vs pieces on every deck. A frame inserted
+costs three piece passes at least: the labels after it move, and only a pass can confirm where.
+Passes 2 and 3 there are slower than the first (2.3 s against 1.4 s) because the engines started
+as pieces finish mostly have not reached the preamble's end yet.
+
+**On a sandbox VM.** Each waiting engine is a lualatex holding its fonts and the preamble's state: 210 MB resident
+measured on a metropolis talk. N engines
+want N cores and N times that memory; with fewer cores than 2, `piece_count` gives 1 and nothing
+changes. Set `B2S_COMPILE_PIECES=1` where memory is tight. The warm-up advice above holds for each
+engine: a font cache built as the user who compiles, fonts copied with their mtime.
+
+**What it cannot see.** Anything that is not a count register carried across a skipped frame: a
+`\def`'d total, a token list or dimension a frame changes for the frames after it, a package
+writing its own .aux lines (refused by `KNOWN`, then whole). `\pageref` and links to a label in
+another piece read the merged .aux, so they are right once settled; a link's target inside the
+joined PDF is right when its name is. Overlay pages of one frame never split. pdflatex and xelatex
+always compile whole.

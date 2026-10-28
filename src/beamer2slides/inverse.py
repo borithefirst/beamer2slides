@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import weakref
 import zlib
 from collections.abc import Callable, Mapping, Sequence
@@ -63,8 +64,10 @@ from .script_space import SCRIPT_SPACE
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, empty_visible,
                      frame_visible, line_of, locate_words, locate_words_in, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
-                     synctex_pages)
+                     SyncPage, synctex_pages)
 from .typing_compat import assert_never
+from . import pieces
+from .pieces import piece_count
 
 if TYPE_CHECKING:
     from .arrays import Floats32
@@ -692,8 +695,11 @@ class Workspace:
         self.source = Source(self.main)
         self.compiled: str | None = None   # `tree_digest` of the last compile that succeeded
         self.warm_up = False   # keep an engine waiting on the preamble for the next compile (`start_warm`)
-        self.warm: Warm | None = None
-        self.warmed = 0   # engines started (`start_warm`)
+        self.warm: list[Warm] = []
+        self.pieces = 0   # how many pieces a compile may be cut into (`pieces.piece_count`); 0 or 1: whole
+        self.piece_syncs: list[Path] | None = None   # each piece's SyncTeX, when the last compile was in pieces
+        self.split_refused = ""   # why the last compile meant for pieces went whole
+        self.warmed = 0   # sets of engines started (`start_warm`)
         self.warm_failures_real = False   # a failure of a waiting engine was seen to fail cold too
 
     def reload(self) -> None:
@@ -726,9 +732,19 @@ class Workspace:
         edits is the PDF the next round reads (docs/compile-latency.md). With `warm_up`, a pass is
         run by the engine `start_warm` left waiting on the preamble, when that preamble is still the
         tree's; the next pass's engine is started on the tree as a pass begins, and warms up on
-        another core while that one runs."""
+        another core while that one runs. With `pieces`, a lualatex compile whose last .aux records
+        where to cut is run in pieces on as many cores (`compile_in_pieces`)."""
         engine = self.engine or self.source.engine()
+        split = self.pieces > 1 and engine == "lualatex"
         prefix = NO_GLYPH_STREAMS if engine.startswith("lua") else ""
+        if split:
+            prefix += pieces.LOAD
+            lua = self.work / "pieces.lua"
+            if not lua.is_file() or lua.read_text(encoding="utf-8") != pieces.PIECES_LUA:
+                lua.write_text(pieces.PIECES_LUA, encoding="utf-8")
+        else:
+            # an .aux a compile in pieces wrote, read by one that does not define its commands
+            pieces.drop_marks(self.build_dir / f"{self.main.stem}.aux")
         if self.handout:
             prefix += r"\PassOptionsToClass{handout}{beamer}"
         if self.notes:
@@ -743,14 +759,40 @@ class Workspace:
         if self.compiled == key and pdf.is_file():
             return pdf, ""
         self.compiled = None
+        failed = False
+        if split:
+            settled, failed = self.compile_in_pieces(cmd, job)
+            if settled:
+                if self.warm_up:
+                    self.start_warm(cmd, self.pieces)
+                if tree_digest(self.src, "\0".join(cmd)) == key:
+                    self.compiled = key
+                return pdf, ""
+        error = self.compile_whole(cmd, job, self.pieces if split else 1)
+        if failed and not error:
+            # a piece failed where the whole compiles: this source is not for cutting
+            self.split_refused, self.pieces = "a piece failed where the whole compiles", 0
+        # a compile that wrote into the tree it read (minted, an externalised picture) is not
+        # known to come out the same from where it left the tree: it is not remembered
+        if not error and tree_digest(self.src, "\0".join(cmd)) == key:
+            self.compiled = key
+        return (None, error) if error else (pdf, "")
+
+    def compile_whole(self, cmd: list[str], job: str, engines: int) -> str:
+        """Passes of the whole document until its auxiliary files settle: the error, or "".
+        `engines`: how many to start waiting for the next pass (`warm_up`)."""
+        self.piece_syncs = None
         log = ""
         error = ""
         before = aux_state(self.build_dir)
         kept = aux_files(self.build_dir)
         for attempt in range(3):
-            warm = self.take_warm(cmd)
+            taken = self.take_warm(cmd)
+            warm = taken[0] if taken else None
+            for spare in taken[1:]:
+                stop_engine(spare.process)
             if self.warm_up:
-                self.start_warm(cmd)
+                self.start_warm(cmd, 1)
             given = aux_files(self.build_dir) if warm is not None else {}
             code = self.run_warm(warm, job) if warm is not None else None
             doubted = bool(code) and not self.warm_failures_real
@@ -760,7 +802,8 @@ class Workspace:
                 put_aux(self.build_dir, given)
                 code = None
             if code is None:
-                r = subprocess.run(cmd, cwd=self.src, capture_output=True, text=True, errors="replace", env=tex_env())
+                r = subprocess.run(cmd, cwd=self.src, capture_output=True, text=True, errors="replace",
+                                   env=self.engine_env(None))
                 code, printed = r.returncode, r.stdout
                 if doubted and code:
                     self.warm_failures_real = True
@@ -780,72 +823,238 @@ class Workspace:
             before, after = aux_state(self.build_dir), before
             if (before == after and not needs_rerun(log)) or attempt == 2:
                 break
-        # a compile that wrote into the tree it read (minted, an externalised picture) is not
-        # known to come out the same from where it left the tree: it is not remembered
-        if not error and tree_digest(self.src, "\0".join(cmd)) == key:
-            self.compiled = key
-        return (None, error) if error else (pdf, "")
+        if not error and self.warm_up and engines > 1:
+            # one engine waited for each pass; the next compile, in pieces, wants one a piece
+            self.start_warm(cmd, engines)
+        return error
 
-    def start_warm(self, cmd: list[str]) -> None:
-        """Start the engine of the next compile on the preamble of the tree as it stands: it reads
-        `main` up to its `\\begin{document}` line from a copy of those lines, then waits (WARM_LUA).
+    def compile_in_pieces(self, cmd: list[str], job: str) -> tuple[bool, bool]:
+        """Passes in pieces (`pieces`) until the auxiliary files settle, cut where the last compile's
+        .aux says. (settled, a piece failed to compile): not settled, the passes go on whole from
+        where these left the build folder - as the last compile left it when a pass was refused
+        (`split_refused` says why)."""
+        aux = self.build_dir / f"{job}.aux"
+        if not aux.is_file():
+            return False, False
+        plan = pieces.cuts(aux.read_text(encoding="utf-8", errors="replace"), self.pieces)
+        if not plan:
+            return False, False
+        kept = aux_files(self.build_dir)
+        before = piece_state(self.build_dir)
+        for _ in range(3):
+            given = aux.read_text(encoding="utf-8", errors="replace")
+            refused, failed, agree = self.piece_pass(cmd, job, plan)
+            after = piece_state(self.build_dir)
+            if not refused and not agree and after == before:
+                # every piece began where the one before it ended, and still the pages do not add up
+                refused = "the pieces' pages and the .aux disagree"
+            if refused:
+                self.split_refused = refused
+                put_aux(self.build_dir, kept)
+                self.piece_syncs = None
+                if not failed:
+                    self.pieces = 0   # what this source does is not for cutting: whole from now on
+                return False, failed
+            if after == before:
+                return True, False
+            # pieces after a page came or went began off by as much: the next pass starts nearer
+            aux.write_text(pieces.carried(aux.read_text(encoding="utf-8", errors="replace"), given, plan),
+                           encoding="utf-8")
+            before = piece_state(self.build_dir)
+        return False, False
+
+    def piece_pass(self, cmd: list[str], job: str, plan: list[pieces.Cut]) -> tuple[str, bool, bool]:
+        """One pass, every piece at once (an engine waiting on the preamble where there is one):
+        the pages joined into the build folder, the .aux and contents files merged there. ("",
+        False, the pages joined are as many as the .aux counts) when it went through, else why not
+        and whether a piece failed to compile. Pages that do not add up are a pass that has not
+        settled: a piece began where the last compile's checkpoint said, before a page came or went
+        ahead of it."""
+        engines = self.take_warm(cmd)
+        runs: list[tuple[Path, Path, dict[str, tuple[int, int]], "subprocess.Popen[bytes]"]] = []
+        for cut in plan:
+            out = self.work / "pieces" / f"p{cut.index}"
+            if out.exists():
+                shutil.rmtree(out)
+            out.mkdir(parents=True)
+            warm = engines.pop(0) if engines else None
+            folder = warm.folder if warm is not None else out
+            given = self.give_inputs(job, folder)
+            spec_file(folder).write_text(cut.spec(), encoding="utf-8")
+            process = warm.process if warm is not None and let_go(warm.process) else None
+            if process is None:
+                if warm is not None:
+                    stop_engine(warm.process)
+                    folder = out
+                    given = self.give_inputs(job, folder)
+                    spec_file(folder).write_text(cut.spec(), encoding="utf-8")
+                process = subprocess.Popen([*cmd[:-2], f"-output-directory={folder}", cmd[-1]], cwd=self.src,
+                                           env=self.engine_env(spec_file(folder)), stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            runs.append((folder, out, given, process))
+        for spare in engines:
+            stop_engine(spare.process)
+        # an engine for the next pass starts on each core a piece leaves
+        done: dict[int, int] = {}
+        while len(done) < len(runs):
+            for k, (_, _, _, process) in enumerate(runs):
+                if k not in done and process.poll() is not None:
+                    done[k] = process.returncode
+                    if self.warm_up:
+                        self.start_warm(cmd, len(done))
+            if len(done) < len(runs):
+                time.sleep(0.005)
+        codes = [done[k] for k in range(len(runs))]
+        for _, _, _, process in runs:
+            WARM_ENGINES.discard(process)
+        for folder, out, _, _ in runs:
+            if folder != out:
+                for path in sorted(folder.rglob("*")):
+                    if path.is_file():
+                        into = out / path.relative_to(folder)
+                        into.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(path, into)
+        if any(codes):
+            return f"piece {codes.index(next(c for c in codes if c))} stopped with {next(c for c in codes if c)}", True, False
+        outs = [out for _, out, _, _ in runs]
+        opened: set[str] = set()
+        named = {f"{job}.{ext}": ext for ext in pieces.CONTENTS}
+        allowed = {f"{job}{suffix}" for suffix in (".aux", ".log", ".pdf", ".synctex.gz", ".btwos", ".out")}
+        for _, out, given, _ in runs:
+            for path in out.rglob("*"):
+                if not path.is_file():
+                    continue
+                name = path.relative_to(out).as_posix()
+                st = path.stat()
+                if given.get(name) == (st.st_size, st.st_mtime_ns):
+                    continue
+                if name in named:
+                    opened.add(named[name])
+                elif name not in allowed and not pieces.verbatim(name, job):
+                    return f"a piece wrote {name}", False, False
+        # every piece writes the bookmarks of the sections up to where it stops: the last one's
+        # are the whole's, of which the others' are the start
+        marks = [(out / f"{job}.out").read_bytes() if (out / f"{job}.out").is_file() else b"" for out in outs]
+        if any(not marks[-1].startswith(mine) for mine in marks):
+            return "the pieces' bookmarks do not follow on", False, False
+        whole = pieces.merged([(out / f"{job}.aux").read_text(encoding="utf-8", errors="replace") for out in outs],
+                              sorted(opened))
+        if isinstance(whole, str):
+            return whole, False, False
+        from .pdf import PdfError, join_files
+        try:
+            pages = join_files([out / f"{job}.pdf" for out in outs], self.build_dir / f"{job}.pdf")
+        except PdfError as e:
+            return str(e), False, False
+        (self.build_dir / f"{job}.aux").write_text(whole.aux, encoding="utf-8")
+        for ext, text in whole.contents.items():
+            (self.build_dir / f"{job}.{ext}").write_text(text, encoding="utf-8")
+        last = self.build_dir / f"{job}.out"
+        for out in outs:
+            for path in out.iterdir():
+                if path.name == last.name or pieces.verbatim(path.name, job):
+                    shutil.copyfile(path, self.build_dir / path.name)
+        (self.build_dir / f"{job}.log").write_text(
+            "".join((out / f"{job}.log").read_text(errors="replace") for out in outs if (out / f"{job}.log").is_file()),
+            encoding="utf-8")
+        self.piece_syncs = [out / f"{job}.synctex.gz" for out in outs]
+        return "", False, whole.pages == pages
+
+    def give_inputs(self, job: str, folder: Path) -> dict[str, tuple[int, int]]:
+        """Copy what a pass reads from the build folder into an engine's `folder` (all but the last
+        PDF, log and SyncTeX): each file's size and modification time as given."""
+        given: dict[str, tuple[int, int]] = {}
+        for path in self.build_dir.rglob("*"):
+            if path.is_file() and path.name not in (f"{job}.pdf", f"{job}.log", f"{job}.synctex.gz"):
+                name = path.relative_to(self.build_dir).as_posix()
+                into = folder / name
+                into.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, into)
+                st = into.stat()
+                given[name] = (st.st_size, st.st_mtime_ns)
+        return given
+
+    def engine_env(self, spec: Path | None) -> dict[str, str]:
+        """The environment of an engine: the piece Lua's file (`pieces.LOAD` reads it) and, for a
+        piece, its spec file (`pieces.SPEC_ENV`; none: the whole document)."""
+        env = dict(tex_env(), **{pieces.LUA_ENV: str(self.work / "pieces.lua")})
+        if spec is not None:
+            env[pieces.SPEC_ENV] = str(spec)
+        return env
+
+    def sync_pages(self) -> list[SyncPage]:
+        """SyncTeX's pages of the last compile, a piece's after the one before it."""
+        if self.piece_syncs is not None:
+            return [page for path in self.piece_syncs for page in synctex_pages(path)]
+        return synctex_pages(self.build_dir / f"{self.main.stem}.synctex.gz")
+
+    def start_warm(self, cmd: list[str], count: int) -> None:
+        """Have `count` engines wait for the next compile on the preamble of the tree as it stands:
+        each reads `main` up to its `\\begin{document}` line from a copy of those lines, then waits
+        (WARM_LUA), and is told at the go whether it compiles the whole or a piece (its spec file,
+        `pieces.SPEC_ENV`). Engines already waiting on that tree are kept, the others stopped.
         Only lualatex can wait so; a main with no such line is not warmed."""
-        self.stop_warm()
         if Path(cmd[0]).stem.lower() != "lualatex":
+            self.stop_warm()
             return
         text = self.main.read_bytes()
         lines = text.split(b"\n")
         at = next((i + 1 for i, line in enumerate(lines[:-1]) if BEGIN_DOCUMENT.match(line)), 0)
         if not at:
+            self.stop_warm()
             return
         head = b"\n".join(lines[:at]) + b"\n"
-        # two folders in turn: the engine started last may still be running its compile
-        self.warmed += 1
-        folder = self.work / f"warm{self.warmed % 2}"
-        if folder.exists():
-            shutil.rmtree(folder)
-        folder.mkdir(parents=True)
+        others = file_stamps(self.src, self.main)
+        if any(w.command != tuple(cmd) or w.head != head or w.others != others for w in self.warm):
+            self.stop_warm()
+        if len(self.warm) >= count:
+            return
+        if not self.warm:
+            # two sets of folders in turn: an engine started last may still be running its compile
+            self.warmed += 1
         lua, held = self.work / "warm.lua", self.work / f"warm{self.warmed % 2}-head.tex"
         if not lua.is_file() or lua.read_text(encoding="utf-8") != WARM_LUA:
             lua.write_text(WARM_LUA, encoding="utf-8")
-        held.write_bytes(head)
-        command = [*cmd[:-2], f"-output-directory={folder}",
-                   r"\directlua{dofile(os.getenv('B2S_WARM_LUA'))}" + cmd[-1]]
-        env = dict(tex_env(), B2S_WARM_LUA=str(lua), B2S_WARM_HEAD=str(held), B2S_WARM_LINE=str(at))
-        process = subprocess.Popen(command, cwd=self.src, env=env, stdin=subprocess.PIPE,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        WARM_ENGINES.add(process)
-        self.warm = Warm(process=process, folder=folder, command=tuple(cmd), head=head,
-                         others=file_stamps(self.src, self.main))
+        if not held.is_file() or held.read_bytes() != head:
+            held.write_bytes(head)
+        for i in range(len(self.warm), count):
+            folder = self.work / f"warm{self.warmed % 2}-{i}"
+            if folder.exists():
+                shutil.rmtree(folder)
+            folder.mkdir(parents=True)
+            command = [*cmd[:-2], f"-output-directory={folder}",
+                       r"\directlua{dofile(os.getenv('B2S_WARM_LUA'))}" + cmd[-1]]
+            env = dict(self.engine_env(spec_file(folder)), B2S_WARM_LUA=str(lua), B2S_WARM_HEAD=str(held),
+                       B2S_WARM_LINE=str(at))
+            process = subprocess.Popen(command, cwd=self.src, env=env, stdin=subprocess.PIPE,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            WARM_ENGINES.add(process)
+            self.warm.append(Warm(process=process, folder=folder, command=tuple(cmd), head=head, others=others))
 
-    def take_warm(self, cmd: list[str]) -> "Warm | None":
-        """The waiting engine, when it was started with `cmd` on the preamble `main` still opens with
-        and on every other file of the tree as it stands (not written since, even back to the same
-        bytes: the engine may have read them in between); otherwise None, the engine stopped."""
-        warm, self.warm = self.warm, None
-        if warm is None:
-            return None
-        if (warm.command == tuple(cmd) and warm.process.poll() is None
-                and self.main.read_bytes().startswith(warm.head) and file_stamps(self.src, self.main) == warm.others):
-            return warm
-        stop_engine(warm.process)
-        return None
+    def take_warm(self, cmd: list[str]) -> "list[Warm]":
+        """The waiting engines, when they were started with `cmd` on the preamble `main` still opens
+        with and on every other file of the tree as it stands (not written since, even back to the
+        same bytes: an engine may have read them in between); the others are stopped."""
+        taken = self.warm
+        self.warm = []
+        if not taken:
+            return []
+        fits = self.main.read_bytes().startswith(taken[0].head) and file_stamps(self.src, self.main) == taken[0].others
+        kept: list[Warm] = []
+        for warm in taken:
+            if fits and warm.command == tuple(cmd) and warm.process.poll() is None:
+                kept.append(warm)
+            else:
+                stop_engine(warm.process)
+        return kept
 
     def run_warm(self, warm: "Warm", job: str) -> int | None:
-        """Let the waiting engine go on with the auxiliary files of the last compile, and bring what it
-        wrote into the build folder: its return code, or None when it was gone before the go."""
-        for path in self.build_dir.rglob("*"):
-            if path.is_file() and path.name not in (f"{job}.pdf", f"{job}.log", f"{job}.synctex.gz"):
-                into = warm.folder / path.relative_to(self.build_dir)
-                into.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(path, into)
-        stdin = warm.process.stdin
-        try:
-            if stdin is None:
-                raise BrokenPipeError
-            stdin.write(b"go\n")
-            stdin.close()
-        except (BrokenPipeError, OSError):
+        """Let the waiting engine go on with the auxiliary files of the last compile, the whole
+        document, and bring what it wrote into the build folder: its return code, or None when it
+        was gone before the go."""
+        self.give_inputs(job, warm.folder)
+        spec_file(warm.folder).write_text("\n\n", encoding="utf-8")
+        if not let_go(warm.process):
             stop_engine(warm.process)
             return None
         code = warm.process.wait()
@@ -860,10 +1069,10 @@ class Workspace:
         return code
 
     def stop_warm(self) -> None:
-        """Stop the engine waiting for the next compile, if any."""
-        if self.warm is not None:
-            stop_engine(self.warm.process)
-            self.warm = None
+        """Stop the engines waiting for the next compile, if any."""
+        for warm in self.warm:
+            stop_engine(warm.process)
+        self.warm = []
 
     def build(self, out: Path, target_has_notes: bool,
               compiled: tuple[Path | None, str] | None) -> Candidate | str:
@@ -901,7 +1110,7 @@ class Workspace:
                     keep_visible_shapes(doc[index], slide, raw_pages[index])
             finally:
                 doc.close()
-        sync = synctex_pages(self.build_dir / f"{self.main.stem}.synctex.gz")
+        sync = self.sync_pages()
         frames_by_page = page_frames(self.source, sync, [p["label"] for p in raw["pages"]], self.src)
         frames = []
         for slide in classified["slides"]:
@@ -1027,6 +1236,24 @@ class Warm:
     others: tuple[tuple[str, int, int], ...]   # `file_stamps` of the rest of the tree then
 
 
+def let_go(process: "subprocess.Popen[bytes]") -> bool:
+    """Tell an engine waiting on its preamble to go on: False when it is gone."""
+    stdin = process.stdin
+    try:
+        if stdin is None:
+            raise BrokenPipeError
+        stdin.write(b"go\n")
+        stdin.close()
+    except (BrokenPipeError, OSError):
+        return False
+    return True
+
+
+def spec_file(folder: Path) -> Path:
+    """The spec file of the engine writing into `folder` (`pieces.SPEC_ENV`), beside it."""
+    return folder.with_name(folder.name + ".spec")
+
+
 def stop_engine(process: "subprocess.Popen[bytes]") -> None:
     if process.poll() is None:
         process.kill()
@@ -1087,9 +1314,20 @@ def aux_state(folder: Path) -> dict[str, int]:
     turn before left settled - what an agent's edit -> compile -> sync loop hands it - is no second
     pass at all.
 
-    babel's language switches are read as the language they leave (`language_switches`).
+    babel's language switches are read as the language they leave (`language_switches`), and the
+    lines `pieces` writes for a compile in pieces are left out: no page reads them (`piece_state`).
     """
+    return {str(p.relative_to(folder)): zlib.crc32(language_switches(PIECE_LINES.sub(b"", data)))
+            for p, data in aux_files(folder).items()}
+
+
+def piece_state(folder: Path) -> dict[str, int]:
+    """`aux_state` with the lines `pieces` writes: where each piece begins is read from them."""
     return {str(p.relative_to(folder)): zlib.crc32(language_switches(data)) for p, data in aux_files(folder).items()}
+
+
+# what `pieces.PIECES_LUA` writes to the .aux
+PIECE_LINES = re.compile(rb"^\\btwos@[^\n]*\n?", re.MULTILINE)
 
 
 # a line babel writes to the .aux / .toc where the text switches language
@@ -3281,6 +3519,7 @@ def converge(tex: Path, target: "JsonObject | Later", work: Path, max_iter: int,
     the ones the target carries, False for none (then by weighted residuals and words)."""
     ws = Workspace(tex, work, handout=handout, engine=engine, fresh=True)
     ws.warm_up = True
+    ws.pieces = piece_count()
     ready: tuple[Path | None, str] | None = None
     if isinstance(target, Later):
         ws.notes = uses_notes(ws.source)   # what the first compile can know without the deck

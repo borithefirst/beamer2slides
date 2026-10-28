@@ -620,6 +620,94 @@ def test_an_engine_waiting_on_the_preamble_compiles_what_a_cold_one_compiles(tmp
         ws.stop_warm()
 
 
+# a deck whose pages show what a piece must carry over from the frames it skips: page and frame
+# numbers, sections in the outline and the contents, a reference to a frame another piece typesets,
+# a fragile frame
+PIECES_MAIN = r"""\documentclass{beamer}
+\setbeamertemplate{footline}[frame number]
+\begin{document}
+\begin{frame}[label=title]{Contents}\tableofcontents\end{frame}
+\section{One}
+\begin{frame}[label=a]{A}Points to \ref{late} on page \pageref{late}.\end{frame}
+\begin{frame}[label=b]{B}\only<1>{first}\only<2>{second}\end{frame}
+\begin{frame}[fragile,label=c]{C}
+\begin{verbatim}
+x = 1
+\end{verbatim}
+\end{frame}
+\section{Two}
+\begin{frame}[label=d]{D}\begin{equation}\label{late}e = m\end{equation}\end{frame}
+\begin{frame}[label=e]{E}BODY\end{frame}
+\section{Three}
+\begin{frame}[label=f]{F}words\end{frame}
+\begin{frame}[label=g]{G}\pause more \pause words\end{frame}
+\begin{frame}[label=h]{H}last\end{frame}
+\end{document}
+"""
+
+
+def outline_pages(path: Path) -> list[tuple[int, bytes, int]]:
+    """A PDF's outline: (depth, title, the page its named destination is on)."""
+    from beamer2slides.pdf.pure.document import read
+    from beamer2slides.pdf.pure.join import leaves, outline
+    from beamer2slides.pdf.pure.syntax import Ref, String
+    doc = read(str(path))
+    refs: list[int] = []
+    for i in range(doc.page_count):
+        found = doc.page_dict(i)
+        refs.append(found[0] if found is not None and found[0] is not None else -1)
+    names = doc.resolve(doc.catalog.get("Names"))
+    dests = dict(leaves(doc, names.get("Dests"), "Names")) if isinstance(names, dict) else {}
+    items = outline(doc)
+    assert items is not None
+    out: list[tuple[int, bytes, int]] = []
+    for depth, title, name in items:
+        dest = doc.resolve(dests.get(String(name)))
+        if isinstance(dest, dict):
+            dest = doc.resolve(dest.get("D"))
+        page = dest[0] if isinstance(dest, list) and dest else None
+        out.append((depth, title, refs.index(page.num) if isinstance(page, Ref) else -1))
+    return out
+
+
+@pytest.mark.skipif(lualatex_missing() is not None, reason="lualatex not found")
+def test_a_compile_in_pieces_is_the_pages_of_a_whole_one(tmp_path: Path) -> None:
+    """The converge loop cuts a lualatex compile into pieces on as many cores (`pieces`,
+    `Workspace.compile_in_pieces`). Each tree below is compiled so, then whole and cold in a
+    workspace of its own: the same pages to the pixel, the same outline, and SyncTeX's pages
+    for every page. A body edit, and a frame and a section coming in ahead of every cut (the
+    pieces after it begin a page off, and passes go on until they read what they write)."""
+    src = tmp_path / "src"
+    src.mkdir()
+    main = src / "main.tex"
+    trees = [PIECES_MAIN, PIECES_MAIN.replace("BODY", "edited words"),
+             PIECES_MAIN.replace("BODY", "edited words").replace(
+                 "\\section{One}", "\\begin{frame}{New}new\\end{frame}\n\\section{Zero}\n\\section{One}")]
+    main.write_text(trees[0], encoding="utf-8")
+    ws = Workspace(main, tmp_path / "work", handout=False, engine="lualatex", fresh=True)
+    ws.warm_up = True
+    ws.pieces = 3
+    try:
+        for n, tree in enumerate(trees):
+            main.write_text(tree, encoding="utf-8")
+            ws.main.write_text(tree, encoding="utf-8")
+            split, error = ws.compile()
+            assert split is not None, error
+            if n:
+                assert ws.piece_syncs is not None, f"tree {n} was compiled in pieces ({ws.split_refused})"
+            cold, error = Workspace(main, tmp_path / f"cold{n}", handout=False, engine="lualatex",
+                                    fresh=True).compile()
+            assert cold is not None, error
+            pages = pages_of(split)
+            assert pages == pages_of(cold), f"tree {n}"
+            assert len(ws.sync_pages()) == len(pages)
+            outlines = [outline_pages(path) for path in (split, cold)]
+            assert outlines[0] == outlines[1] and len(outlines[0]) >= 3, f"tree {n}"
+        assert ws.split_refused == ""
+    finally:
+        ws.stop_warm()
+
+
 def stat_font() -> bytes:
     """A static font that keeps a STAT table, as every instance cut from a google/fonts variable
     font does (`fontfetch`): no fvar, so no axes."""
