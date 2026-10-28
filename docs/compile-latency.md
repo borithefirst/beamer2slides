@@ -558,7 +558,7 @@ of an adopted body is these commands).
 
 Item (2) above. `converge` compiles a lualatex source on several cores at once
 (`Workspace.compile_in_pieces`, `pieces.py`, `pdf/pure/join.py`): N engines, each waiting on the
-preamble (`start_warm` keeps N of them), each typesetting its own share of the frames, the PDFs
+preamble, each typesetting its own share of the frames, the PDFs
 joined, the .aux files merged. N is `pieces.piece_count()`: one per core, at most 4;
 `$B2S_COMPILE_PIECES` sets it, `0` or `1` compiles whole.
 
@@ -606,17 +606,22 @@ refusals and `carried` without TeX.
 | hashing x8 (50 pages)                                 | 2.1-2.2 s | 0.9 s |
 | talk x8 (42 pages)                                    | 1.4 s  | 0.7 s |
 | a 6-9 page test deck                                  | 0.4 s  | 0.4 s |
-| water x8, a frame and a section inserted              | 7.8 s  | 6.1 s |
+| tikz_diagrams (41 pages, mostly pictures)             | 2.7-2.9 s | 2.4-2.7 s |
+| water x8, a frame and a section inserted              | 7.9 s  | 5.3 s |
+| talk x8, a frame and a section inserted               | 2.8 s  | 3.0 s |
 | first compile (no .aux to cut by)                     | equal  | equal |
 
-Pixels, outline and page labels were identical whole vs pieces on every deck. A frame inserted
-costs three piece passes at least: the labels after it move, and only a pass can confirm where.
-Passes 2 and 3 there are slower than the first (2.3 s against 1.4 s) because the engines started
-as pieces finish mostly have not reached the preamble's end yet.
+Pixels, outline and page labels were identical whole vs pieces on all seven decks, for body edits
+and for inserts. A frame inserted costs three piece passes where a whole compile needs two: the
+pieces after it began at stale numbers, and only a third pass can confirm the second. So **two
+engines wait per piece** between compiles: the second set takes pass 2. Pass 3 is cold. Starting
+engines while pieces run was tried and lost: on 4 cores they took the pieces' cores, and pass 2 went
+from 0.7 to 1.4 s on talk. A pass's spare engines are kept, never stopped, and each engine has a
+folder of its own (`warm-N`). Before this, an insert cost talk 4.1 s and water 6.3 s.
 
 **On a sandbox VM.** Each waiting engine is a lualatex holding its fonts and the preamble's state: 210 MB resident
-measured on a metropolis talk. N engines
-want N cores and N times that memory; with fewer cores than 2, `piece_count` gives 1 and nothing
+measured on a metropolis talk. N pieces want N cores and 2N engines' memory (8 engines, ~1.7 GB, on
+4 cores); with fewer cores than 2, `piece_count` gives 1 and nothing
 changes. Set `B2S_COMPILE_PIECES=1` where memory is tight. The warm-up advice above holds for each
 engine: a font cache built as the user who compiles, fonts copied with their mtime.
 

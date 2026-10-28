@@ -700,6 +700,7 @@ class Workspace:
         self.piece_syncs: list[Path] | None = None   # each piece's SyncTeX, when the last compile was in pieces
         self.split_refused = ""   # why the last compile meant for pieces went whole
         self.warmed = 0   # sets of engines started (`start_warm`)
+        self.engines = 0   # engines started, each in a folder of its own
         self.warm_failures_real = False   # a failure of a waiting engine was seen to fail cold too
 
     def reload(self) -> None:
@@ -764,11 +765,11 @@ class Workspace:
             settled, failed = self.compile_in_pieces(cmd, job)
             if settled:
                 if self.warm_up:
-                    self.start_warm(cmd, self.pieces)
+                    self.start_warm(cmd, 2 * self.pieces)
                 if tree_digest(self.src, "\0".join(cmd)) == key:
                     self.compiled = key
                 return pdf, ""
-        error = self.compile_whole(cmd, job, self.pieces if split else 1)
+        error = self.compile_whole(cmd, job, 2 * self.pieces if split else 1)
         if failed and not error:
             # a piece failed where the whole compiles: this source is not for cutting
             self.split_refused, self.pieces = "a piece failed where the whole compiles", 0
@@ -824,7 +825,8 @@ class Workspace:
             if (before == after and not needs_rerun(log)) or attempt == 2:
                 break
         if not error and self.warm_up and engines > 1:
-            # one engine waited for each pass; the next compile, in pieces, wants one a piece
+            # one engine waited for each pass; the next compile, in pieces, wants two a piece: one for
+            # its first pass, one for the next when a page came or went
             self.start_warm(cmd, engines)
         return error
 
@@ -892,16 +894,14 @@ class Workspace:
                                            env=self.engine_env(spec_file(folder)), stdin=subprocess.DEVNULL,
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             runs.append((folder, out, given, process))
-        for spare in engines:
-            stop_engine(spare.process)
-        # an engine for the next pass starts on each core a piece leaves
+        # the spares wait for the next pass; none starts while pieces run (each would take a core
+        # from them), the compile tops them up once settled
+        self.warm = engines
         done: dict[int, int] = {}
         while len(done) < len(runs):
             for k, (_, _, _, process) in enumerate(runs):
                 if k not in done and process.poll() is not None:
                     done[k] = process.returncode
-                    if self.warm_up:
-                        self.start_warm(cmd, len(done))
             if len(done) < len(runs):
                 time.sleep(0.005)
         codes = [done[k] for k in range(len(runs))]
@@ -914,6 +914,7 @@ class Workspace:
                         into = out / path.relative_to(folder)
                         into.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(path, into)
+                shutil.rmtree(folder, ignore_errors=True)
         if any(codes):
             return f"piece {codes.index(next(c for c in codes if c))} stopped with {next(c for c in codes if c)}", True, False
         outs = [out for _, out, _, _ in runs]
@@ -1017,8 +1018,9 @@ class Workspace:
             lua.write_text(WARM_LUA, encoding="utf-8")
         if not held.is_file() or held.read_bytes() != head:
             held.write_bytes(head)
-        for i in range(len(self.warm), count):
-            folder = self.work / f"warm{self.warmed % 2}-{i}"
+        for _ in range(len(self.warm), count):
+            folder = self.work / f"warm-{self.engines}"
+            self.engines += 1
             if folder.exists():
                 shutil.rmtree(folder)
             folder.mkdir(parents=True)
@@ -1066,6 +1068,7 @@ class Workspace:
                 into = self.build_dir / path.relative_to(warm.folder)
                 into.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(path, into)
+        shutil.rmtree(warm.folder, ignore_errors=True)
         return code
 
     def stop_warm(self) -> None:
