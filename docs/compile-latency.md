@@ -764,3 +764,29 @@ numbers change everywhere after the edit too. Reverted.
 patched: the last compile's other files must be the same (`PatchFrom.others`). Anything a frame
 changes that is not written to the .aux, a `\gdef` read by a later frame for example, would pass
 the check and be wrong.
+
+## Done: an engine for the third pass (2026-10-28)
+
+A frame or a section coming in takes three passes in pieces. The first starts from stale
+checkpoints. The second reads the .nav and .toc the first wrote: the first wrote them with stale
+section and slide numbers (`\slideentry {0}{0}{37}` where the whole says `{1}{0}{8}`), and a
+whole compile would need that pass too. The third only finds that nothing moved. Engines are
+warmed between compiles only (one started while pieces run takes a core from them), and two
+waited per piece: the third pass ran cold.
+
+Now three wait per piece (`WARM_PASSES`), as many as fit in half the memory available
+(`warm_room`, `WARM_ENGINE_BYTES`: an engine waiting on water's preamble holds 140-155 MB). The
+2 GiB playground keeps about as many as before.
+
+| water x8, 4 cores, a frame inserted (A/B interleaved, 8 edits) | 2 a piece | 3 a piece |
+|---|---|---|
+| edits taking three passes                       | 7.3-8.0 s | 5.5-6.8 s |
+| edits taking two                                 | 4.0-4.6 s | 4.2-4.7 s |
+| the third pass alone                             | 3.4-3.6 s | 1.7-1.9 s |
+
+The machine was slower that day than for the tables above (a warm pass 1.8-2.2 s, not 1.3 s):
+compare within a table, not across tables. Cost: four more idle engines (~600 MB), and four more
+preamble loads at `WARM_NICE` after an insert.
+
+**Not taken: skipping the third pass.** The second pass read .nav lines the first wrote stale.
+Whether its pages depend on them depends on the theme, and only the third pass can tell.

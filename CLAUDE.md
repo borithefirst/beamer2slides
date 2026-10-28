@@ -500,7 +500,8 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   in pieces on up to 4 cores (`pieces.py`, `Workspace.compile_in_pieces`: frames skipped to labelled
   checkpoints of count registers, .aux merged, PDFs joined by `pdf/pure/join.py`, settled as a
   fixpoint, anything unknown compiled whole; `$B2S_COMPILE_PIECES`; a first compile's passes after
-  the first too, `compile_whole(cut=)`; waiting engines at nice 10, `WARM_NICE`; a register set to a
+  the first too, `compile_whole(cut=)`; waiting engines at nice 10, `WARM_NICE`, three a piece as half the free memory allows,
+  `WARM_PASSES`/`warm_room`; a register set to a
   page moves with the pages, `carried`; an unsettled pass whose bookmarks do not follow on merges
   its .aux and joins nothing, `marks_apart`). A compile whose edit stays inside frames typesets only those
   (`compile_patched`, `pieces.patches`: pages per frame from `\btwos@shipped`, kept only when the

@@ -776,7 +776,7 @@ class Workspace:
                 settled, failed = self.compile_in_pieces(cmd, job)
             if settled:
                 if self.warm_up:
-                    self.start_warm(cmd, 2 * self.pieces)
+                    self.start_warm(cmd, WARM_PASSES * self.pieces)
                 if tree_digest(self.src, "\0".join(cmd)) == key:
                     self.compiled = key
                     self.patch_from = compiling
@@ -784,7 +784,7 @@ class Workspace:
             # a first compile has no .aux to cut by: its first pass writes one, and the passes after
             # it go in pieces when the source labels enough frames to cut at
             cut = not (self.build_dir / f"{job}.aux").is_file() and labelled_frames(self.source) >= self.pieces
-        error, failed_late = self.compile_whole(cmd, job, 2 * self.pieces if split else 1, cut)
+        error, failed_late = self.compile_whole(cmd, job, WARM_PASSES * self.pieces if split else 1, cut)
         if (failed or failed_late) and not error:
             # a piece failed where the whole compiles: this source is not for cutting
             self.split_refused, self.pieces = "a piece failed where the whole compiles", 0
@@ -855,8 +855,8 @@ class Workspace:
                 # refused, or not settled: whole from the folder these passes left
                 before = aux_state(self.build_dir)
         if not error and self.warm_up and engines > 1:
-            # one engine waited for each pass; the next compile, in pieces, wants two a piece: one for
-            # its first pass, one for the next when a page came or went
+            # one engine waited for each pass; the next compile, in pieces, wants one a piece for
+            # each of its passes (`WARM_PASSES`)
             self.start_warm(cmd, engines)
         elif not self.warm_up:
             self.stop_warm()
@@ -1159,6 +1159,9 @@ class Workspace:
         others = file_stamps(self.src, self.main)
         if any(w.command != tuple(cmd) or w.head != head or w.others != others for w in self.warm):
             self.stop_warm()
+        room = warm_room()
+        if room is not None:
+            count = min(count, len(self.warm) + room)
         if len(self.warm) >= count:
             return
         if not self.warm:
@@ -1432,6 +1435,26 @@ def spec_file(folder: Path) -> Path:
 # 0.5 s faster on water x8 beside four engines, docs/compile-latency.md). An engine keeps it for
 # the pass it is let go into: a process may not raise its own priority again.
 WARM_NICE = 10
+# engines a piece waits with: a frame or section coming in takes three passes in pieces (the first
+# from stale checkpoints, the second from the .nav and .toc the first wrote, the third finding
+# nothing moved), and an engine is warmed only between compiles - with two a piece the third pass
+# ran cold, 3.4-3.6 s of a 7.5 s compile on water x8, against 1.7-1.9 s warm
+WARM_PASSES = 3
+# what an engine waiting on a beamer preamble holds (140-155 MB measured on water x8's)
+WARM_ENGINE_BYTES = 160 << 20
+
+
+def warm_room() -> int | None:
+    """How many more engines may wait: as many as fit in half the memory the system has available
+    (a 2 GiB playground keeps today's few), None where the system does not say."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as info:
+            for line in info:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024 // 2 // WARM_ENGINE_BYTES
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
 
 
 def behind(process: "subprocess.Popen[bytes]") -> None:
