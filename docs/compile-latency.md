@@ -752,6 +752,8 @@ inserted one after another: the third went from 10.5 s to 5.7 s, and the ones af
 and 4 word edits, each compared with a whole compile of the same source
 (scratch `patch_each.py`). The refusal of a structure edit now names what came in
 (`\section`), not the first line that differs.
+`test_a_compile_in_pieces_is_the_pages_of_a_whole_one` inserts a section before a frame,
+which gives this pass. With the fix reverted, the test fails.
 
 **Tried, saved nothing: settling each piece apart.** A frame insert still takes three piece
 passes (1.1 + 1.1 + 2.2 s, the third cold). Reading each piece's .aux only up to where it starts

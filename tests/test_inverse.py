@@ -679,7 +679,10 @@ def test_a_compile_in_pieces_is_the_pages_of_a_whole_one(tmp_path: Path, monkeyp
     for every page. The first compile's first pass is whole (no .aux to cut by) and its second
     in pieces, settled at once. A body edit, which only its frame's piece typesets again
     (`compile_patched`), and a frame and a section coming in ahead of every cut (the pieces after
-    it begin a page off, and passes go on until they read what they write)."""
+    it begin a page off, and passes go on until they read what they write). Then a section
+    before a frame: the pieces after it skip it with stale section numbers, so the first pass's
+    bookmarks do not follow on. That pass is not kept, and the next one settles
+    (`Workspace.marks_apart`)."""
     passes: list[int] = []
     piece_pass = Workspace.piece_pass
 
@@ -693,6 +696,7 @@ def test_a_compile_in_pieces_is_the_pages_of_a_whole_one(tmp_path: Path, monkeyp
     trees = [PIECES_MAIN, PIECES_MAIN.replace("BODY", "edited words"),
              PIECES_MAIN.replace("BODY", "edited words").replace(
                  "\\section{One}", "\\begin{frame}{New}new\\end{frame}\n\\section{Zero}\n\\section{One}")]
+    trees.append(trees[2].replace("\\begin{frame}[label=b]", "\\section{Half}\n\\begin{frame}[label=b]"))
     main.write_text(trees[0], encoding="utf-8")
     ws = Workspace(main, tmp_path / "work", handout=False, engine="lualatex", fresh=True)
     ws.warm_up = True
