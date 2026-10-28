@@ -3042,10 +3042,11 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
 \newif\ifslides@t@over
 \def\slides@t@val#1#2{\csname slides@t@#1@#2\endcsname}% cell #1's value of #2
 \def\slides@t@setcell#1#2{% cell #2 set #1 wide, into \slides@t@cellbox
+% (its colour inside its group: a \color's undo goes after its group, outside an ungrouped box)
   \global\slides@t@overfalse
-  \setbox\slides@t@cellbox\vbox{\slides@t@begin{#1}{#2}\slides@t@val{#2}{body}\slides@t@end{#2}\slides@t@check{#2}}%
+  \setbox\slides@t@cellbox\vbox{\color@begingroup\slides@t@begin{#1}{#2}\slides@t@val{#2}{body}\slides@t@end{#2}\slides@t@check{#2}\color@endgroup}%
   \ifslides@t@over
-    \setbox\slides@t@cellbox\vbox{\slides@t@begin{#1}{#2}\slides@t@word{#2}\slides@t@end{#2}}%
+    \setbox\slides@t@cellbox\vbox{\color@begingroup\slides@t@begin{#1}{#2}\slides@t@word{#2}\slides@t@end{#2}\color@endgroup}%
   \fi}
 \def\slides@t@begin#1#2{\hsize=#1\relax\linewidth\hsize\parindent\z@
   \hyphenpenalty\@M\exhyphenpenalty\@M\global\slides@t@paras\z@

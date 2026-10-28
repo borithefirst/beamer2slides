@@ -698,6 +698,10 @@ class Workspace:
         self.warm: list[Warm] = []
         self.pieces = 0   # how many pieces a compile may be cut into (`pieces.piece_count`); 0 or 1: whole
         self.piece_syncs: list[Path] | None = None   # each piece's SyncTeX, when the last compile was in pieces
+        self.sync_kept: list[SyncPage] | None = None   # SyncTeX's pages, when the last compile patched some
+        self.patch_from: "PatchFrom | None" = None   # the last compile, when a patch of it may follow
+        self.patch_refused = ""   # why the last compile meant for pieces typeset more than the frames edited
+        self.patched = 0   # compiles that typeset only the frames edited
         self.split_refused = ""   # why the last compile meant for pieces went whole
         self.warmed = 0   # sets of engines started (`start_warm`)
         self.engines = 0   # engines started, each in a folder of its own
@@ -760,15 +764,21 @@ class Workspace:
         if self.compiled == key and pdf.is_file():
             return pdf, ""
         self.compiled = None
+        compiling = PatchFrom(command=tuple(cmd), main=self.main.read_text(encoding="utf-8", errors="replace"),
+                              others=file_stamps(self.src, self.main)) if split else None
+        last, self.patch_from = self.patch_from, None
         failed = False
         cut = False
         if split:
-            settled, failed = self.compile_in_pieces(cmd, job)
+            settled = last is not None and self.compile_patched(cmd, job, last, compiling)
+            if not settled:
+                settled, failed = self.compile_in_pieces(cmd, job)
             if settled:
                 if self.warm_up:
                     self.start_warm(cmd, 2 * self.pieces)
                 if tree_digest(self.src, "\0".join(cmd)) == key:
                     self.compiled = key
+                    self.patch_from = compiling
                 return pdf, ""
             # a first compile has no .aux to cut by: its first pass writes one, and the passes after
             # it go in pieces when the source labels enough frames to cut at
@@ -781,6 +791,7 @@ class Workspace:
         # known to come out the same from where it left the tree: it is not remembered
         if not error and tree_digest(self.src, "\0".join(cmd)) == key:
             self.compiled = key
+            self.patch_from = compiling if self.pieces > 1 else None
         return (None, error) if error else (pdf, "")
 
     def compile_whole(self, cmd: list[str], job: str, engines: int, cut: bool) -> tuple[str, bool]:
@@ -790,6 +801,7 @@ class Workspace:
         to cut by, an engine per piece warming up on the other cores while it runs; when they do
         not settle, the passes go on whole."""
         self.piece_syncs = None
+        self.sync_kept = None
         log = ""
         error = ""
         failed = False
@@ -849,6 +861,97 @@ class Workspace:
             self.stop_warm()
         return error, failed
 
+    def compile_patched(self, cmd: list[str], job: str, last: "PatchFrom", now: "PatchFrom | None") -> bool:
+        """Typeset again only the frames whose text changed since the last compile (`last`), each
+        run of them a piece on its own engine (`pieces.patches`), and keep the other pages of its
+        PDF: whether that settled the compile. It did when every piece wrote the .aux lines the
+        last compile wrote for those frames - then every frame began and ended as before, read what
+        it read before, and the pages kept are a whole compile's. Otherwise nothing is kept of it
+        (`patch_refused` says why) and the compile goes on in pieces from the last one's files."""
+        if now is None or last.command != now.command or last.others != now.others:
+            return False
+        aux_path, pdf = self.build_dir / f"{job}.aux", self.build_dir / f"{job}.pdf"
+        if not aux_path.is_file() or not pdf.is_file():
+            return False
+        aux = aux_path.read_text(encoding="utf-8", errors="replace")
+        plan = pieces.patches(last.main, now.main, aux, self.pieces)
+        if isinstance(plan, str):
+            self.patch_refused = plan
+            return False
+        runs = self.launch_pieces(cmd, job, [patch.cut for patch in plan], "patch")
+        from .pdf import Document, PdfError, join_file_pages
+        try:
+            total = len(Document(pdf))
+        except PdfError:
+            total = -1
+        kept_sync = self.sync_pages()   # read while the engines run
+        codes = self.finish_pieces(runs)
+        refused = self.patch_checked(job, aux, plan, runs, codes, total)
+        if refused:
+            self.patch_refused = refused
+            return False
+        order: list[tuple[int, int]] = []
+        sync: list[SyncPage] = []
+        at = 0
+        for k, (patch, run) in enumerate(zip(plan, runs)):
+            order += [(0, i) for i in range(at, patch.first)] + [(k + 1, i) for i in range(patch.pages)]
+            mine = synctex_pages(run.out / f"{job}.synctex.gz")
+            sync += kept_sync[at:patch.first] + mine
+            if len(mine) != patch.pages:
+                sync = []
+            at = patch.first + patch.pages
+        order += [(0, i) for i in range(at, total)]
+        sync += kept_sync[at:]
+        try:
+            join_file_pages([pdf, *(run.out / f"{job}.pdf" for run in runs)], order, pdf)
+        except PdfError as e:
+            self.patch_refused = str(e)
+            return False
+        (self.build_dir / f"{job}.log").write_text(
+            "".join((run.out / f"{job}.log").read_text(errors="replace") for run in runs
+                    if (run.out / f"{job}.log").is_file()), encoding="utf-8")
+        self.piece_syncs = None
+        # SyncTeX's pages as the last compile's with the pieces' put in, when both read whole
+        self.sync_kept = sync if len(sync) == total and len(kept_sync) == total else []
+        self.patch_refused = ""
+        self.patched += 1
+        return True
+
+    def patch_checked(self, job: str, aux: str, plan: Sequence[pieces.Patch], runs: "Sequence[PieceRun]",
+                      codes: Sequence[int], total: int) -> str:
+        """Why the pieces of a patch do not stand in for the frames they typeset again, or "": a
+        piece failed or wrote a file a piece does not, wrote .aux lines or bookmarks other than the
+        last compile's for its frames, or another number of pages."""
+        if any(codes):
+            return f"a piece stopped with {next(c for c in codes if c)}"
+        written = self.piece_writes(job, runs)
+        if isinstance(written, str):
+            return written
+        lines = aux.splitlines(keepends=True)
+        if total != pieces.patch_total(aux):
+            return "the last compile's PDF is not the pages its .aux counts"
+        marks = self.build_dir / f"{job}.out"
+        whole_marks = marks.read_bytes() if marks.is_file() else b""
+        from .pdf import Document, PdfError
+        for patch, run in zip(plan, runs):
+            part = pieces.own_part((run.out / f"{job}.aux").read_text(encoding="utf-8", errors="replace"), patch.cut)
+            span = pieces.span_of(lines, patch.cut)
+            if isinstance(part, str) or span is None:
+                return part if isinstance(part, str) else "the last compile's .aux does not mark the frames"
+            mine, _ = pieces.shifted(part, patch.first)
+            if pieces.unbased(mine) != pieces.unbased(lines[span[0]:span[1]]):
+                return "the frames typeset again wrote other .aux lines"
+            mark = run.out / f"{job}.out"
+            if not whole_marks.startswith(mark.read_bytes() if mark.is_file() else b""):
+                return "the frames typeset again wrote other bookmarks"
+            try:
+                pages = len(Document(run.out / f"{job}.pdf"))
+            except PdfError as e:
+                return str(e)
+            if pages != patch.pages:
+                return f"the frames typeset again are {pages} pages, not {patch.pages}"
+        return ""
+
     def compile_in_pieces(self, cmd: list[str], job: str) -> tuple[bool, bool]:
         """Passes in pieces (`pieces`) until the auxiliary files settle, cut where the last compile's
         .aux says. (settled, a piece failed to compile): not settled, the passes go on whole from
@@ -873,6 +976,7 @@ class Workspace:
                 self.split_refused = refused
                 put_aux(self.build_dir, kept)
                 self.piece_syncs = None
+                self.sync_kept = None
                 if not failed:
                     self.pieces = 0   # what this source does is not for cutting: whole from now on
                 return False, failed
@@ -891,67 +995,14 @@ class Workspace:
         and whether a piece failed to compile. Pages that do not add up are a pass that has not
         settled: a piece began where the last compile's checkpoint said, before a page came or went
         ahead of it."""
-        engines = self.take_warm(cmd)
-        runs: list[tuple[Path, Path, dict[str, tuple[int, int]], "subprocess.Popen[bytes]"]] = []
-        for cut in plan:
-            out = self.work / "pieces" / f"p{cut.index}"
-            if out.exists():
-                shutil.rmtree(out)
-            out.mkdir(parents=True)
-            warm = engines.pop(0) if engines else None
-            folder = warm.folder if warm is not None else out
-            given = self.give_inputs(job, folder)
-            spec_file(folder).write_text(cut.spec(), encoding="utf-8")
-            process = warm.process if warm is not None and let_go(warm.process) else None
-            if process is None:
-                if warm is not None:
-                    stop_engine(warm.process)
-                    folder = out
-                    given = self.give_inputs(job, folder)
-                    spec_file(folder).write_text(cut.spec(), encoding="utf-8")
-                process = subprocess.Popen([*cmd[:-2], f"-output-directory={folder}", cmd[-1]], cwd=self.src,
-                                           env=self.engine_env(spec_file(folder)), stdin=subprocess.DEVNULL,
-                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            runs.append((folder, out, given, process))
-        # the spares wait for the next pass; none starts while pieces run (each would take a core
-        # from them), the compile tops them up once settled
-        self.warm = engines
-        done: dict[int, int] = {}
-        while len(done) < len(runs):
-            for k, (_, _, _, process) in enumerate(runs):
-                if k not in done and process.poll() is not None:
-                    done[k] = process.returncode
-            if len(done) < len(runs):
-                time.sleep(0.005)
-        codes = [done[k] for k in range(len(runs))]
-        for _, _, _, process in runs:
-            WARM_ENGINES.discard(process)
-        for folder, out, _, _ in runs:
-            if folder != out:
-                for path in sorted(folder.rglob("*")):
-                    if path.is_file():
-                        into = out / path.relative_to(folder)
-                        into.parent.mkdir(parents=True, exist_ok=True)
-                        os.replace(path, into)
-                shutil.rmtree(folder, ignore_errors=True)
+        runs = self.launch_pieces(cmd, job, plan, "pieces")
+        codes = self.finish_pieces(runs)
         if any(codes):
             return f"piece {codes.index(next(c for c in codes if c))} stopped with {next(c for c in codes if c)}", True, False
-        outs = [out for _, out, _, _ in runs]
-        opened: set[str] = set()
-        named = {f"{job}.{ext}": ext for ext in pieces.CONTENTS}
-        allowed = {f"{job}{suffix}" for suffix in (".aux", ".log", ".pdf", ".synctex.gz", ".btwos", ".out")}
-        for _, out, given, _ in runs:
-            for path in out.rglob("*"):
-                if not path.is_file():
-                    continue
-                name = path.relative_to(out).as_posix()
-                st = path.stat()
-                if given.get(name) == (st.st_size, st.st_mtime_ns):
-                    continue
-                if name in named:
-                    opened.add(named[name])
-                elif name not in allowed and not pieces.verbatim(name, job):
-                    return f"a piece wrote {name}", False, False
+        outs = [run.out for run in runs]
+        opened = self.piece_writes(job, runs)
+        if isinstance(opened, str):
+            return opened, False, False
         # every piece writes the bookmarks of the sections up to where it stops: the last one's
         # are the whole's, of which the others' are the start
         marks = [(out / f"{job}.out").read_bytes() if (out / f"{job}.out").is_file() else b"" for out in outs]
@@ -978,7 +1029,79 @@ class Workspace:
             "".join((out / f"{job}.log").read_text(errors="replace") for out in outs if (out / f"{job}.log").is_file()),
             encoding="utf-8")
         self.piece_syncs = [out / f"{job}.synctex.gz" for out in outs]
+        self.sync_kept = None
         return "", False, whole.pages == pages
+
+    def launch_pieces(self, cmd: list[str], job: str, plan: Sequence[pieces.Cut], root: str) -> "list[PieceRun]":
+        """An engine for each piece of `plan` (one waiting on the preamble where there is one), its
+        output folder `root`/p<index> under the work folder; the spare engines wait for the next
+        pass (none starts while pieces run: each would take a core from them; the compile tops
+        them up once settled)."""
+        engines = self.take_warm(cmd)
+        runs: list[PieceRun] = []
+        for cut in plan:
+            out = self.work / root / f"p{cut.index}"
+            if out.exists():
+                shutil.rmtree(out)
+            out.mkdir(parents=True)
+            warm = engines.pop(0) if engines else None
+            folder = warm.folder if warm is not None else out
+            given = self.give_inputs(job, folder)
+            spec_file(folder).write_text(cut.spec(), encoding="utf-8")
+            process = warm.process if warm is not None and let_go(warm.process) else None
+            if process is None:
+                if warm is not None:
+                    stop_engine(warm.process)
+                    folder = out
+                    given = self.give_inputs(job, folder)
+                    spec_file(folder).write_text(cut.spec(), encoding="utf-8")
+                process = subprocess.Popen([*cmd[:-2], f"-output-directory={folder}", cmd[-1]], cwd=self.src,
+                                           env=self.engine_env(spec_file(folder)), stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            runs.append(PieceRun(folder=folder, out=out, given=given, process=process))
+        self.warm = engines
+        return runs
+
+    def finish_pieces(self, runs: "Sequence[PieceRun]") -> list[int]:
+        """Wait for every piece's engine and bring what it wrote into its output folder: their
+        return codes."""
+        done: dict[int, int] = {}
+        while len(done) < len(runs):
+            for k, run in enumerate(runs):
+                if k not in done and run.process.poll() is not None:
+                    done[k] = run.process.returncode
+            if len(done) < len(runs):
+                time.sleep(0.005)
+        for run in runs:
+            WARM_ENGINES.discard(run.process)
+            if run.folder != run.out:
+                for path in sorted(run.folder.rglob("*")):
+                    if path.is_file():
+                        into = run.out / path.relative_to(run.folder)
+                        into.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(path, into)
+                shutil.rmtree(run.folder, ignore_errors=True)
+        return [done[k] for k in range(len(runs))]
+
+    def piece_writes(self, job: str, runs: "Sequence[PieceRun]") -> set[str] | str:
+        """The contents files (`pieces.CONTENTS`) the pieces wrote, or which other file one wrote
+        (a whole compile is not made of such pieces)."""
+        opened: set[str] = set()
+        named = {f"{job}.{ext}": ext for ext in pieces.CONTENTS}
+        allowed = {f"{job}{suffix}" for suffix in (".aux", ".log", ".pdf", ".synctex.gz", ".btwos", ".out")}
+        for run in runs:
+            for path in run.out.rglob("*"):
+                if not path.is_file():
+                    continue
+                name = path.relative_to(run.out).as_posix()
+                st = path.stat()
+                if run.given.get(name) == (st.st_size, st.st_mtime_ns):
+                    continue
+                if name in named:
+                    opened.add(named[name])
+                elif name not in allowed and not pieces.verbatim(name, job):
+                    return f"a piece wrote {name}"
+        return opened
 
     def give_inputs(self, job: str, folder: Path) -> dict[str, tuple[int, int]]:
         """Copy what a pass reads from the build folder into an engine's `folder` (all but the last
@@ -1004,6 +1127,8 @@ class Workspace:
 
     def sync_pages(self) -> list[SyncPage]:
         """SyncTeX's pages of the last compile, a piece's after the one before it."""
+        if self.sync_kept is not None:
+            return self.sync_kept
         if self.piece_syncs is not None:
             return [page for path in self.piece_syncs for page in synctex_pages(path)]
         return synctex_pages(self.build_dir / f"{self.main.stem}.synctex.gz")
@@ -1247,6 +1372,24 @@ NO_GLYPH_STREAMS = (r"\directlua{local c = fonts and fonts.constructors "
 # every engine left waiting, stopped when Python exits; one whose workspace is gone (an exception
 # out of `converge`), or whose Python died, exits by itself at the wait: its stdin is closed
 WARM_ENGINES: "weakref.WeakSet[subprocess.Popen[bytes]]" = weakref.WeakSet()
+
+
+@dataclass(frozen=True, kw_only=True)
+class PieceRun:
+    """A piece's engine as `Workspace.launch_pieces` let it go."""
+    folder: Path   # where it writes
+    out: Path      # where what it wrote is gathered
+    given: dict[str, tuple[int, int]]   # `give_inputs`
+    process: "subprocess.Popen[bytes]"
+
+
+@dataclass(frozen=True, kw_only=True)
+class PatchFrom:
+    """A compile in pieces' mode that settled, for the next to typeset only the frames whose text
+    changed (`Workspace.compile_patched`)."""
+    command: tuple[str, ...]
+    main: str   # the main file as it compiled
+    others: tuple[tuple[str, int, int], ...]   # `file_stamps` of the rest of the tree
 
 
 @dataclass(frozen=True, kw_only=True)

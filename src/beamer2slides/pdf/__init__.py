@@ -90,6 +90,21 @@ def join_files(paths: Sequence[Path], out: Path) -> int:
     return joined.pages
 
 
+def join_file_pages(paths: Sequence[Path], order: Sequence[tuple[int, int]], out: Path) -> int:
+    """Pages of the PDFs at `paths` written as one to `out`, `order` naming each (file, its page
+    index) (`pure.join.join_pages`): its page count. `out` may be one of `paths`. A file that does
+    not read, holds outlines, or a kept page naming one left out raises PdfError."""
+    from .pure.document import PdfFileError
+    from .pure.join import JoinError, join_pages
+    from .pure.syntax import PdfSyntaxError
+    try:
+        joined = join_pages([str(p) for p in paths], order)
+    except (OSError, PdfFileError, PdfSyntaxError, JoinError) as e:
+        raise PdfError(f"cannot join pages of {len(paths)} files: {e}") from e
+    out.write_bytes(joined.data)
+    return joined.pages
+
+
 def Document(source: str | Path | bytes) -> PdfDocument:  # noqa: N802 - it stands for the document type
     """Open a PDF (path or bytes) with the backend in use."""
     return backend().open(source)

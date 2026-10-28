@@ -31,6 +31,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .texmap import mask_comments
+
 LUA_ENV = "B2S_PIECES_LUA"
 SPEC_ENV = "B2S_PIECE_SPEC"
 # loaded before the preamble, like `inverse.NO_GLYPH_STREAMS`
@@ -124,7 +126,10 @@ function B.frameend(label)
   -- a fragile frame ends twice, the first time inside its own mode
   if label == "" or tex.count["beamer@modecount"] ~= 0 then return end
   if B.owned then
-    tex.print(ATL, "\\immediate\\write\\@mainaux{\\string\\btwos@ckpt{\\beamer@againname}{" .. B.encoded() .. "}}")
+    -- and the pages this engine shipped so far, its frame's among them (`merged` counts them
+    -- document-wide): which pages a frame left, for a compile that typesets only some again
+    tex.print(ATL, "\\immediate\\write\\@mainaux{\\string\\btwos@ckpt{\\beamer@againname}{" .. B.encoded() .. "}}"
+      .. "\\immediate\\write\\@mainaux{\\string\\btwos@shipped{\\beamer@againname}{" .. status.total_pages .. "}}")
     if label == B.off_after then own(false, true) end
   else
     local data = B.known[label]
@@ -134,7 +139,7 @@ function B.frameend(label)
 end
 tex.print(ATL, [[\newwrite\btwos@void]]
   .. [[\def\btwos@ckpt#1#2{\directlua{btwos.know("\luaescapestring{#1}", "\luaescapestring{#2}")}}]]
-  .. [[\def\btwos@own#1{}\def\btwos@base#1{}]]
+  .. [[\def\btwos@own#1{}\def\btwos@base#1{}\def\btwos@shipped#1#2{}]]
   .. [[\def\btwos@frameend{\directlua{btwos.frameend("\luaescapestring{\beamer@againname}")}}]]
   .. [[\AddToHook{begindocument/before}{\@ifundefined{beamer@reseteecodes}{}]]
   .. [[{\g@addto@macro\beamer@reseteecodes{\btwos@frameend}}}]]
@@ -145,6 +150,8 @@ ON = "\\btwos@own{1}"
 OFF = "\\btwos@own{0}"
 CHECKPOINT = re.compile(r"\\btwos@ckpt\{([^{}]*)\}\{([^{}]*)\}")
 BASE = re.compile(r"\\btwos@base\{([^{}]*)\}")
+SHIPPED = re.compile(r"\\btwos@shipped\{([^{}]*)\}\{(\d+)\}")
+LAST_PAGE = re.compile(r"\\gdef\s*\\@abspage@last\{(\d+)\}")
 REGISTER = re.compile(r"(\d+)=(-?\d+)")
 # a label passed through the spec file and compared in Lua as it is
 CUTTABLE = re.compile(r"[A-Za-z0-9:_.+/-]+")
@@ -152,7 +159,7 @@ PAGE = re.compile(r"(?:^|;)0=(-?\d+)")
 # .aux lines whose only work at \end{document} is `\@writefile` and `\babel@aux`'s (what `merged`
 # writes) or none; any other line sends the compile back to a whole one
 KNOWN = re.compile(r"\\(?:relax|providecommand|newlabel|@writefile|babel@aux|gdef|HyPL@Entry|pgfsyspdfmark"
-                   r"|savepicturepage|savepointas|@nameuse\{bbl@beforestart\}|btwos@ckpt|btwos@own|btwos@base|bibcite"
+                   r"|savepicturepage|savepointas|@nameuse\{bbl@beforestart\}|btwos@ckpt|btwos@own|btwos@base|btwos@shipped|bibcite"
                    r"|bibstyle|bibdata|citation|zref@newlabel|hyper@newdestlabel|HyField@AuxAddToFields"
                    r"|HyField@AuxAddToCoFields|select@language)(?![A-Za-z@])")
 WRITEFILE = re.compile(r"\\@writefile\{([A-Za-z]+)\}\{(.*)\}\s*")
@@ -233,6 +240,7 @@ def merged(auxes: Sequence[str], opened: Sequence[str]) -> Merged | str:
     opened."""
     n = len(auxes)
     parts: list[str] = []
+    shipped_before = 0   # pages the pieces before this one shipped
     for i, text in enumerate(auxes):
         lines = text.splitlines(keepends=True)
         ons = [k for k, line in enumerate(lines) if line.rstrip() == ON]
@@ -243,7 +251,9 @@ def merged(auxes: Sequence[str], opened: Sequence[str]) -> Merged | str:
         end = offs[0] if offs else len(lines)
         if end < start:
             return f"piece {i}: its own part ends before it starts"
-        parts += lines[start:end]
+        own, ended = shifted(lines[start:end], shipped_before)
+        parts += own
+        shipped_before += ended
     contents: dict[str, list[str]] = {ext: [] for ext in opened}
     pages: int | None = None
     for line in parts:
@@ -300,22 +310,217 @@ def carried(aux: str, given: str, plan: Sequence[Cut]) -> str:
         keys = set(now) | set(began)
         delta = {r: now.get(r, base.get(r, 0)) - began.get(r, given_base.get(r, 0)) for r in keys}
         moving = {r: d for r, d in delta.items() if d}
-        before = {r: began.get(r, given_base.get(r, 0)) for r in moving}
+        if not moving:
+            continue
+        pages_moved = delta.get(0, 0)
+        before = {r: began.get(r, given_base.get(r, 0)) for r in keys}
+        last_page = began.get(0, given_base.get(0, 0))
+        was = (last_page - 1, last_page)   # the pages of the frame before
+        # a register set at the last checkpoint to one of its pages: counting along with them
+        counting = {r: was[0] <= v <= was[1] for r, v in before.items()}
         for k in range(start + 1, min(end + 1, len(lines))):
             m = CHECKPOINT.match(lines[k])
-            if m is None or not moving:
+            if m is None:
                 continue
             values = registers(m.group(2))
-            for r in list(moving):
+            page = values.get(0, base.get(0, 0))
+            window = (last_page - 1, page)
+            for r in sorted(set(values) | set(before)):
                 value = values.get(r, base.get(r, 0))
-                if value < before[r]:
+                prev = before.get(r, given_base.get(r, 0))
+                set_here = value != prev and window[0] <= value <= window[1]
+                if r in moving and value < prev:
                     del moving[r]   # set back: from here on not where the piece began
-                    continue
+                elif r != 0 and set_here and not counting.get(r, False):
+                    # set to a page of the frame just typeset (beamer's \beamer@sectionstartpage),
+                    # not counting along with the pages: a page number, which moves with the pages,
+                    # whether or not the register had moved where the piece began
+                    moving[r] = pages_moved
+                counting[r] = set_here
                 before[r] = value
-                values[r] = value + moving[r]
+                if r in moving:
+                    values[r] = value + moving[r]
+            last_page = page
             data = ";".join(f"{r}={v}" for r, v in sorted(values.items()) if v != base.get(r, 0))
             lines[k] = f"\\btwos@ckpt{{{m.group(1)}}}{{{data}}}" + lines[k][m.end():]
     return "".join(lines)
+
+
+def shifted(lines: Sequence[str], by: int) -> tuple[list[str], int]:
+    """A piece's own .aux lines with the pages its checkpoints count (`\\btwos@shipped`, its own)
+    moved past the `by` the pieces before it shipped, and the last count it wrote (0: none)."""
+    out: list[str] = []
+    last = 0
+    for line in lines:
+        m = SHIPPED.match(line)
+        if m is None:
+            out.append(line)
+            continue
+        last = int(m.group(2))
+        out.append(f"\\btwos@shipped{{{m.group(1)}}}{{{last + by}}}" + line[m.end():])
+    return out, last
+
+
+@dataclass(frozen=True, kw_only=True)
+class Patch:
+    """Frames to typeset again (`cut`) and the pages they left in the last compile: `first`
+    pages before them, `pages` their own."""
+    cut: Cut
+    first: int
+    pages: int
+
+
+BEGIN_DOCUMENT = re.compile(r"\\begin\s*\{document\}")
+END_FRAME = re.compile(r"\\end\s*\{frame\}")
+FRAME_OPENS = re.compile(r"\\begin\s*\{frame\}|\\(?:again)?frame(?![A-Za-z@])")
+# what writes the document's own .aux, .toc or .nav lines, or adds a frame: an edit adding, removing
+# or changing one cannot leave the other frames' pages standing, so it is not even tried (a refused
+# patch costs a compile in pieces its waiting engines)
+STRUCTURE = re.compile(r"\\(?:part|section|subsection|subsubsection)\b\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?"
+                       r"|\\(?:label|bibitem|cite|nocite)\s*(?:\[[^\]]*\])?\{[^{}]*\}"
+                       r"|\\(?:appendix|tableofcontents|pause|againframe|frame)(?![A-Za-z@])|\\begin\s*\{frame\}")
+
+
+def label_places(text: str, labels: Sequence[str]) -> list[int] | None:
+    """Where each frame's `label=` is written in `text`, comments aside: None unless each is
+    written once, in the order given."""
+    masked = mask_comments(text)
+    at: list[int] = []
+    for label in labels:
+        found = [m.start() for m in re.finditer(r"[\[,]\s*label\s*=\s*(?:" + re.escape(label) + r"|\{"
+                                                  + re.escape(label) + r"\})\s*[,\]]", masked)]
+        if len(found) != 1 or (at and found[0] <= at[-1]):
+            return None
+        at.append(found[0])
+    return at
+
+
+def patches(before: str, after: str, aux: str, pieces: int) -> list[Patch] | str:
+    """The frames a compile of the main file `after` typesets again when the last compile, of
+    `before`, wrote `aux`: the others' pages are as it left them. Or why not.
+
+    A label's frame is the text from its `label=` to its `\\end{frame}`; what follows it, up to
+    the next label, is typeset after its checkpoint, so it goes with the next frame (as does what
+    the first label comes after, from `\\begin{document}`). A frame whose text changed is typeset
+    again, in runs of neighbours, as many as `pieces` (the runs nearest each other joined), none
+    of more pages than a compile in pieces gives one engine. Whether the rest really stands -
+    the runs' .aux lines as the last compile's - the compile checks (`Workspace.compile_patched`)."""
+    found = CHECKPOINT.findall(aux)
+    labels = [label for label, _ in found]
+    if not labels or len(set(labels)) != len(labels) or not all(CUTTABLE.fullmatch(label) for label in labels):
+        return "the frames' labels are not one per frame"
+    ends = {label: int(n) for label, n in SHIPPED.findall(aux)}
+    last = LAST_PAGE.search(aux)
+    if set(ends) != set(labels) or last is None:
+        return "the last compile did not record each frame's pages"
+    total = int(last.group(1))
+    places: list[list[int]] = []
+    for text in (before, after):
+        doc = BEGIN_DOCUMENT.search(mask_comments(text))
+        at = label_places(text, labels)
+        if doc is None or at is None or at[0] < doc.end():
+            return "a frame label is not written once, in order, in the main file"
+        places.append([doc.end(), *at, len(text)])
+    if before[:places[0][0]] != after[:places[1][0]]:
+        return "the preamble changed"
+    n = len(labels)
+
+    def parts(text: str, at: Sequence[int]) -> list[str]:
+        """The text before the first label, then each label's frame and what follows it."""
+        out = [text[at[0]:at[1]]]
+        for k in range(n):
+            start, stop = at[k + 1], at[k + 2]
+            masked = mask_comments(text[start:stop])
+            end = END_FRAME.search(masked)
+            # the frame's own end: none when another frame opens before it (`\\frame{...}`, an
+            # environment of the source's own around a frame)
+            own = end is not None and FRAME_OPENS.search(masked, 0, end.start()) is None
+            cut = start + end.end() if end is not None and own else stop
+            out += [text[start:cut], text[cut:stop]]
+        return out
+
+    old, new = parts(before, places[0]), parts(after, places[1])
+    dirty: set[int] = set()   # frames (by label; n: what follows the last) to typeset again
+    if old[0] != new[0]:
+        dirty.add(0)
+    for k in range(n):
+        if old[1 + 2 * k] != new[1 + 2 * k]:
+            dirty.add(k)
+            if not old[2 + 2 * k] or not new[2 + 2 * k]:
+                dirty.add(k + 1)   # no frame end found: what follows may be in it
+        if old[2 + 2 * k] != new[2 + 2 * k]:
+            dirty.add(k + 1)
+    if not dirty:
+        return "no frame's text changed"
+    for a, b in zip(old, new):
+        if a != b:
+            was = [m.group(0) for m in STRUCTURE.finditer(mask_comments(a))]
+            now = [m.group(0) for m in STRUCTURE.finditer(mask_comments(b))]
+            if was != now:
+                changed = next((x for x, y in zip(was, now) if x != y), (was + now)[min(len(was), len(now))])
+                return f"the edit changes the document's structure ({changed.split('{')[0]})"
+
+    def first(a: int) -> int:
+        return ends[labels[a - 1]] if a > 0 else 0
+
+    def end(b: int) -> int:
+        return ends[labels[b]] if b < n else total
+
+    runs: list[tuple[int, int]] = []
+    for k in sorted(dirty):
+        if runs and runs[-1][1] == k - 1:
+            runs[-1] = (runs[-1][0], k)
+        else:
+            runs.append((k, k))
+    while len(runs) > pieces:
+        j = min(range(len(runs) - 1), key=lambda j: first(runs[j + 1][0]) - end(runs[j][1]))
+        runs[j:j + 2] = [(runs[j][0], runs[j + 1][1])]
+    most = -(-total // pieces)
+    out: list[Patch] = []
+    for i, (a, b) in enumerate(runs):
+        if end(b) - first(a) > most:
+            return f"{end(b) - first(a)} pages to typeset again, more than a piece's {most}"
+        out.append(Patch(cut=Cut(index=i, on_after=labels[a - 1] if a > 0 else None,
+                                 off_after=labels[b] if b < n else None),
+                         first=first(a), pages=end(b) - first(a)))
+    return out
+
+
+def own_part(aux: str, cut: Cut) -> list[str] | str:
+    """The lines a piece wrote for its own frames (between its marks; from the start for the first,
+    to the end for the last), or why not."""
+    lines = aux.splitlines(keepends=True)
+    ons = [k for k, line in enumerate(lines) if line.rstrip() == ON]
+    offs = [k for k, line in enumerate(lines) if line.rstrip() == OFF]
+    if len(ons) != (0 if cut.on_after is None else 1) or len(offs) != (0 if cut.off_after is None else 1):
+        return "its own part is not marked"
+    start = ons[0] + 1 if ons else 0
+    stop = offs[0] if offs else len(lines)
+    return lines[start:stop] if stop >= start else "its own part ends before it starts"
+
+
+def span_of(lines: Sequence[str], cut: Cut) -> tuple[int, int] | None:
+    """Where in the lines of a whole .aux a piece's own part stands: after the line counting the
+    pages of the frame it starts after, through the one of the frame it stops after."""
+    def after(label: str | None, otherwise: int) -> int | None:
+        if label is None:
+            return otherwise
+        at = [k for k, line in enumerate(lines) if (m := SHIPPED.match(line)) is not None and m.group(1) == label]
+        return at[0] + 1 if len(at) == 1 else None
+    start, stop = after(cut.on_after, 0), after(cut.off_after, len(lines))
+    return (start, stop) if start is not None and stop is not None and start <= stop else None
+
+
+def patch_total(aux: str) -> int:
+    """The pages a whole .aux says its document has (-1: it does not say)."""
+    last = LAST_PAGE.search(aux)
+    return int(last.group(1)) if last is not None else -1
+
+
+def unbased(lines: Sequence[str]) -> list[str]:
+    """.aux lines without the registers where the document began (`\\btwos@base`): no pass reads
+    that line, each counts them afresh."""
+    return [line for line in lines if BASE.match(line) is None]
 
 
 def registers(data: str) -> dict[int, int]:

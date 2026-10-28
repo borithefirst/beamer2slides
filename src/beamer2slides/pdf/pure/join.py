@@ -3,8 +3,8 @@ document a whole compile would have written (`inverse.Workspace.piece_pass`, doc
 
 Each file's objects keep their own numbering moved past the files before it, so nothing is
 shared and nothing is renamed but references. The pages hang from one new page tree with their
-inherited attributes written in (as `write_file` does). The first file gives the catalog and the
-document information; named destinations of every file are one name tree, and the page labels one
+inherited attributes written in (as `write_file` does). The file of the first page gives the catalog
+and the document information; named destinations of every file are one name tree, and the page labels one
 number tree.
 
 The files are pieces of one document. Their page labels already count pages document-wide, so a
@@ -40,7 +40,23 @@ class JoinError(Exception):
 def join(paths: Sequence[str]) -> Joined:
     """The files at `paths` as one PDF, in that order."""
     files = [read(p) for p in paths]
-    items = outline(files[0])
+    return joined(paths, files, [(k, i) for k, pdf in enumerate(files) for i in range(pdf.page_count)
+                                 if pdf.inherited_page(i) is not None])
+
+
+def join_pages(paths: Sequence[str], order: Sequence[tuple[int, int]]) -> Joined:
+    """Pages of the files at `paths` as one PDF: `order` names each, (file, its page index), in the
+    joined order - a compile that typeset some frames again keeps the others' pages from the last
+    one (`inverse.Workspace.compile_patched`). A destination on a page left out is left out with
+    it; a kept page or the catalog naming one refuses the join."""
+    return joined(paths, [read(p) for p in paths], order)
+
+
+def joined(paths: Sequence[str], files: Sequence[PdfFile], order: Sequence[tuple[int, int]]) -> Joined:
+    if not order:
+        raise JoinError("no pages to join")
+    lead = order[0][0]
+    items = outline(files[lead])
     for path, pdf in zip(paths, files):
         mine = outline(pdf)
         if mine is None:
@@ -58,13 +74,17 @@ def join(paths: Sequence[str]) -> Joined:
     # every object written, numbered as joined, its references moved already
     written: dict[int, PdfObject] = {}
     todo: list[tuple[int, int]] = []   # (file, its own number) reached and not yet written
-    page_refs: list[set[int]] = []
+    page_refs: list[set[int]] = []   # each file's page objects
+    kept: list[set[int]] = []        # those `order` takes
+    position: list[dict[int, int]] = []   # where in the joined pages each of those stands
 
     def moved(v: PdfObject, k: int) -> PdfObject:
         """`v` of file `k` with its references numbered as joined; a reference to one of its pages
         is to that page, which `join` writes itself."""
         if isinstance(v, Ref):
             num = v.num + bases[k]
+            if v.num in page_refs[k] and v.num not in kept[k]:
+                raise JoinError(f"{paths[k]} names a page the join leaves out")
             if num not in written and v.num not in page_refs[k]:
                 written[num] = None   # taken: written once read
                 todo.append((k, v.num))
@@ -81,36 +101,55 @@ def join(paths: Sequence[str]) -> Joined:
         return {key: moved(x, k) for key, x in d.items()}
 
     kids: PdfArray = []
-    starts: list[int] = []
     pages: list[tuple[int, int, PdfDict]] = []   # (joined number, file, page dictionary)
-    for k, pdf in enumerate(files):
-        starts.append(len(kids))
-        found = [f for f in (pdf.inherited_page(i) for i in range(pdf.page_count)) if f is not None]
-        page_refs.append({ref.num for ref, _ in found if ref is not None})
-        for ref, page in found:
-            if ref is None:
-                num = extra
-                extra += 1
-            else:
-                num = ref.num + bases[k]
-            pages.append((num, k, page))
-            kids.append(Ref(num, 0))
+    found = [[pdf.inherited_page(i) for i in range(pdf.page_count)] for pdf in files]
+    for k in range(len(files)):
+        page_refs.append({f[0].num for f in found[k] if f is not None and f[0] is not None})
+        kept.append(set())
+        position.append({})
+    runs: list[tuple[int, int, int]] = []   # (file, first joined position, after its last) in order
+    for k, i in order:
+        if not 0 <= k < len(files) or not 0 <= i < files[k].page_count:
+            raise JoinError(f"no page {i} in file {k}")
+        f = found[k][i]
+        if f is None:
+            raise JoinError(f"{paths[k]}: page {i} does not read")
+        ref, page = f
+        if ref is None:
+            num = extra
+            extra += 1
+        else:
+            if ref.num in kept[k]:
+                raise JoinError(f"{paths[k]}: page {i} twice")
+            kept[k].add(ref.num)
+            position[k][ref.num] = len(kids)
+            num = ref.num + bases[k]
+        if runs and runs[-1][0] == k and runs[-1][2] == len(kids):
+            runs[-1] = (k, runs[-1][1], len(kids) + 1)
+        else:
+            runs.append((k, len(kids), len(kids) + 1))
+        pages.append((num, k, page))
+        kids.append(Ref(num, 0))
     for num, k, page in pages:
         d = moved_dict({key: v for key, v in page.items() if key != "Parent"}, k)
         d[Name("Parent")] = Ref(pages_num, 0)
         written[num] = d
     written[pages_num] = {Name("Type"): Name("Pages"), Name("Kids"): kids, Name("Count"): len(kids)}
 
-    first = files[0]
-    catalog = moved_dict({key: v for key, v in first.catalog.items() if key not in _CATALOG_OWN}, 0)
+    first = files[lead]
+    catalog = moved_dict({key: v for key, v in first.catalog.items() if key not in _CATALOG_OWN}, lead)
     names: PdfDict = {}
     first_names = first.resolve(first.catalog.get("Names"))
     if isinstance(first_names, dict):
-        names = moved_dict({key: v for key, v in first_names.items() if key != "Dests"}, 0)
-    dests: dict[bytes, PdfObject] = {}
-    stand_ins: dict[bytes, PdfObject] = {}
+        names = moved_dict({key: v for key, v in first_names.items() if key != "Dests"}, lead)
+    # a name two files give goes to the earlier page: a file compiled from part of a document
+    # (`pieces`) puts the anchors of what it skipped on its first page, after the true ones
+    found_at: dict[bytes, tuple[int, int, PdfObject]] = {}   # name: (joined position, file, value)
+    stand_ins: dict[bytes, tuple[int, PdfObject]] = {}
     labels: PdfArray = []
-    for k, pdf in enumerate(files):
+    # a file's stand-ins after those of the files whose last page comes before its own
+    for k in sorted({k for k, _ in order}, key=lambda k: max(e for f, _, e in runs if f == k)):
+        pdf = files[k]
         found_dests: list[tuple[PdfObject, PdfObject]] = []
         tree = pdf.resolve(pdf.catalog.get("Names"))
         if isinstance(tree, dict):
@@ -123,26 +162,35 @@ def join(paths: Sequence[str]) -> Joined:
         for key, value in found_dests:
             if not isinstance(key, bytes):
                 continue
+            on = _dest_page(pdf, value)
+            if on is not None and on in page_refs[k] and on not in kept[k]:
+                continue   # its page is left out, and the destination with it
             if _stand_in(pdf, value, last_num):
-                stand_ins[bytes(key)] = moved(value, k)
-            elif bytes(key) not in dests:
-                dests[bytes(key)] = moved(value, k)
-        own = range(starts[k], starts[k] + pdf.page_count)
+                stand_ins[bytes(key)] = (k, value)
+                continue
+            at = position[k].get(on, len(kids)) if on is not None else len(kids)
+            if bytes(key) not in found_at or at < found_at[bytes(key)][0]:
+                found_at[bytes(key)] = (at, k, value)
+    for k, start, end in runs:
+        pdf = files[k]
+        own = range(start, end)
         numbered = [(key, value) for key, value in leaves(pdf, pdf.catalog.get("PageLabels"), "Nums")
                     if isinstance(key, int)]
         before = [value for key, value in numbered if key < own.start]
         inside = [(key, value) for key, value in numbered if key in own]
-        if pdf.page_count and (not inside or inside[0][0] != own.start):
-            # the range the file's first page is in: the entry before it, else no label
+        if not inside or inside[0][0] != own.start:
+            # the range the run's first page is in: the entry before it, else no label
             inside.insert(0, (own.start, before[-1] if before else {}))
         for at, value in inside:
             labels += [at, moved(value, k)]
-    for key, value in stand_ins.items():
-        dests.setdefault(key, value)
+    dests = {key: moved(value, k) for key, (_, k, value) in found_at.items()}
+    for key, (k, value) in stand_ins.items():
+        if key not in dests:
+            dests[key] = moved(value, k)
 
     catalog[Name("Pages")] = Ref(pages_num, 0)
     if items:
-        catalog[Name("Outlines")] = moved(first.catalog.get("Outlines"), 0)
+        catalog[Name("Outlines")] = moved(first.catalog.get("Outlines"), lead)
     if dests:
         flat: PdfArray = []
         for key in sorted(dests):
@@ -156,7 +204,7 @@ def join(paths: Sequence[str]) -> Joined:
         catalog[Name("PageLabels")] = {Name("Nums"): labels}
     written[root_num] = catalog
     info = first.trailer.get("Info") if first.trailer is not None else None
-    info_ref = moved(info, 0) if isinstance(info, Ref) else None
+    info_ref = moved(info, lead) if isinstance(info, Ref) else None
 
     # everything the pages, the catalog and the document information reach, file by file
     while todo:
@@ -197,6 +245,16 @@ def _stand_in(pdf: PdfFile, value: PdfObject, last_page: int) -> bool:
     dest = pdf.resolve(value)
     return (isinstance(dest, list) and len(dest) == 2 and isinstance(dest[0], Ref) and dest[0].num == last_page
             and dest[1] == "Fit")
+
+
+def _dest_page(pdf: PdfFile, value: PdfObject) -> int | None:
+    """The number of the page object a destination names, if it names one by reference."""
+    dest = pdf.resolve(value)
+    if isinstance(dest, dict):
+        dest = pdf.resolve(dest.get("D"))
+    if isinstance(dest, list) and dest and isinstance(dest[0], Ref):
+        return dest[0].num
+    return None
 
 
 def outline(pdf: PdfFile) -> list[tuple[int, bytes, bytes]] | None:

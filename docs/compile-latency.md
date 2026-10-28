@@ -676,3 +676,73 @@ What is left of a first compile is pass 1 itself, one core (water x8: 4.2 s of 6
 would mean pieces with no checkpoints, each starting from guessed numbers (a piece's sections are
 right, its pages are not), settled by `carried` over more piece passes. That is about 3 passes
 of ~1.2 s against one of 4.2, if `carried` learns to start from nothing. Not done.
+
+## Done: only the frames that changed (2026-10-28)
+
+A converge round mostly edits words inside a few frames. A compile in pieces still typesets every
+frame. Now **a compile typesets again only the frames whose text changed**, and keeps the
+others' pages from the last compile's PDF (`Workspace.compile_patched`, `pieces.patches`).
+
+**Which pages are whose.** At each labelled frame's end, a piece and a whole compile also write
+the pages shipped so far, `\btwos@shipped{label}{n}` (`merged` counts them document-wide,
+`pieces.shifted`). So the last compile's .aux says which pages each frame left.
+
+**Which frames changed.** `patches` cuts the main file at each frame's `label=`: a frame is the
+text from its label to its `\end{frame}`, and what follows, up to the next label, goes with the
+next frame (it is typeset after the checkpoint). Changed frames are grouped into runs of
+neighbours, at most one run per piece, each no longer than a piece of a compile in pieces. Each
+run is a piece on its own waiting engine, starting from the checkpoint before it, as in a compile
+in pieces. Its pages replace the run's old pages (`pdf.join_file_pages`, `pure.join.join_pages`).
+
+**When it is right.** It is right when every run wrote the .aux lines the last compile wrote for
+those frames: then every frame began and ended as before, and read what it read before
+(`patch_checked`; it also checks the bookmarks, the page count, the files written). Otherwise
+nothing of it is kept (`patch_refused` says why) and the compile goes on in pieces.
+
+**Refused before it costs anything.** A refused patch used up the waiting engines that the
+compile in pieces then needed: about 1.3 s lost per section edit. So `patches` refuses without
+compiling when the edit adds, removes or changes what writes the document's own lines or adds a
+frame (`pieces.STRUCTURE`: `\section` and its kin, `\label`, `\cite`, `\pause`, `\frame`, ...), or
+the preamble changed, or the labels are not one per frame in order. With that, a section or frame
+insert costs the same with patching on as off (A/B: 34.8 vs 34.7 s, 25.0 vs 25.1 s over three
+edits each).
+
+| water x8 (50 pages), 4 cores, warm engines (wall)  | whole | pieces | patched |
+|---|---|---|---|
+| a few words changed in one frame                   | ~3.1 s | ~1.2 s | 0.41-0.46 s |
+
+The patched PDF is pixel for pixel the whole compile's on every edit tried.
+
+**A frame's colours leaked into the next.** Patching first showed differing pixels: a frame
+typeset alone started with black words where the whole compile had DarkBlue. slides.sty's table
+cell (`\slides@t@setcell`) set its words in an ungrouped `\setbox...\vbox{}`. A `\color` pushes a
+colour and pops it after the enclosing group, which there was outside the box. So a glossary
+table's DarkBlue stayed on the colour stack and coloured every later frame's plain words. This was
+a real bug in adopted decks, older than pieces. The cell now groups its colour
+(`\color@begingroup`...`\color@endgroup`). `tests/test_adopt_compiles.py` puts a frame of bare
+words after every frame of each showcase deck: all must have the first one's colour. With the fix
+reverted, several decks fail.
+
+**The outline after a patch.** A piece puts the anchors of the frames it skipped on its first
+page. When the join keeps a piece's pages and the last compile's, a name could be on both, and the
+outline then went to the piece's first page. The join now gives a name to the earliest page that
+holds it.
+
+**A register set to a page.** When a frame comes in, `carried` moves each later piece's
+checkpoints by how far its start moved. Beamer's `\beamer@sectionstartpage` (and the part's and
+subsection's) is set to the page a section starts on: it moves with the pages, not by what it had
+moved where the piece began. Moving it by the wrong amount meant some edits did not settle, and a
+cold whole pass followed (water x8, a frame inserted: up to 8.5 s instead of 4.4 s). Now a
+register set at a checkpoint to a page of the frame just typeset is moved with the pages, unless
+it was already there at the checkpoint before (then it counts along with the pages, like
+a frame number). Tests: `tests/test_pieces.py`.
+
+**Tried, saved nothing: settling each piece apart.** A frame insert still takes three piece
+passes (1.1 + 1.1 + 2.2 s, the third cold). Reading each piece's .aux only up to where it starts
+should let the pieces before an edit settle sooner. It did not save a pass: the .nav's page
+numbers change everywhere after the edit too. Reverted.
+
+**What it cannot see.** An edit outside the main file (an `\input` file, a picture) is not
+patched: the last compile's other files must be the same (`PatchFrom.others`). Anything a frame
+changes that is not written to the .aux, a `\gdef` read by a later frame for example, would pass
+the check and be wrong.

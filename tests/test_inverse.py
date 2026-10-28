@@ -677,8 +677,9 @@ def test_a_compile_in_pieces_is_the_pages_of_a_whole_one(tmp_path: Path, monkeyp
     `Workspace.compile_in_pieces`). Each tree below is compiled so, then whole and cold in a
     workspace of its own: the same pages to the pixel, the same outline, and SyncTeX's pages
     for every page. The first compile's first pass is whole (no .aux to cut by) and its second
-    in pieces, settled at once. A body edit, and a frame and a section coming in ahead of every
-    cut (the pieces after it begin a page off, and passes go on until they read what they write)."""
+    in pieces, settled at once. A body edit, which only its frame's piece typesets again
+    (`compile_patched`), and a frame and a section coming in ahead of every cut (the pieces after
+    it begin a page off, and passes go on until they read what they write)."""
     passes: list[int] = []
     piece_pass = Workspace.piece_pass
 
@@ -702,9 +703,16 @@ def test_a_compile_in_pieces_is_the_pages_of_a_whole_one(tmp_path: Path, monkeyp
             ws.main.write_text(tree, encoding="utf-8")
             split, error = ws.compile()
             assert split is not None, error
-            assert ws.piece_syncs is not None, f"tree {n} was compiled in pieces ({ws.split_refused})"
+            if n == 1:
+                assert ws.patched == 1, f"a body edit typesets its frame again alone ({ws.patch_refused})"
+                assert ws.piece_syncs is None
+            else:
+                assert ws.piece_syncs is not None, f"tree {n} was compiled in pieces ({ws.split_refused})"
             if n == 0:
                 assert passes == [3], "one pass in pieces after the whole first one"
+            if n == 2:
+                assert ws.patched == 1 and "structure" in ws.patch_refused, ws.patch_refused
+                assert passes == [3, 3, 3, 3], "a frame and a section ahead of every cut: three passes"
             cold, error = Workspace(main, tmp_path / f"cold{n}", handout=False, engine="lualatex",
                                     fresh=True).compile()
             assert cold is not None, error

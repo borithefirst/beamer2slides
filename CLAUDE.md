@@ -500,7 +500,11 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   in pieces on up to 4 cores (`pieces.py`, `Workspace.compile_in_pieces`: frames skipped to labelled
   checkpoints of count registers, .aux merged, PDFs joined by `pdf/pure/join.py`, settled as a
   fixpoint, anything unknown compiled whole; `$B2S_COMPILE_PIECES`; a first compile's passes after
-  the first too, `compile_whole(cut=)`; waiting engines at nice 10, `WARM_NICE`). Fonts go into a tree with `copy2`:
+  the first too, `compile_whole(cut=)`; waiting engines at nice 10, `WARM_NICE`; a register set to a
+  page moves with the pages, `carried`). A compile whose edit stays inside frames typesets only those
+  (`compile_patched`, `pieces.patches`: pages per frame from `\btwos@shipped`, kept only when the
+  pieces wrote the last .aux lines again; `pieces.STRUCTURE` refuses before compiling; the join
+  gives a name to its earliest page). Fonts go into a tree with `copy2`:
   luaotfload caches by font name and mtime, a fresh mtime re-caches every font. Every lualatex
   compile (and adopt's preamble) carries `inverse.NO_GLYPH_STREAMS`: luaotfload writes a static
   font with a STAT table (every google/fonts cut) from its whole-font streams cache, a quarter of
@@ -518,7 +522,8 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   into that same deck (`adopt_sync.py`). slides.sty draws a plain `\sliderect` and a table's
   fills, rules and cells with pgf's system layer in TikZ's own order while nothing could make TikZ
   draw them otherwise (`adopt_shapes.PLAIN_MACRO`; else TikZ), pinned to TikZ's pixels
-  (`test_what_slides_sty_draws_without_tikz_is_what_tikz_draws`). deck_ir builds `TargetDeck` records (`target_json` its
+  (`test_what_slides_sty_draws_without_tikz_is_what_tikz_draws`); a cell's colour stays in its
+  box (`\color@begingroup`: it leaked into every later frame, `test_no_frame_leaks_its_colours_into_the_next`). deck_ir builds `TargetDeck` records (`target_json` its
   one JSON writer); the thumbnail passes (deck_fills, deck_freeforms, deck_thumbs) take a slide's
   element records and hand back new ones (`replace`), never changing one; adopt parses the target
   once (`bootstrap`), `element_latex` matches each kind to `assert_never`; adopt_shapes,

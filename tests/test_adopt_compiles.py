@@ -94,6 +94,46 @@ def test_the_source_adopt_writes_compiles(name: str, tmp_path: Path, fonts: None
         doc.close()
 
 
+def probe_frame(n: int) -> str:
+    return f"\n\\begin{{frame}}[plain]PROBE{n:03d} bare words\\end{{frame}}\n"
+
+
+@pytest.mark.needs_decks(*(f"foreign/showcase/{n}/target.json" for n in NAMES))
+@pytest.mark.parametrize("name", NAMES)
+def test_no_frame_leaks_its_colours_into_the_next(name: str, tmp_path: Path, fonts: None) -> None:
+    """A frame of bare words after every frame of the source adopt writes: each has the colour of
+    one before them all. A colour pushed in a box and popped after it - a `\\color` in an
+    ungrouped `\\setbox...\\vbox` - coloured every later frame's own words (a glossary table's
+    DarkBlue), and a frame compiled apart (`pieces.py`) starts from no such leak, so it differed."""
+    from beamer2slides import pdf
+    text = adopt.bootstrap(target_of(name), tmp_path / "tree" / "main.tex", False, None)
+    program = shutil.which(engine(text), path=tex_env()["PATH"])
+    if program is None:
+        (pytest.fail if os.environ.get("B2S_REQUIRE_TEX") else pytest.skip)(f"{engine(text)} not found")
+    head, body = text.split("\\begin{document}", 1)
+    ends = iter(range(1, 1000))
+    body = re.sub(r"\\end\{frame\}", lambda m: m.group(0) + probe_frame(next(ends)), body)
+    main = tmp_path / "tree" / "probed.tex"
+    main.write_text(head + "\\begin{document}" + probe_frame(0) + body, encoding="utf-8")
+    r = subprocess.run([program, "-interaction=nonstopmode", "-halt-on-error", main.name], cwd=main.parent,
+                       capture_output=True, text=True, errors="replace", env=tex_env(), timeout=900)
+    assert r.returncode == 0, r.stdout[-4000:]
+    doc = pdf.Document(main.with_suffix(".pdf"))
+    try:
+        colours = {}
+        for i in range(len(doc)):
+            chars = doc[i].chars()
+            words = "".join(c.c for c in chars)
+            at = words.find("PROBE")
+            if at >= 0:
+                colours[words[at:at + 8]] = chars[at].color
+    finally:
+        doc.close()
+    assert len(colours) == len(jarr(target_of(name), "slides")) + 1
+    first = colours["PROBE000"]
+    assert {k: f"{v:06X}" for k, v in colours.items() if v != first} == {}, f"the first is {first:06X}"
+
+
 # Probes for what slides.sty draws without TikZ (`adopt_shapes.PLAIN_MACRO`): each says on the
 # terminal that it ran, and draws exactly what it drew.
 FAST_PATHS = {"rect": "slides@plainrect", "fill": "slides@t@qfill", "rule": "slides@t@qrule", "cell": "slides@t@qnode"}
