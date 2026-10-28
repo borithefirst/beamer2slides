@@ -237,3 +237,34 @@ triangle. Opacity (an ExtGState) and dash patterns are the parts needing more th
 | one thread out of four                 | no: pieces, pre-warmed: 4.2x on water x8 |
 | TikZ for every shape and table cell    | convenience, not need: 60-75% of an adopted body; table cell nodes and borders first |
 | Lua shaping, SyncTeX, compression, PDF writing | small or noise (part one) |
+
+## Done: compiles nobody needed (2026-10-28)
+
+Three changes in `inverse.Workspace.compile`, all invisible to the pages:
+
+- **A tree compiled before is not compiled again.** `tree_digest` (names and bytes of every file
+  in the tree plus the command line, ~45 ms on water's 33 MB tree) is remembered after a
+  successful compile; the same digest with its PDF still there returns that PDF. `converge`'s
+  check of a round's edits is now the PDF the next round reads, and a kept bisect step costs no
+  third compile. A compile that wrote into its own tree (minted, externalised pictures) is not
+  remembered.
+- **babel's language switches no longer force a pass.** A round that wraps a paragraph in
+  `otherlanguage` adds `\babel@aux{hebrew}{}` / `\babel@toc {english}{}\relax` pairs that
+  leave the language as it was; `aux_state` hashes the files with those cut
+  (`language_switches`). They asked for a second pass on almost every water round.
+- **A failed compile puts the aux files back.** It left `main.aux` cut off where it stopped,
+  so the next compile needed two passes to settle it again; now the files the last good compile
+  left are restored (`aux_files`).
+
+Checked by compiling one more pass after every compile of a loop (same options) and comparing
+each rendered page: no page moved on talk or water, and every compile after the first is one
+pass. The residuals each round leaves are the same as before.
+
+| loop, 3 rounds (A/B interleaved) | compiles' wall before | after | |
+|----------------------------------|-------------|-------|------|
+| talk (2 runs each)               | 30.6 s      | 22.8 s | -25% |
+| water                            | 105.3 s     | 57.4 s | -45% |
+
+Seen on the way, outside speed: on both decks the loop's open residuals *rise* after round 0
+(water 14 -> 66 -> 47 -> 43, talk 4 -> 16 -> 11 -> 17); `frame_guard` puts frames back at their
+best round, but each of those rounds still costs a compile.

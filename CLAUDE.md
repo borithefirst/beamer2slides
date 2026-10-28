@@ -492,7 +492,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   `deck_ir_types.TargetDeck` (`parse_target`/`target_json`, exact on every target under out/),
   parsed once (`inverse.typed_target`); frame labels ride beside the deck (`compare.Current`), and
   residuals are a record per kind. Compiles stop when the aux files
-  stop moving (`inverse.aux_state`). **The loop's own view is no judge**: `frame_guard.py` ends
+  stop moving (`inverse.aux_state`, babel's no-op language switches cut, `language_switches`; a
+  failed compile puts the last good aux back); a tree compiled before is not compiled again
+  (`tree_digest`, docs/compile-latency.md). **The loop's own view is no judge**: `frame_guard.py` ends
   each frame at its best round, by ink against Google's thumbnail when the target carries one
   (`page_score.py`), else weighted residuals plus extract's words; `Result.restored`, report
   "Frames put back". On foreign decks no round has yet raised any slide's ink.

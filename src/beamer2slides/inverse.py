@@ -688,6 +688,7 @@ class Workspace:
         self.engine = engine
         self.notes = False
         self.source = Source(self.main)
+        self.compiled: str | None = None   # `tree_digest` of the last compile that succeeded
 
     def reload(self) -> None:
         self.source = Source(self.main)
@@ -714,6 +715,9 @@ class Workspace:
         return applied
 
     def compile(self) -> tuple[Path | None, str]:
+        """The PDF of the tree as it stands, or (None, the error). A tree compiled before with the
+        same options and not changed since is not compiled again: `converge`'s check of a round's
+        edits is the PDF the next round reads (docs/compile-latency.md)."""
         engine = self.engine or self.source.engine()
         prefix = ""
         if self.handout:
@@ -725,18 +729,34 @@ class Workspace:
         exe = shutil.which(engine, path=tex_env()["PATH"]) or engine
         cmd = [exe,"-interaction=nonstopmode", "-halt-on-error", "-synctex=1", "-file-line-error",
                f"-jobname={job}", f"-output-directory={self.build_dir}", prefix + r"\input{" + rel + "}"]
+        pdf = self.build_dir / f"{job}.pdf"
+        key = tree_digest(self.src, "\0".join(cmd))
+        if self.compiled == key and pdf.is_file():
+            return pdf, ""
+        self.compiled = None
         log = ""
         before = aux_state(self.build_dir)
+        kept = aux_files(self.build_dir)
         for attempt in range(3):
             r = subprocess.run(cmd, cwd=self.src, capture_output=True, text=True, errors="replace", env=tex_env())
             log_path = self.build_dir / f"{job}.log"
             log = log_path.read_text(errors="replace") if log_path.exists() else r.stdout
             if r.returncode != 0:
+                # the auxiliary files as the last good compile left them, not cut off where this
+                # one stopped: the next compile then needs no pass to settle them again
+                for path in aux_files(self.build_dir):
+                    path.unlink()
+                for path, data in kept.items():
+                    path.write_bytes(data)
                 return None, error_excerpt(log)
             before, after = aux_state(self.build_dir), before
             if (before == after and not needs_rerun(log)) or attempt == 2:
                 break
-        return self.build_dir / f"{job}.pdf", ""
+        # a compile that wrote into the tree it read (minted, an externalised picture) is not
+        # known to come out the same from where it left the tree: it is not remembered
+        if tree_digest(self.src, "\0".join(cmd)) == key:
+            self.compiled = key
+        return pdf, ""
 
     def build(self, out: Path, target_has_notes: bool,
               compiled: tuple[Path | None, str] | None) -> Candidate | str:
@@ -828,6 +848,23 @@ def needs_rerun(log: str) -> bool:
 AUX_SUFFIXES = (".aux", ".toc", ".nav", ".snm", ".out", ".lof", ".lot", ".bbl", ".vrb")
 
 
+def tree_digest(root: Path, options: str) -> str:
+    """A digest of every file under `root`, names and bytes, and of `options` (the command line):
+    two compiles of equal digests read the same input."""
+    h = hashlib.blake2b(options.encode(), digest_size=20)
+    for p in sorted(p for p in root.rglob("*") if p.is_file()):
+        data = p.read_bytes()
+        h.update(f"\0{p.relative_to(root).as_posix()}\0{len(data)}\0".encode())
+        h.update(data)
+    return h.hexdigest()
+
+
+def aux_files(folder: Path) -> dict[Path, bytes]:
+    """Every auxiliary file under `folder` and its bytes."""
+    return {p: p.read_bytes() for p in (folder.rglob("*") if folder.is_dir() else ())
+            if p.suffix in AUX_SUFFIXES and p.is_file()}
+
+
 def aux_state(folder: Path) -> dict[str, int]:
     """A digest of every auxiliary file under `folder`, for telling one pass from the next.
 
@@ -837,10 +874,38 @@ def aux_state(folder: Path) -> dict[str, int]:
     runs again while the auxiliary files are still moving (latexmk's rule), which on a folder the
     turn before left settled - what an agent's edit -> compile -> sync loop hands it - is no second
     pass at all.
+
+    babel's language switches are read as the language they leave (`language_switches`).
     """
-    return {str(p.relative_to(folder)): zlib.crc32(p.read_bytes())
-            for p in (folder.rglob("*") if folder.is_dir() else ())
-            if p.suffix in AUX_SUFFIXES and p.is_file()}
+    return {str(p.relative_to(folder)): zlib.crc32(language_switches(data)) for p, data in aux_files(folder).items()}
+
+
+# a line babel writes to the .aux / .toc where the text switches language
+LANGUAGE_SWITCH = re.compile(rb"\\babel@(?:aux\{[^{}]*\}\{\}|toc \{[^{}]*\}\{\}\\relax ?)")
+
+
+def language_switches(data: bytes) -> bytes:
+    """An auxiliary file with babel's language switches cut to those that change the language a
+    line after them is read in. A round that gives a paragraph a language group of its own
+    (`paragraph_direction`) adds a pair of switches that leave the language as it was, and with
+    them a second pass that changed no page (docs/compile-latency.md)."""
+    if b"\\babel@" not in data:
+        return data
+    out: list[bytes] = []
+    now: bytes | None = None       # the switch in force, as the file reads up to here
+    pending: bytes | None = None   # the last of a run of switches not yet read as in force
+    for line in data.splitlines():
+        if LANGUAGE_SWITCH.fullmatch(line):
+            pending = line
+            continue
+        if pending is not None and pending != now:
+            out.append(pending)
+            now = pending
+        pending = None
+        out.append(line)
+    if pending is not None and pending != now:
+        out.append(pending)
+    return b"\n".join(out)
 
 
 def error_excerpt(log: str) -> str:
