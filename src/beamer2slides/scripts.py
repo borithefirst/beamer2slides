@@ -524,7 +524,7 @@ def font_file(face: Face, tree: Path | None) -> tuple[str, str]:
         dest = tree / "fonts" / face.path.name
         if not dest.exists():
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(face.path, dest)
+            shutil.copy2(face.path, dest)
         return "fonts/", face.path.name
     return face.path.parent.as_posix().rstrip("/") + "/", face.path.name
 

@@ -494,7 +494,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   residuals are a record per kind. Compiles stop when the aux files
   stop moving (`inverse.aux_state`, babel's no-op language switches cut, `language_switches`; a
   failed compile puts the last good aux back); a tree compiled before is not compiled again
-  (`tree_digest`, docs/compile-latency.md). **The loop's own view is no judge**: `frame_guard.py` ends
+  (`tree_digest`, docs/compile-latency.md); converge's passes run on a lualatex started early and
+  waiting at the preamble's end (`Workspace.start_warm`, `WARM_LUA`; taken only while main's head
+  and every other file's size and mtime are unchanged). Fonts go into a tree with `copy2`:
+  luaotfload caches by font name and mtime, a fresh mtime re-caches every font. **The loop's own view is no judge**: `frame_guard.py` ends
   each frame at its best round, by ink against Google's thumbnail when the target carries one
   (`page_score.py`), else weighted residuals plus extract's words; `Result.restored`, report
   "Frames put back". On foreign decks no round has yet raised any slide's ink.

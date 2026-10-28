@@ -268,3 +268,49 @@ pass. The residuals each round leaves are the same as before.
 Seen on the way, outside speed: on both decks the loop's open residuals *rise* after round 0
 (water 14 -> 66 -> 47 -> 43, talk 4 -> 16 -> 11 -> 17); `frame_guard` puts frames back at their
 best round, but each of those rounds still costs a compile.
+
+## Done: an engine waiting on the preamble (2026-10-28)
+
+A lualatex pass spends its first second or more starting up and reading the preamble, which is
+the same every round. `converge` now has the next pass's engine started early
+(`Workspace.warm_up`, `start_warm`), on another core, while the current pass runs:
+
+- The engine is started on main as the tree stands, with a Lua hook (`WARM_LUA`) on the first file
+  it opens (main): lines 1..k (k: the line before `\begin{document}`) come from a copy of those
+  lines taken at start, and line k waits for a "go" on stdin. Every other file is read by LuaTeX
+  itself (serving them all through Lua cost 28 s a pass instead of 6). After the go, the rest of
+  main is read from main as it is then. CR before LF is dropped and trailing spaces are left to
+  LuaTeX, as its own reader does.
+- A pass takes the waiting engine only when it is the same command, still alive, main still
+  begins with the copied lines, and every other file in the tree has the size and mtime it had
+  when the engine started (`file_stamps`: a preamble's `\input`, a style file, a picture).
+  Otherwise the engine is stopped and the pass is compiled cold. The aux files are copied to the
+  engine's own folder at the go (it already holds a `main.log` from its start), and everything it
+  writes is moved into the build folder afterwards; two such folders alternate.
+- A waiting engine that fails is compiled cold again from the same aux files; if the cold pass
+  succeeds the waiting engines are switched off for the workspace; if it fails too,
+  failures are believed from then on.
+- An engine nobody takes exits when its stdin closes (exit 75), and `atexit` stops the rest.
+
+`tests/test_inverse.py::test_an_engine_waiting_on_the_preamble_compiles_what_a_cold_one_compiles`
+compiles a body edit, a preamble edit in main, and one in a file the preamble reads, warm and
+cold, and compares the pixels; breaking the head check, the file stamps or the CR drop each fails
+it.
+
+**Fonts were re-cached every run.** luaotfload keeps one cache entry per font *name*
+(`luatex-cache/generic/fonts/otl/inter-bold.luc`), checked against the font file's size and
+mtime. adopt copied the fonts into each tree with `shutil.copyfile`, so every tree had new
+mtimes and the first pass of every run rebuilt the cache of every font: ~6.5-7 s on talk.
+adopt and `scripts` now copy with `copy2`, which keeps the font store's mtime.
+
+| loop, 3 rounds, compiles' wall (A/B interleaved, 2 runs each) | cold | warm | |
+|-------------------------------------------------|------|------|------|
+| talk                                            | 17.1 s | 10.7 s | -37% |
+| water                                           | 39.7 s | 33.5 s | -16% |
+| bees                                            | 9.8 s  | 6.5 s  | -34% |
+
+Both arms have the `copy2` fonts (talk's loop was 22.8 s in the table above, cold 17.1 s here:
+the font cache, though not measured in one sitting). Residuals per round are identical in every
+run. Per deck, one pass in each run missed its engine, rightly: `ensure_preamble` changed the
+preamble. On talk a warm pass takes 0.3-0.9 s. Water gains least: the engine saves the same start-up
+and preamble, but its passes are mostly body.

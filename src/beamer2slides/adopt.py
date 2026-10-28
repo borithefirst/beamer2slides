@@ -673,7 +673,7 @@ def font_files_latex(family: FontFiles, tree: Path | None) -> str:
             dest = tree / "fonts" / f.name
             if not dest.exists():
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(f, dest)
+                shutil.copy2(f, dest)
     where = "Path=fonts/," if tree is not None else \
         "Path=" + next(iter(files.values())).parent.as_posix().rstrip("/") + "/,"
     exts = {f.suffix for f in files.values()}
@@ -731,7 +731,7 @@ def weight_faces(font: str, files: FontFiles, used: Mapping[WeightKey, int], tre
             dest = tree / "fonts" / path.name
             if not dest.exists():
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(path, dest)
+                shutil.copy2(path, dest)
         opts.append(f"FontFace={{w{w}}}{{{'it' if italic else 'n'}}}{{Font={path.stem}}}")
         got.add((w, italic))
     if got:

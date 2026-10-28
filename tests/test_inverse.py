@@ -549,3 +549,72 @@ def test_a_compile_runs_again_while_the_auxiliary_files_move(tmp_path: Path, mon
     runs = compiles(monkeypatch, ws.build_dir, [{"main.nav": "two"}])
     ws.compile()
     assert len(runs) == 1
+
+
+def lualatex_missing() -> str | None:
+    from beamer2slides.inverse import tex_env
+    return None if shutil.which("lualatex", path=tex_env()["PATH"]) else "lualatex not found"
+
+
+# CRLF lines (a CR kept would be a line more in the verbatim) and trailing spaces, as LuaTeX's own
+# reader is given them; a preamble reading another file
+WARM_MAIN = ("\\documentclass{article}   \r\n\\input{defs}\r\n\\newcommand\\other{A}\r\n\\begin{document}\r\n"
+             "BODY \\word{} \\other   \r\n\\begin{verbatim}\r\nx\r\ny\r\n\\end{verbatim}\r\nz\r\n\\end{document}\r\n")
+
+
+def pages_of(pdf_path: Path) -> list[bytes]:
+    from beamer2slides import pdf
+    doc = pdf.Document(pdf_path)
+    try:
+        return [page.render(2.0, clip=None, transparent=False).tobytes() for page in doc]
+    finally:
+        doc.close()
+
+
+@pytest.mark.skipif(lualatex_missing() is not None, reason="lualatex not found")
+def test_an_engine_waiting_on_the_preamble_compiles_what_a_cold_one_compiles(tmp_path: Path,
+                                                                             monkeypatch: pytest.MonkeyPatch):
+    """The converge loop's passes are run by a lualatex started early on the tree's preamble
+    (`Workspace.start_warm`). Each tree below is compiled warm, then cold in a workspace of its
+    own, and the pages must be the same pixels: a body edit (the engine used), and a preamble
+    changed in main or in a file it reads (the engine refused, or the page would say the old
+    preamble's words)."""
+    from beamer2slides.inverse import Warm
+    src = tmp_path / "src"
+    src.mkdir()
+    main = src / "main.tex"
+    used: list[Path] = []
+    real = Workspace.run_warm
+
+    def counted(self: Workspace, warm: Warm, job: str) -> int | None:
+        used.append(warm.folder)
+        return real(self, warm, job)
+
+    monkeypatch.setattr(Workspace, "run_warm", counted)
+    trees = [("one", "\\newcommand\\other{A}", "BODY"), ("one", "\\newcommand\\other{A}", "EDITED"),
+             ("one", "\\newcommand\\other{B}", "EDITED"), ("two", "\\newcommand\\other{B}", "EDITED")]
+
+    def write(folder: Path, word: str, other: str, body: str) -> None:
+        """The tree, each file written only when its words change (as the loop's edits are)."""
+        for name, text in (("main.tex", WARM_MAIN.replace("\\newcommand\\other{A}", other).replace("BODY", body)),
+                           ("defs.tex", f"\\newcommand\\word{{{word}}}\n")):
+            if not (folder / name).is_file() or (folder / name).read_bytes() != text.encode():
+                (folder / name).write_text(text, encoding="utf-8", newline="")
+
+    write(src, *trees[0])
+    ws = Workspace(main, tmp_path / "work", handout=False, engine="lualatex", fresh=True)
+    ws.warm_up = True
+    try:
+        for n, (word, other, body) in enumerate(trees):
+            write(src, word, other, body)   # what the cold workspace copies
+            write(ws.src, word, other, body)   # the loop's working copy, as `Workspace.write` edits it
+            warm, error = ws.compile()
+            assert warm is not None, error
+            cold_ws = Workspace(main, tmp_path / f"cold{n}", handout=False, engine="lualatex", fresh=True)
+            cold, error = cold_ws.compile()
+            assert cold is not None, error
+            assert pages_of(warm) == pages_of(cold), f"tree {n} {(word, other, body)}"
+            if n == 1:
+                assert len(used) >= 2, "a body edit is compiled by the engine waiting on its preamble"
+    finally:
+        ws.stop_warm()
