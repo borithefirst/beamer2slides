@@ -390,12 +390,46 @@ with it) and compares the pixels; with the line taken out of `compile` it fails.
 **Still open on fonts** (water, after the fix: start-up 0.4 s, preamble 1.25 s, frames 2.3 s,
 end 0.6 s; `define_font` 140 calls, 1.17 s, 60 of them in the body):
 
-- **The CJK fallback is attached to every face at every size.** NotoSansArabic with
-  `fallback=b2sscripts` costs ~37 ms per size because NotoSansSC (31k glyphs) is instantiated
-  with it, 30 times on water: ~0.6 s a pass. Scoping the fallback to the faces whose words need
-  it (scripts.py knows which runs are CJK) would remove most of it.
+- ~~The CJK fallback is attached to every face at every size~~: done, next section.
 - Each size of each face is a `define_font` of its own (1-40 ms). Fewer distinct sizes in what
   adopt writes would help a little; not measured.
+
+## Done: the fallback chain, on demand (2026-10-28)
+
+`scripts.script_preamble` gives every font of an adopted deck the scripts' fallback chain
+(`\defaultfontfeatures`), so a glyph the face lacks comes from the first chain font that has it.
+luaotfload's own `fallback=` builds that chain **when the face is defined**: every chain font, at
+the face's size, for every face and every size the document uses. On water that was NotoSansSC
+(31k glyphs) defined 30 times a pass, for the dozen Chinese words of one slide.
+
+`scripts.LAZY_FALLBACK` is the same chain built **when a glyph first needs it**. The feature
+(`b2sfallback=b2sscripts`) only marks the face. A `pre_shaping_filter` callback, which luaotfload
+calls just before its own fallback step, looks at each glyph: if the face lacks it, it asks the
+chain at the face's size for the first font that has it, defining the chain fonts the first time
+that size is asked. The chain fonts are requested with the same `;-fallback` suffix luaotfload uses,
+and the first font in the chain wins as in luaotfload, so they are the same fonts and glyphs.
+
+Measured with `Workspace.compile` on today's adoption of the showcase decks, old chain and new
+interleaved, 4 rounds each (seconds per compile; pages compared pixel for pixel):
+
+| deck | chain | luaotfload `fallback=` | on demand | pages |
+|---|---|---|---|---|
+| water | NotoSansSC (CJK) | 12.8-13.9 | 9.1-10.3 (-29%) | 6/6 same |
+| review | Montserrat + Noto Sans Symbols 2 | 3.5-3.7 | 3.2-3.3 (-12%) | 5/5 same |
+| hashing | Lato | 3.6-3.7 | 3.2-3.7 (same) | 6/6 same |
+
+Water's PDF embeds NotoSansSC Regular and Bold either way, so the chain draws glyphs in both
+versions; the pages are the same, not just blank alike. On water the chain is now built at one
+size, not thirty.
+
+`tests/test_inverse.py::test_the_fallback_chain_defined_on_demand_draws_what_luaotfloads_own_draws`
+compiles three tiny fonts: a face with A, a first chain font with a square B, a second with a
+pointed B and a C. It sets them at three sizes and compares the pixels with luaotfload's own
+`fallback=` and with no chain at all. If the later chain font is allowed to win, or every size
+gets one size's chain, the test fails (both tried).
+
+A trap found on the way: a feature value of `t` is read as the boolean *true*, so a chain can't
+be named `t`.
 
 ## Going further: frames in parallel (analysis, 2026-10-28)
 
@@ -425,7 +459,7 @@ parallelism there is is *several engines on pieces of the deck*:
   another 25-31%. Adopted sources need lualatex (fontspec, babel's providers), so this helps
   only hand-written beamer sources.
 
-Order of work, by measured ceiling: (1) the CJK fallback scoped per face (-15% on CJK decks,
-small change); (2) N pre-warmed pieces with stitched aux and SyncTeX (3-4x on talk-length
+Order of work, by measured ceiling: (1) the CJK fallback on demand (done above: -29% on water);
+(2) N pre-warmed pieces with stitched aux and SyncTeX (3-4x on talk-length
 decks, a real project); (3) cheaper `slides.sty` drawing for plain shapes and tables (60-75%
 of an adopted body is these commands).

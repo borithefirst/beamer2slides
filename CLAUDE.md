@@ -500,7 +500,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   luaotfload caches by font name and mtime, a fresh mtime re-caches every font. Every lualatex
   compile (and adopt's preamble) carries `inverse.NO_GLYPH_STREAMS`: luaotfload writes a static
   font with a STAT table (every google/fonts cut) from its whole-font streams cache, a quarter of
-  a fetched-font pass. luaotfload reads its names database only from a cache it may write: a
+  a fetched-font pass. The scripts' fallback chain is built where a glyph first needs it
+  (`scripts.LAZY_FALLBACK`, `b2sfallback=`), not for every face and size (luaotfload's `fallback=`:
+  -29% on water). luaotfload reads its names database only from a cache it may write: a
   container builds it as the user who compiles (`Dockerfile`, docs/compile-latency.md
   "A fresh machine"). **The loop's own view is no judge**: `frame_guard.py` ends
   each frame at its best round, by ink against Google's thumbnail when the target carries one

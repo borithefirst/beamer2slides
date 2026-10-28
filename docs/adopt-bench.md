@@ -1500,7 +1500,7 @@ is - fixing it means measuring Slides' WordArt outline against the corpus, which
   upright when the named face has none of the run's characters), and no deck in the corpus prints an
   italic Arabic run.
 - **The styles a fallback chain draws.** `scripts.script_preamble` names one
-  `luaotfload.add_fallback` chain for upright and one for bold, so `\textit` over Japanese draws the
+  fallback chain for upright and one for bold, so `\textit` over Japanese draws the
   upright chain (jruby-ja, 2 pairs). Giving the chain an italic means a third and fourth chain plus
   per-shape `RawFeature`s inside a `\defaultfontfeatures` every family reads - where a `FakeSlant`
   would slant the real italic of every family that has one, twice. Left open, and now measured.

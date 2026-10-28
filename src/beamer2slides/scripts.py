@@ -9,9 +9,9 @@ to place, and never breaks a line of Japanese or Thai that has no spaces. So:
 - **Glyphs** (`script_preamble`): the characters the deck uses are sorted into scripts by their
   Unicode block; each script gets a font that has all of them - the deck's own font for those
   letters when this machine has it and it covers them, else a known fallback - and those fonts go
-  into a luaotfload fallback chain that every font of the document carries (`\\defaultfontfeatures`,
-  so the deck's own font lines stay what `adopt.font_preamble` writes). A glyph the main font has is
-  never taken from the chain. The files are copied into `fonts/` beside the source, like the deck's
+  into a fallback chain that every font of the document carries (`\\defaultfontfeatures`, so the
+  deck's own font lines stay what `adopt.font_preamble` writes), each chain font defined at the
+  first glyph it draws (`LAZY_FALLBACK`). A glyph the main font has is never taken from the chain. The files are copied into `fonts/` beside the source, like the deck's
   own fonts, so the tree compiles elsewhere.
 - **Shaping**: a deck with Hebrew, Arabic, Thai or another complex script is set with
   `Renderer=HarfBuzz`, which joins Arabic letters and places Thai's and an Indic conjunct's marks.
@@ -601,6 +601,43 @@ def switch_font_lines(target: JsonObject, tree: Path | None, command: str, fam: 
     return [f"\\babelfont{{{key}}}[{options}]{{{name}}}", *langs, f"\\newcommand{command}{{\\{key}family}}"]
 
 
+# luaotfload's own `fallback=` defines every font of its chain, at every size, for every face that
+# names it - and `\defaultfontfeatures` names it on all of them: water's NotoSansSC (31k glyphs) was
+# built 30 times a pass, a quarter of the compile, for the few runs that draw from it. `b2sfallback`
+# is the same chain defined where a glyph first needs it: the feature only marks the face, and a
+# `pre_shaping_filter` (luaotfload runs its own fallback right after that callback) sends a glyph
+# the face lacks to the first chain font that has it, at the face's size, with the same
+# `;-fallback` request luaotfload makes - so the same fonts, glyphs and pages
+# (docs/compile-latency.md "The fallback chain, on demand"). TeX reads this as one line: no Lua
+# comments, and none of TeX's specials (# % ~ \).
+LAZY_FALLBACK = (
+    r"\directlua{if not b2sfallbacks then b2sfallbacks = {} "
+    r"local lists, lookups, marks = b2sfallbacks, {}, {} "
+    r"local getfont, setfont = font.getfont, node.direct.setfont "
+    r"local traverse_char, todirect = node.direct.traverse_char, node.direct.todirect "
+    r"local function lookup(name, size) "
+    r"local per = lookups[name] if not per then per = {} lookups[name] = per end "
+    r"local got = per[size] if got then return got end "
+    r"got = {} per[size] = got "
+    r"for _, spec in ipairs(lists[name] or {}) do "
+    r"local f = luaotfload.define_font(spec .. ';-fallback', size) local fid "
+    r"if type(f) == 'table' then fid = font.define(f) fonts.definers.register(f, fid) "
+    r"elseif f then fid = f f = getfont(fid) end "
+    r"if f then for uni in next, f.characters do if got[uni] == nil then got[uni] = fid end end end "
+    r"end return got end "
+    r"local function mark(tfmdata, _, value) tfmdata.b2sfallback = value end "
+    r"fonts.constructors.newfeatures('otf').register{name = 'b2sfallback', "
+    r"description = 'fallback fonts defined at the first glyph they draw', "
+    r"manipulators = {node = mark, plug = mark}} "
+    r"luatexbase.add_to_callback('pre_shaping_filter', function(head) "
+    r"for cur, cid, fid in traverse_char(todirect(head)) do "
+    r"local m = marks[fid] "
+    r"if m == nil then local f = getfont(fid) "
+    r"m = f and f.b2sfallback and {f.characters, f.b2sfallback, f.size} or false marks[fid] = m end "
+    r"if m and not m[1][cid] then local new = lookup(m[2], m[3])[cid] if new then setfont(cur, new) end end "
+    r"end return true end, 'b2s.fallback') end}")
+
+
 def script_preamble(target: JsonObject, tree: Path | None, missing: list[MissingFont] | None) -> list[str]:
     """Preamble lines for the deck's scripts, to go before `adopt.font_preamble`'s font lines
     (`\\defaultfontfeatures` applies to the fonts declared after it). Empty for a Latin deck.
@@ -652,9 +689,10 @@ def script_preamble(target: JsonObject, tree: Path | None, missing: list[Missing
                        for g in p.chain_groups]
         regular = ", ".join(f'"{font_spec(f, tree, mode, e)}"' for (f, _), e in zip(p.chain, chain_extra))
         bold = ", ".join(f'"{font_spec(b or f, tree, mode, e)}"' for (f, b), e in zip(p.chain, chain_extra))
-        lines.append(f"\\directlua{{luaotfload.add_fallback(\"b2sscripts\", {{{regular}}})}}")
-        lines.append(f"\\directlua{{luaotfload.add_fallback(\"b2sscriptsbold\", {{{bold}}})}}")
-        feats += ["RawFeature={fallback=b2sscripts}", "BoldFeatures={RawFeature={fallback=b2sscriptsbold}}"]
+        lines.append(LAZY_FALLBACK)
+        lines.append(f"\\directlua{{b2sfallbacks[\"b2sscripts\"] = {{{regular}}}}}")
+        lines.append(f"\\directlua{{b2sfallbacks[\"b2sscriptsbold\"] = {{{bold}}}}}")
+        feats += ["RawFeature={b2sfallback=b2sscripts}", "BoldFeatures={RawFeature={b2sfallback=b2sscriptsbold}}"]
     lines.append("\\defaultfontfeatures{" + ",".join(feats) + "}")
     return lines
 

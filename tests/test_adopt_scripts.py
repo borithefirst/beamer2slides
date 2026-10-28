@@ -240,11 +240,11 @@ def test_a_japanese_deck_breaks_lines_between_any_two_characters_and_gets_a_fall
     make_face(font_folder, "Yu Gothic", "日本語です", True)
     lines = scripts.script_preamble(target_with("日本語です"), tmp_path / "tree", None)
     assert "\\babelprovide[import,onchar=ids]{japanese}" in lines
-    chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    chain = next(l for l in lines if "b2sfallbacks[\"b2sscripts\"]" in l)
     assert "[fonts/YuGothic-Regular.ttf]:mode=node;+palt;" in chain
     assert "YuGothic-Bold.ttf" in next(l for l in lines if "b2sscriptsbold" in l)
     assert (tmp_path / "tree" / "fonts" / "YuGothic-Regular.ttf").exists()
-    assert lines[-1].startswith("\\defaultfontfeatures{RawFeature={fallback=b2sscripts}")
+    assert lines[-1].startswith("\\defaultfontfeatures{RawFeature={b2sfallback=b2sscripts}")
 
 
 def test_a_korean_deck_is_set_proportionally_too(font_folder: Path, tmp_path: Path):
@@ -253,7 +253,7 @@ def test_a_korean_deck_is_set_proportionally_too(font_folder: Path, tmp_path: Pa
     make_font(font_folder, "Malgun Gothic", "한국어입니다")
     lines = scripts.script_preamble(target_with("한국어입니다"), tmp_path / "tree", None)
     assert "\\babelprovide[import,onchar=ids]{korean}" in lines
-    chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    chain = next(l for l in lines if "b2sfallbacks[\"b2sscripts\"]" in l)
     assert "[fonts/MalgunGothic-Regular.ttf]:mode=node;+palt;" in chain
 
 
@@ -330,7 +330,7 @@ def test_a_cjk_font_slides_lacks_is_drawn_in_times_and_the_renderers_noto(font_f
     t = target_set("Google 這是中文", font="Microsoft JhengHei", direction=None)
     p = scripts.plan(t)
     assert [f.families for f, _ in p.chain] == [("notoseriftc",)]
-    chain = next(l for l in scripts.script_preamble(t, None, None) if "add_fallback(\"b2sscripts\"" in l)
+    chain = next(l for l in scripts.script_preamble(t, None, None) if "b2sfallbacks[\"b2sscripts\"]" in l)
     assert "NotoSerifTC-Regular.ttf]:mode=node;+palt;" in chain
 
 
@@ -365,7 +365,7 @@ def test_arabic_is_set_whole_in_a_font_of_its_own_with_harfbuzz(font_folder: Pat
     assert "\\babelprovide[import,onchar=ids fonts]{arabic}" in lines
     sf = next(l for l in lines if l.startswith("\\babelfont[arabic]{sf}"))
     assert "Renderer=HarfBuzz" in sf and sf.endswith("{Arial-Regular.ttf}")
-    assert not any("add_fallback" in l for l in lines)
+    assert not any("b2sfallbacks[" in l for l in lines)
 
 
 def test_tamil_is_set_whole_in_a_font_of_its_own(font_folder: Path):
@@ -555,7 +555,7 @@ def test_thai_is_set_whole_in_a_font_of_its_own_with_word_breaks(font_folder: Pa
     sf = next(l for l in lines if l.startswith("\\babelfont[thai]{sf}"))
     assert "Renderer=HarfBuzz" in sf and sf.endswith("{NotoSansThai-Regular.ttf}")
     assert fetched == ["Noto Sans Thai"]
-    assert not any("add_fallback" in l for l in lines)      # set whole, not glyph by glyph
+    assert not any("b2sfallbacks[" in l for l in lines)      # set whole, not glyph by glyph
 
 
 def test_the_decks_own_thai_font_wins_when_it_covers_the_letters(font_folder: Path, monkeypatch: pytest.MonkeyPatch):
@@ -629,7 +629,7 @@ def test_georgian_letters_get_their_own_group_and_a_fetched_face(font_folder: Pa
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
     lines = scripts.script_preamble(target_set("\u10d2\u10d4\u10dd", font="Times New Roman", direction=None), None, None)
     assert fetched == ["Noto Sans Georgian"]
-    chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    chain = next(l for l in lines if "b2sfallbacks[\"b2sscripts\"]" in l)
     assert "NotoSansGeorgian-Regular.ttf" in chain
 
 
@@ -645,7 +645,7 @@ def test_armenian_letters_get_their_own_group_too(font_folder: Path, monkeypatch
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
     lines = scripts.script_preamble(target_set("\u0561\u0562\u0563", font="Arial", direction=None), None, None)
     assert fetched == ["Noto Sans Armenian"]
-    chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    chain = next(l for l in lines if "b2sfallbacks[\"b2sscripts\"]" in l)
     assert "NotoSansArmenian-Regular.ttf" in chain
 
 
@@ -693,8 +693,8 @@ def test_georgian_chain_letters_are_stretched_narrower_to_match_slides(font_fold
     monkeypatch.setattr(adopt, "fetching", fetching)
     monkeypatch.setattr(fontfetch, "fetch_family", no_family)  # already on the machine
     lines = scripts.script_preamble(target_set("გეო", font="Arial", direction=None), None, None)
-    regular = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
-    bold = next(l for l in lines if "add_fallback(\"b2sscriptsbold\"" in l)
+    regular = next(l for l in lines if "b2sfallbacks[\"b2sscripts\"]" in l)
+    bold = next(l for l in lines if "b2sfallbacks[\"b2sscriptsbold\"]" in l)
     ratio = scripts.CHAIN_STRETCH["georgian"]
     assert f"extend={ratio};" in regular
     assert f"extend={ratio};" in bold
@@ -710,5 +710,5 @@ def test_a_script_with_no_stretch_entry_keeps_a_plain_chain_spec(font_folder: Pa
     monkeypatch.setattr(adopt, "fetching", fetching)
     monkeypatch.setattr(fontfetch, "fetch_family", no_family)
     lines = scripts.script_preamble(target_set("go → on", font="Arial", direction=None), None, None)
-    regular = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    regular = next(l for l in lines if "b2sfallbacks[\"b2sscripts\"]" in l)
     assert "extend=" not in regular

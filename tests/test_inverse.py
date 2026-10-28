@@ -681,3 +681,66 @@ def test_a_static_font_with_a_stat_table_is_written_from_its_own_file(tmp_path: 
     assert plain[0] == "2"
     assert fixed[0] == "nil"
     assert fixed[1] == plain[1]
+
+
+def drawn_font(family: str, shapes: dict[str, list[tuple[int, int]]]) -> bytes:
+    """A font drawing each of `shapes`' characters as its own polygon, and nothing else."""
+    import io
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    names = {c: f"g{ord(c)}" for c in shapes}
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder([".notdef", *names.values()])
+    fb.setupCharacterMap({ord(c): n for c, n in names.items()})
+    glyphs = {}
+    for c, points in [("", [(0, 0), (0, 10), (10, 0)]), *shapes.items()]:
+        pen = TTGlyphPen(None)
+        pen.moveTo(points[0])
+        for point in points[1:]:
+            pen.lineTo(point)
+        pen.closePath()
+        glyphs[names.get(c, ".notdef")] = pen.glyph()
+    fb.setupGlyf(glyphs)
+    fb.setupHorizontalMetrics({g: (600, 0) for g in glyphs})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": family, "styleName": "Regular"})
+    fb.setupOS2(usWeightClass=400)
+    fb.setupPost()
+    buf = io.BytesIO()
+    fb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.skipif(lualatex_missing() is not None, reason="lualatex not found")
+def test_the_fallback_chain_defined_on_demand_draws_what_luaotfloads_own_draws(tmp_path: Path):
+    """`scripts.LAZY_FALLBACK` defines a chain font only where a glyph first needs it, where
+    luaotfload's `fallback=` defines the whole chain for every face at every size. The letters a
+    face lacks must still come from the first chain font that has them, at the face's size: the
+    pages are luaotfload's own, pixel for pixel, and not a page with the letters missing. B is in
+    both chain fonts, drawn differently, so taking it from the second would show."""
+    from beamer2slides import scripts
+    src = tmp_path / "src"
+    (src / "fonts").mkdir(parents=True)
+    (src / "fonts" / "Base.ttf").write_bytes(drawn_font("Base", {"A": [(0, 0), (0, 500), (500, 0)]}))
+    (src / "fonts" / "First.ttf").write_bytes(drawn_font("First", {"B": [(0, 0), (0, 500), (500, 500), (500, 0)]}))
+    (src / "fonts" / "Second.ttf").write_bytes(drawn_font("Second", {"B": [(0, 0), (250, 700), (500, 0)],
+                                                                     "C": [(0, 0), (0, 700), (100, 0)]}))
+    chain = '{"[fonts/First.ttf]:mode=node;", "[fonts/Second.ttf]:mode=node;"}'
+    body = "\\pagestyle{empty}\\begin{document}ABC {\\Large ABC} {\\tiny CBA}\\end{document}\n"
+
+    def compiled(name: str, preamble: str, feature: str) -> list[bytes]:
+        main = src / f"{name}.tex"
+        main.write_text("\\documentclass{article}\\usepackage{fontspec}\n" + preamble +
+                        f"\\setmainfont{{Base.ttf}}[Path=./fonts/{feature}]\n" + body, encoding="utf-8")
+        pdf, error = Workspace(main, tmp_path / name, handout=False, engine="lualatex", fresh=True).compile()
+        assert pdf is not None, error
+        missing = "Missing character" in pdf.with_suffix(".log").read_text(encoding="utf-8", errors="replace")
+        assert missing == (not feature), name
+        return pages_of(pdf)
+
+    lazy = compiled("lazy", scripts.LAZY_FALLBACK + f"\\directlua{{b2sfallbacks[\"chain\"] = {chain}}}\n",
+                    ",RawFeature={b2sfallback=chain}")
+    own = compiled("own", f"\\directlua{{luaotfload.add_fallback(\"chain\", {chain})}}\n", ",RawFeature={fallback=chain}")
+    bare = compiled("bare", "", "")
+    assert lazy == own
+    assert lazy != bare

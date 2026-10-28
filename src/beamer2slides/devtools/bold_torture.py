@@ -35,7 +35,7 @@ finding but not the one the name says); and anything about a font the machine do
 which is set in a TeX Gyre stand-in that has all four faces.
 
 What it does see, and this writer does not fix: the styles a *fallback* chain draws. A CJK or
-Arabic deck's letters come from `luaotfload.add_fallback`, and `scripts.script_preamble` names one
+Arabic deck's letters come from a fallback chain (`scripts.LAZY_FALLBACK`), and `scripts.script_preamble` names one
 chain for upright and one for bold, so `\\textit` over Japanese draws the upright chain (jruby-ja).
 Giving the chain an italic would mean a third and fourth chain and per-shape `RawFeature`s in a
 `\\defaultfontfeatures` that every family reads - and a `FakeSlant` there would slant the real
