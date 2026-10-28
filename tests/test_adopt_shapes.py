@@ -341,7 +341,7 @@ def test_a_named_look_can_still_be_changed_on_one_shape(tmp_path: Path):
     card and leaves the rest, because TikZ takes the last key that sets a property."""
     adopt.bootstrap(foreign(deck(*alike(3))), tmp_path / "main.tex", False, None)
     sty = (tmp_path / "slides.sty").read_text(encoding="utf-8")
-    assert "\\newcommand\\slideshapestyle[2]{\\tikzset{#1/.style={#2}}}" in sty
+    assert "\\newcommand\\slideshapestyle[2]{\\tikzset{#1/.style={#2}}" in sty
 
 
 def test_a_path_of_too_many_points_to_read_keeps_them_in_a_file(tmp_path: Path):

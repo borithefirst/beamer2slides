@@ -601,6 +601,35 @@ def shape_style_definitions(ctx: AdoptContext) -> list[str]:
             for keys, name in ctx.shape_styles.items()]
 
 
+# What draws a plain rectangle and a table's fills, rules and cells without TikZ's parser, and when
+# that is allowed (written into slides.sty with SHAPE_MACRO or adopt's TABLE_MACROS, before both).
+PLAIN_MACRO = r"""% --- Drawn without TikZ -------------------------------------------------------------------------
+% A table's fills, rules and cells and a plain rectangle are drawn with the pgf system layer's
+% own commands, the very ones TikZ ends in, in the order it calls them: the same page in less
+% time. Only while nothing could make TikZ draw them differently: no `every` style changed
+% (\slides@tikzplain), each colour a defined colour no key shares a name with (\slides@ifcolour).
+% Anything else goes to TikZ, which draws it as it always did.
+\newif\ifslides@plain
+\newif\ifslides@ok
+\tikzset{slides@none/.style={}}
+\expandafter\let\expandafter\slides@none\csname pgfk@/tikz/slides@none/.@cmd\endcsname
+\def\slides@plainkey#1{\ifcsname pgfk@/tikz/#1/.@cmd\endcsname
+  \expandafter\ifx\csname pgfk@/tikz/#1/.@cmd\endcsname\slides@none\else\slides@plainfalse\fi
+  \else\slides@plainfalse\fi}
+\def\slides@tikzplain{\slides@plaintrue
+  \slides@plainkey{every picture}\slides@plainkey{every scope}\slides@plainkey{every path}%
+  \slides@plainkey{every node}%
+  \ifcsname pgfk@/tikz/every text node part/.@cmd\endcsname\slides@plainfalse\fi
+  \ifcsname pgfk@/tikz/every rectangle node/.@cmd\endcsname\slides@plainfalse\fi}
+\def\slides@ifcolour#1{\slides@okfalse
+  \pgfutil@doifcolorelse{#1}{\slides@oktrue}{}%
+  \ifcsname pgfk@/tikz/#1\endcsname\slides@okfalse\fi
+  \ifcsname pgfk@/tikz/#1/.@cmd\endcsname\slides@okfalse\fi
+  \ifcsname pgfk@/pgf/#1\endcsname\slides@okfalse\fi
+  \ifcsname pgfk@/pgf/#1/.@cmd\endcsname\slides@okfalse\fi
+  \ifslides@ok\expandafter\@firstoftwo\else\expandafter\@secondoftwo\fi}"""
+
+
 # \slideshape{x,y,w,h}{paths}: a tikzpicture whose bounding box is the element's box, x bp from the
 # page's left edge and y bp from its top, w by h bp, with its origin at that box's top left corner
 # (y up, so the shape is drawn below it). Written into slides.sty.
@@ -631,16 +660,78 @@ SHAPE_MACRO = r"""% --- Shapes -------------------------------------------------
 %   A rounded one starts halfway up the left edge, where the top left corner's arc begins, so a dash
 %   pattern runs from there: TikZ's own cycle would start one arc later and shift every dash.
 \newcommand\sliderect[2][]{\slides@xywh#2\@nil\slides@centre{\slides@w bp}{\slides@h bp}\slides@about{#1}%
-  \slides@radius{#1}\ifx\slides@r\@empty
+  \slides@radius{#1}\slides@okfalse
+  \ifx\slides@r\@empty\ifin@\else\slides@tikzplain\ifslides@plain\slides@plainopts{#1}\fi\fi\fi
+  \ifslides@ok\ifslides@fillon\else\ifslides@drawon\else\slides@okfalse\fi\fi\fi
+  \ifslides@ok
+    \edef\slides@rect{\noexpand\slides@plainrect{\slides@x bp}{\slides@y bp}{\slides@w bp}{\slides@h bp}}%
+  \else\ifx\slides@r\@empty
     \edef\slides@rect{\noexpand\slideshape{#2}{\noexpand\path[\slides@opts] (0bp,0bp) -- (\slides@w bp,0bp)
       -- (\slides@w bp,-\slides@h bp) -- (0bp,-\slides@h bp) -- cycle;}}%
   \else
     \edef\slides@rect{\noexpand\slideshape{#2}{\noexpand\path[\slides@opts] (0bp,-\slides@r bp) -- (0bp,0bp)
       -- (\slides@w bp,0bp) -- (\slides@w bp,-\slides@h bp) -- (0bp,-\slides@h bp) -- (0bp,-\slides@r bp);}}%
-  \fi\slides@rect}
+  \fi\fi\slides@rect}
 % \slides@r := the rounded= value in a list of path options, empty when there is none
 \def\slides@radius#1{\slides@radius@#1,rounded=,\@nil}
 \def\slides@radius@#1rounded=#2,#3\@nil{\def\slides@r{#2}}
+% A rectangle whose options are only fill=, draw= and line width= (or \slideshapestyle names standing
+% for them) is drawn as TikZ draws its picture, path and box (pgfpicture's own nesting, scopes and
+% bounding box), with pgf's own commands: the same page without TikZ's parser.
+\newif\ifslides@fillon
+\newif\ifslides@drawon
+\newbox\slides@pic
+\newbox\slides@layer
+\newdimen\slides@pw\newdimen\slides@ph
+\def\slides@plainopts#1{\slides@oktrue\slides@fillonfalse\slides@drawonfalse\let\slides@set\@empty
+  \slides@ro#1,\slides@ro@end,}
+\def\slides@ro@stop{\slides@ro@end}
+\def\slides@ro#1,{\def\slides@ra{#1}%
+  \ifx\slides@ra\slides@ro@stop\else
+    \ifx\slides@ra\@empty\else\slides@ro@kv#1==\@nil\fi
+    \expandafter\slides@ro
+  \fi}
+\def\slides@rk@fill{fill}\def\slides@rk@draw{draw}\def\slides@rk@lw{line width}\def\slides@rk@none{none}
+\def\slides@add#1{\expandafter\def\expandafter\slides@set\expandafter{\slides@set#1}}
+\def\slides@ro@kv#1=#2=#3\@nil{%
+  \ifx\@nnil#3\@nnil
+    \ifcsname slides@S@#1\endcsname
+      \expandafter\ifx\csname slides@S@@#1\expandafter\endcsname\csname pgfk@/tikz/#1/.@cmd\endcsname
+        \expandafter\expandafter\expandafter\slides@ro\csname slides@S@#1\endcsname,\slides@ro@end,%
+      \else\slides@okfalse\fi
+    \else\slides@okfalse\fi
+  \else
+    \def\slides@rk{#1}\def\slides@rv{#2}%
+    \ifx\slides@rv\@empty\slides@okfalse\else
+    \ifx\slides@rk\slides@rk@lw\slides@add{\pgfsetlinewidth{#2}}\else
+    \ifx\slides@rk\slides@rk@fill
+      \ifx\slides@rv\slides@rk@none\slides@fillonfalse\else\slides@add{\pgfsetfillcolor{#2}}\slides@fillontrue\fi
+    \else\ifx\slides@rk\slides@rk@draw
+      \ifx\slides@rv\slides@rk@none\slides@drawonfalse\else\slides@add{\pgfsetstrokecolor{#2}}\slides@drawontrue\fi
+    \else\slides@okfalse\fi\fi\fi\fi
+  \fi}
+\def\slides@plainrect#1#2#3#4{%
+  \edef\slides@block{\noexpand\begin{textblock*}{#3}(#1,#2)}\slides@block
+  \edef\slides@more{\space/box (#1 #2 #3 #4)\slides@also}\slides@open{shape}\let\slides@more\@empty
+  \pgfmathsetlength\slides@pw{#3}\pgfmathsetlength\slides@ph{-#4}%
+  \begingroup
+  \setbox\slides@pic\hbox to\z@{\begingroup\pgfsys@beginpicture\pgfsys@beginscope
+    \begingroup\pgfsetcolor{.}\pgfsetlinewidth{0.4pt}%
+      \setbox\slides@layer\hbox to\z@{\begingroup\pgfscope\pgfscope\slides@set
+        \pgfsys@moveto\z@\z@\pgfsys@lineto\slides@pw\z@\pgfsys@lineto\slides@pw\slides@ph
+        \pgfsys@lineto\z@\slides@ph\pgfsys@closepath
+        \ifslides@fillon\ifslides@drawon\pgfsys@fillstroke\else\pgfsys@fill\fi\else\pgfsys@stroke\fi
+        \endpgfscope\endpgfscope\endgroup\hss}%
+      \box\slides@layer
+    \endgroup\pgfsys@discardpath\pgfsys@endscope\pgfsys@endpicture\endgroup\hss}%
+  % the picture's bounding box is the shape's box, its baseline that box's top: pgfpicture's own
+  % \pgfsys@typesetpicturebox puts it there
+  \ifdim\slides@pw<\z@\pgf@picminx\slides@pw\pgf@picmaxx\z@\else\pgf@picminx\z@\pgf@picmaxx\slides@pw\fi
+  \ifdim\slides@ph<\z@\pgf@picminy\slides@ph\pgf@picmaxy\z@\else\pgf@picminy\z@\pgf@picmaxy\slides@ph\fi
+  \edef\pgf@shift@baseline{\the\pgf@picmaxy}\def\pgf@trimleft@final{0pt}\def\pgf@trimright@final{0pt}%
+  \pgfsys@typesetpicturebox\slides@pic
+  \endgroup
+  \par\slides@shut\end{textblock*}}
 % \slideellipse[options]{x,y,rx,ry}: an ellipse of radii rx and ry bp whose box's top left corner is
 %   x bp from the page's left edge and y bp from its top.
 \newcommand\slideellipse[2][]{\slides@xywh#2\@nil
@@ -675,7 +766,8 @@ SHAPE_MACRO = r"""% --- Shapes -------------------------------------------------
 %   shapes draw in again and again, said once in main.tex's preamble. A shape names it where its
 %   options go - \sliderect[card]{...} - and any key after the name still wins, so one shape can be
 %   changed on the spot without touching the others: \sliderect[card,fill=Red]{...}.
-\newcommand\slideshapestyle[2]{\tikzset{#1/.style={#2}}}
+\newcommand\slideshapestyle[2]{\tikzset{#1/.style={#2}}\@namedef{slides@S@#1}{#2}%
+  \expandafter\let\csname slides@S@@#1\expandafter\endcsname\csname pgfk@/tikz/#1/.@cmd\endcsname}
 \tikzset{flip/.style={xscale=-1}, rounded/.style={rounded corners=#1bp}}
 \def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}"""
 

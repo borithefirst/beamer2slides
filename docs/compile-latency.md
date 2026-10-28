@@ -431,6 +431,96 @@ gets one size's chain, the test fails (both tried).
 A trap found on the way: a feature value of `t` is read as the boolean *true*, so a chain can't
 be named `t`.
 
+## Done: drawn without TikZ (2026-10-28)
+
+"TikZ: ~150x the floor" above: a plain rectangle cost 2.2 ms and a table cell's `\node` 2.25 ms, for
+what pgf's system layer does in microseconds. `slides.sty` now draws the plain cases with the
+**system layer's own commands, the ones TikZ itself ends in, in TikZ's order**
+(`adopt_shapes.PLAIN_MACRO`, the table's `\slides@t@q*` in `adopt.TABLE_MACROS`). The source does
+not change: `\sliderect[card,fill=Red]{...}`, `\cell[fill=...]`, `\hborder{1}{...}` are written as
+before and take any TikZ option.
+
+- **Exact by construction, not by tuning.** A TikZ coordinate goes through `\pgfpoint`, i.e.
+  `\pgfmathsetlength` on its text; the fast path calls `\pgfmathsetlength` on the same tokens, so
+  the lengths are the same scaled points. The picture is pgfpicture's real skeleton
+  (`pgfcorescopes.code.tex`: `\pgfsys@beginpicture`, the scope, `\pgfsetcolor{.}`,
+  `\pgfsetlinewidth{0.4pt}`, the inner hbox, `\pgfsys@discardpath`, `\pgfsys@typesetpicturebox`
+  with the bounding box TikZ would record), so the PDF stream is TikZ's
+  (`q 0 G 0 g 0.3985 w q q <colour, width> path f|S|B Q Q n Q`). A cell is placed the way
+  `\pgfnode` places a rectangle node: south west / north east from the box, the inner seps and
+  minimum sizes, the anchor's height, `\pgfsys@hboxsynced`.
+- **Only while nothing could make TikZ draw it otherwise.**
+  - The `every picture/scope/path/node` styles must still be empty (`\slides@tikzplain`, compared
+    with an empty style's `.@cmd`), and no `every text node part`/`every rectangle node` may exist.
+  - A cell also needs TikZ's node globals at their defaults: shape rectangle, no
+    `node halign header`, no text colour, opacity, font, width, height or depth, and no
+    `execute at begin/end node` or node hooks.
+  - A rectangle's options must expand, through `\slideshapestyle` styles, to `fill=`, `draw=` and
+    `line width=` only. A style counts only while its `.@cmd` is still the one
+    `\slideshapestyle` made, so a later `\tikzset` of the same name sends it back to TikZ.
+  - Each colour must be a defined colour that no TikZ or pgf key shares a name with
+    (`\slides@ifcolour`).
+  - Anything else goes to TikZ: rounded or turned rectangles, opacity, dashes and every other
+    shape.
+- `bootstrap` writes the block into `slides.sty` whenever shapes or tables are used. It sorts
+  before both ("% --- Drawn" < "% --- Shapes" < "% --- Tables").
+
+Measured on today's adoption of the six showcase decks (TeX Gyre stand-ins, no fetched fonts)
+and an 8x water deck (48 frames). Each figure is `Workspace(main, work, handout=False,
+engine="lualatex", fresh=True).compile()` from an empty folder: passes until the aux settles.
+Old and new trees were interleaved, 5 rounds in one sitting, and the table gives the minimum of
+the 5 in seconds. Pages were rendered with `render(2.0, clip=None, transparent=False)` and
+compared byte for byte.
+
+| deck | old | new | | pages identical |
+|---|---|---|---|---|
+| bees | 2.88 | 2.90 | (noise) | 4/4 |
+| hashing | 3.41 | 3.36 | -1.5% | 6/6 |
+| portfolio | 2.97 | 3.00 | (noise) | 5/5 |
+| review | 3.21 | 3.11 | -3% | 5/5 |
+| talk | 3.03 | 2.98 | -2% | 5/5 |
+| water | 7.78 | 7.07 | -9% | 6/6 |
+| water x8 (48 frames) | 25.27 | 20.81 | **-18%** | 48/48 |
+
+A small deck is mostly start-up, preamble and the second pass, so it gains a few percent at most.
+The more a body draws, the more is saved: water x8 saves 4.5 s of its 25 s.
+
+What still goes to TikZ (counted with a `\typeout` probe on each fast path):
+
+| deck | `\sliderect` fast / all | table fills / rules / cells fast | still TikZ |
+|---|---|---|---|
+| bees | 5/14 | - | 9 rounded or turned rectangles, 18 ellipses |
+| hashing | 6/12 | 4 / 10 / 15 (all) | 6 rounded or turned rectangles, 6 lines |
+| portfolio | 2/2 | - | 4 ellipses, 3 lines |
+| review | 2/7 | 35 / 14 / 35 (all) | 5 rounded or turned rectangles |
+| talk | 14/18 | - | 4 rounded or turned rectangles, 10 ellipses, 1 line |
+| water | 13/13 | 25 / 12 / 25 (all) | 4 ellipses, 20 lines |
+
+Not done: ellipses (four curves, as TikZ computes them), rounded corners and lines. Every adopted
+line has an arrow head, which is TikZ's arrow code.
+
+**The oracle sees a hair.**
+- Old against new over all six decks: every page identical.
+- One fast path broken on purpose by 0.1 pt in a copied `slides.sty`:
+  - a table cell 0.1 pt lower on water: 1 page of 6 differs, 8,260 bytes, max delta 198;
+  - a plain rectangle 0.1 pt wider on talk: 5 pages of 5 differ, about 60 bytes each, max delta 211.
+- `tests/test_adopt_compiles.py::test_what_slides_sty_draws_without_tikz_is_what_tikz_draws`
+  adopts a slide holding:
+  - three rectangles of one named look;
+  - a fill with an outline, and an outline alone;
+  - a turned rectangle;
+  - a table with merged, filled, middle- and bottom-aligned cells and solid and dashed rules.
+
+  It compiles that slide twice: once with probes saying each fast path ran, and once with
+  `every path` changed, which sends everything to TikZ. It then compares the pixels.
+- Broken in the source (`adopt_shapes.py` / `adopt.py`), the test fails for:
+  - a rectangle 0.1 pt wider;
+  - a cell 0.1 pt to the right;
+  - a cell 0.25 pt lower.
+
+  A cell only 0.1 pt lower passes: PDFium sets glyphs on whole pixels vertically at scale 2, and
+  the test's table did not cross a pixel boundary where water's did.
+
 ## Going further: frames in parallel (analysis, 2026-10-28)
 
 A pass is one thread, and TeX has no way to run one document on several cores: every page

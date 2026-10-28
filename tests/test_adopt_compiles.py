@@ -92,3 +92,69 @@ def test_the_source_adopt_writes_compiles(name: str, tmp_path: Path, fonts: None
         assert len(doc) == len(jarr(target, "slides")), "a page per slide, and no notes pages"
     finally:
         doc.close()
+
+
+# Probes for what slides.sty draws without TikZ (`adopt_shapes.PLAIN_MACRO`): each says on the
+# terminal that it ran, and draws exactly what it drew.
+FAST_PATHS = {"rect": "slides@plainrect", "fill": "slides@t@qfill", "rule": "slides@t@qrule", "cell": "slides@t@qnode"}
+PROBES = "\\makeatletter\n" + "".join(
+    f"\\let\\slidesprobe@{k}\\{m}\\def\\{m}{{\\typeout{{B2S-FAST {k}}}\\slidesprobe@{k}}}\n" for k, m in FAST_PATHS.items()) + \
+    "\\makeatother\n"
+# `every path` changed: nothing may then be drawn but by TikZ itself
+TIKZ_ONLY = "\\tikzset{every path/.append style={}}\n"
+
+
+def pages_of(pdf_path: Path) -> list[bytes]:
+    from beamer2slides import pdf
+    doc = pdf.Document(pdf_path)
+    try:
+        return [page.render(2.0, clip=None, transparent=False).tobytes() for page in doc]
+    finally:
+        doc.close()
+
+
+def test_what_slides_sty_draws_without_tikz_is_what_tikz_draws(tmp_path: Path, fonts: None) -> None:
+    """slides.sty draws a plain rectangle and a table's fills, rules and cells with pgf's system
+    layer, the commands TikZ itself ends in (docs/compile-latency.md): the pages must be TikZ's,
+    pixel for pixel. The same tree is compiled with probes saying the fast ones ran, and with
+    `every path` changed, which sends every one of them to TikZ: a named look, a fill with an
+    outline, an outline alone, a turned rectangle (TikZ's either way), and a table with merged,
+    filled and middle-aligned cells and solid and dashed rules."""
+    from beamer2slides.inverse import Workspace
+    from .irs import deck_ir
+    from .test_adopt import presentation, shape
+    from .test_adopt_tables import table_of
+    if shutil.which("lualatex", path=tex_env()["PATH"]) is None:
+        (pytest.fail if os.environ.get("B2S_REQUIRE_TEX") else pytest.skip)("lualatex not found")
+    pres = presentation()
+    turned = shape("r5", "RECTANGLE", 300, 300, 50, 30, fill="00AA00", outline=None)
+    turned["transform"] = {"scaleX": 0.9659, "shearX": -0.2588, "shearY": 0.2588, "scaleY": 0.9659,
+                           "translateX": 300 * 12700, "translateY": 300 * 12700, "unit": "EMU"}
+    elements: list[Json] = [shape(f"r{i}", "RECTANGLE", 20, 300 + 25 * i, 60, 20, fill="123456", outline=None)
+                            for i in range(3)]
+    elements += [shape("r3", "RECTANGLE", 120, 300, 80.3, 30.7, fill="FFCC00", outline="0000FF"),
+                 shape("r4", "RECTANGLE", 220, 300, 50, 40, fill=None, outline="EA4335"),
+                 turned, table_of("g1a2b3c_0_7", (100, 60, 60), (30, 30, 30))]
+    jarr(pres, "slides", 0, "pageElements").extend(elements)
+    main = tmp_path / "tree" / "main.tex"
+    text = adopt.bootstrap(deck_ir(pres, foreign=True), main, False, None)
+    assert "\\begin{slidetable}" in text and text.count("\\sliderect[") >= 6
+
+    def compiled(name: str, preamble: str) -> tuple[list[bytes], str]:
+        tree = tmp_path / name
+        shutil.copytree(main.parent, tree)
+        (tree / "main.tex").write_text(text.replace("\\begin{document}", preamble + "\\begin{document}", 1),
+                                       encoding="utf-8")
+        pdf, error = Workspace(tree / "main.tex", tmp_path / f"{name}-work", handout=False, engine="lualatex",
+                               fresh=True).compile()
+        assert pdf is not None, error
+        return pages_of(pdf), pdf.with_suffix(".log").read_text(encoding="utf-8", errors="replace")
+
+    fast, fast_log = compiled("fast", PROBES)
+    tikz, tikz_log = compiled("tikz", PROBES + TIKZ_ONLY)
+    for k in FAST_PATHS:
+        assert f"B2S-FAST {k}" in fast_log, f"no {k} was drawn without TikZ"
+    assert "B2S-FAST" not in tikz_log, "a changed `every path` sends everything to TikZ"
+    assert len(fast) == len(tikz)
+    moved = [i + 1 for i, (a, b) in enumerate(zip(fast, tikz)) if a != b]
+    assert not moved, f"pages {moved} drawn without TikZ are not TikZ's pixels"

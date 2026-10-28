@@ -35,7 +35,7 @@ from . import labels as labels_mod
 from . import snapshot
 from .fontfetch import table_int
 from .fonts import cjk_font
-from .adopt_shapes import SHAPE_MACRO, Drawn, shape_style_definitions, survey_styles, turned_text
+from .adopt_shapes import PLAIN_MACRO, SHAPE_MACRO, Drawn, shape_style_definitions, survey_styles, turned_text
 from .adopt_context import AdoptContext, Metrics, MissingFont, StyleRef, adopt_context
 from .adopt_theme import FramePlan
 from .deck_ir_types import (Absent, CellParagraph, PageGradient, TableBorder, TableCell, TargetDeck, TargetDiagram,
@@ -3118,14 +3118,105 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
 \def\slides@t@drop#1{\csname slides@t@drop@#1\endcsname}% a middle cell's line box under TeX's strut
 \def\slides@t@ht#1{\csname slides@t@ht@#1\endcsname}% the height of a cell's first line
 \def\slides@t@dp#1{\csname slides@t@dp@#1\endcsname}% the depth of its last
+% The picture, its fills, rules and cells. While \slides@tikzplain holds they are drawn as TikZ
+% draws `\fill[colour] (a) rectangle (b);`, `\draw[line cap=rect,colour,line width=w] (a) -- (b);`
+% and `\node[anchor=...] at (x,y) {box};` (a rectangle node's anchors, as pgf works them out, and
+% its box placed by pgf's own \pgfsys@hboxsynced): the same page, without TikZ's parser.
+\newif\ifslides@t@fast
+\newdimen\slides@t@xa\newdimen\slides@t@ya\newdimen\slides@t@xb\newdimen\slides@t@yb
+\newdimen\slides@t@minw\newdimen\slides@t@minh\newdimen\slides@t@isx\newdimen\slides@t@isy
+\newdimen\slides@t@osx\newdimen\slides@t@osy\newdimen\slides@t@ne\newdimen\slides@t@sw
+\newbox\slides@t@nodebox
+\def\slides@t@west{west}
+\def\slides@t@nw{north west}
+\def\slides@t@rect{rectangle}
 \def\slides@t@picture#1#2{\begin{tikzpicture}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]
-  \path[use as bounding box] (0bp,0bp) rectangle (#1bp,{-\slides@t@y{#2}});}
-\def\slides@t@fill#1#2#3#4#5{\fill[#1] (#2bp,{-\slides@t@y{#3}}) rectangle (#4bp,{-\slides@t@y{#5}});}
-\def\slides@t@hdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#4}}) -- (#3bp,{-\slides@t@y{#4}});}
-\def\slides@t@vdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#3}}) -- (#2bp,{-\slides@t@y{#4}});}
-\def\slides@t@node#1#2#3#4{\node[anchor=#1] at (#2bp,{#3}) {\slides@literal{/B2Sc <</r \csname slides@t@#4@row\endcsname
-  \space/c \csname slides@t@#4@col\endcsname\space/rs \csname slides@t@#4@rows\endcsname
-  \space/cs \csname slides@t@#4@span\endcsname>> BDC}\copy\csname slides@t@box@#4\endcsname\slides@shut};}
+  \path[use as bounding box] (0bp,0bp) rectangle (#1bp,{-\slides@t@y{#2}});\slides@tikzplain
+  % (and no node option set for the whole document: a shape, text colour, font, width or alignment)
+  \slides@t@fastfalse\pgfkeysgetvalue{/tikz/node halign header}\slides@t@hh
+  \ifslides@plain\ifx\tikz@shape\slides@t@rect\ifx\slides@t@hh\pgfutil@empty
+  \ifx\tikz@textcolor\pgfutil@empty\ifx\tikz@textopacity\pgfutil@empty\ifx\tikz@textfont\pgfutil@empty
+  \ifx\tikz@node@textfont\pgfutil@empty\ifx\tikz@text@width\pgfutil@empty\ifx\tikz@text@height\pgfutil@empty
+  \ifx\tikz@text@depth\pgfutil@empty\ifx\tikz@atbegin@node\pgfutil@empty\ifx\tikz@atend@node\pgfutil@empty
+  \ifx\tikz@node@begin@hook\pgfutil@empty\ifx\tikz@node@reset@hook\pgfutil@empty
+    \slides@t@fasttrue
+  \fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi
+  \ifslides@t@fast
+    \pgfmathsetlength\slides@t@minw{\pgfkeysvalueof{/pgf/minimum width}}%
+    \pgfmathsetlength\slides@t@minh{\pgfkeysvalueof{/pgf/minimum height}}%
+    \pgfmathsetlength\slides@t@isx{\pgfkeysvalueof{/pgf/inner xsep}}%
+    \pgfmathsetlength\slides@t@isy{\pgfkeysvalueof{/pgf/inner ysep}}%
+    \pgfmathsetlength\slides@t@osx{\pgfkeysvalueof{/pgf/outer xsep}}%
+    \pgfmathsetlength\slides@t@osy{\pgfkeysvalueof{/pgf/outer ysep}}%
+  \fi}
+\def\slides@t@iffast{\ifslides@t@fast\expandafter\@firstoftwo\else\expandafter\@secondoftwo\fi}
+\def\slides@t@fill#1#2#3#4#5{\slides@t@iffast{\slides@ifcolour{#1}{\slides@t@qfill}{\slides@t@tfill}}{\slides@t@tfill}%
+  {#1}{#2}{#3}{#4}{#5}}
+\def\slides@t@tfill#1#2#3#4#5{\fill[#1] (#2bp,{-\slides@t@y{#3}}) rectangle (#4bp,{-\slides@t@y{#5}});}
+\def\slides@t@qfill#1#2#3#4#5{%
+  \pgfmathsetlength\slides@t@xa{#2bp}\pgfmathsetlength\slides@t@ya{{-\slides@t@y{#3}}}%
+  \pgfmathsetlength\slides@t@xb{#4bp}\pgfmathsetlength\slides@t@yb{{-\slides@t@y{#5}}}%
+  \pgfscope\tikz@compat@color@set{#1}%
+  \pgfsys@moveto\slides@t@xa\slides@t@ya\pgfsys@moveto\slides@t@xa\slides@t@ya
+  \pgfsys@lineto\slides@t@xa\slides@t@yb\pgfsys@lineto\slides@t@xb\slides@t@yb
+  \pgfsys@lineto\slides@t@xb\slides@t@ya\pgfsys@closepath\pgfsys@moveto\slides@t@xb\slides@t@yb
+  \pgfsys@fill\endpgfscope}
+% a rule's style: each item a colour or `line width=w`, set in its order
+\def\slides@t@add#1{\expandafter\def\expandafter\slides@t@set\expandafter{\slides@t@set#1}}
+\def\slides@t@style#1{\slides@oktrue\let\slides@t@set\@empty
+  \@for\slides@t@item:=#1\do{\ifslides@ok\expandafter\slides@t@one\slides@t@item==\@nil\fi}}
+\def\slides@t@one#1=#2=#3\@nil{%
+  \ifx\@nnil#3\@nnil
+    \slides@ifcolour{#1}{\slides@t@add{\tikz@compat@color@set{#1}}}{\slides@okfalse}%
+  \else
+    \def\slides@t@key{#1}%
+    \ifx\slides@t@key\slides@t@lw\slides@t@add{\pgfsetlinewidth{#2}}\else\slides@okfalse\fi
+  \fi}
+\def\slides@t@lw{line width}
+\def\slides@t@hdraw#1#2#3#4{\slides@t@rule{#1}{#2}{#4}{#3}{#4}}
+\def\slides@t@vdraw#1#2#3#4{\slides@t@rule{#1}{#2}{#3}{#2}{#4}}
+\def\slides@t@rule#1#2#3#4#5{\slides@t@iffast{\slides@t@style{#1}\ifslides@ok\expandafter\@firstoftwo\else
+  \expandafter\@secondoftwo\fi\slides@t@qrule\slides@t@trule}\slides@t@trule{#1}{#2}{#3}{#4}{#5}}
+\def\slides@t@trule#1#2#3#4#5{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#3}}) -- (#4bp,{-\slides@t@y{#5}});}
+\def\slides@t@qrule#1#2#3#4#5{%
+  \pgfmathsetlength\slides@t@xa{#2bp}\pgfmathsetlength\slides@t@ya{{-\slides@t@y{#3}}}%
+  \pgfmathsetlength\slides@t@xb{#4bp}\pgfmathsetlength\slides@t@yb{{-\slides@t@y{#5}}}%
+  \pgfscope\pgfsetrectcap\slides@t@set
+  \pgfsys@moveto\slides@t@xa\slides@t@ya\pgfsys@lineto\slides@t@xb\slides@t@yb
+  \pgfsys@stroke\endpgfscope}
+\def\slides@t@text#1{\slides@literal{/B2Sc <</r \csname slides@t@#1@row\endcsname
+  \space/c \csname slides@t@#1@col\endcsname\space/rs \csname slides@t@#1@rows\endcsname
+  \space/cs \csname slides@t@#1@span\endcsname>> BDC}\copy\csname slides@t@box@#1\endcsname\slides@shut}
+\def\slides@t@node#1{\slides@t@iffast\slides@t@qnode\slides@t@tnode{#1}}
+\def\slides@t@tnode#1#2#3#4{\def\slides@t@a{#1}%
+  \ifx\slides@t@a\slides@t@west\expandafter\@firstoftwo\else\expandafter\@secondoftwo\fi
+  {\node[anchor=west,yshift=-\slides@t@drop{#4}] at (#2bp,{#3}) {\slides@t@text{#4}};}%
+  {\node[anchor=#1] at (#2bp,{#3}) {\slides@t@text{#4}};}}
+\def\slides@t@qnode#1#2#3#4{%
+  % the node's place: (x,y), shifted
+  \pgfmathsetlength\slides@t@xa{#2bp}\pgfmathsetlength\slides@t@ya{{#3}}%
+  \def\slides@t@a{#1}%
+  \ifx\slides@t@a\slides@t@west\pgfmathsetlength\slides@t@yb{-\slides@t@drop{#4}}\else\slides@t@yb\z@\fi
+  \setbox\slides@t@nodebox\hbox{\slides@t@text{#4}}%
+  % the rectangle's south west and north east corners, as pgf's \southwest and \northeast
+  \dimen@=\wd\slides@t@nodebox\advance\dimen@ by2\slides@t@isx
+  \ifdim\dimen@<\slides@t@minw\dimen@=\slides@t@minw\fi
+  \slides@t@xb=-.5\dimen@\advance\slides@t@xb by.5\wd\slides@t@nodebox\advance\slides@t@xb by-\slides@t@osx
+  \dimen@=\ht\slides@t@nodebox\advance\dimen@ by\dp\slides@t@nodebox\advance\dimen@ by2\slides@t@isy
+  \ifdim\dimen@<\slides@t@minh\dimen@=\slides@t@minh\fi
+  \slides@t@ne=.5\dimen@\advance\slides@t@ne by-.5\dp\slides@t@nodebox\advance\slides@t@ne by.5\ht\slides@t@nodebox
+  \advance\slides@t@ne by\slides@t@osy
+  \slides@t@sw=-.5\dimen@\advance\slides@t@sw by-.5\dp\slides@t@nodebox\advance\slides@t@sw by.5\ht\slides@t@nodebox
+  \advance\slides@t@sw by-\slides@t@osy
+  % the anchor's height: west halfway, north west the top, south west the foot
+  \ifx\slides@t@a\slides@t@west
+    \slides@t@ne=.5\slides@t@ne\slides@t@sw=.5\slides@t@sw\advance\slides@t@sw by\slides@t@ne
+  \else\ifx\slides@t@a\slides@t@nw\slides@t@sw=\slides@t@ne\fi\fi
+  \advance\slides@t@xa by-\slides@t@xb
+  \advance\slides@t@ya by\slides@t@yb\advance\slides@t@ya by-\slides@t@sw
+  \setbox\slides@t@nodebox\hbox{{\pgfsetcolor{.}\box\slides@t@nodebox}}%
+  \hbox{\hbox{{\pgfscope\pgftransformreset\pgf@pt@x=\slides@t@xa\pgf@pt@y=\slides@t@ya
+    \pgfsys@hboxsynced\slides@t@nodebox\endpgfscope}}}}
 \ExplSyntaxOn
 \tl_new:N \l__slides_t_ix_tl
 \tl_new:N \l__slides_t_iy_tl
@@ -3552,7 +3643,7 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
           {
             { middle }
               {
-                \tl_set:Nn \l__slides_t_anchor_tl { west,yshift=-\slides@t@drop{#1} }
+                \tl_set:Nn \l__slides_t_anchor_tl { west }
                 \tl_set:Ne \l__slides_t_where_tl
                   {
                     -( \exp_not:N \slides@t@y { \int_use:N \l__slides_t_r_int }
@@ -4606,6 +4697,8 @@ def bootstrap(target: JsonObject, tex: Path, flow: bool, missing: list[MissingFo
     finally:
         inverse.GUARD_UNITS = False
     head = preamble(deck, target, ctx, flow, tex.parent, missing)
+    if SHAPE_MACRO in ctx.packages or TABLE_MACROS in ctx.packages:
+        ctx.packages.add(PLAIN_MACRO)  # sorted before both: "% --- Drawn" < "% --- Shapes", "% --- Tables"
     uses, macros = split_packages(ctx.packages)
     extra = list(uses)
     if macros:

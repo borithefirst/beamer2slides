@@ -514,7 +514,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
 - **Adopt** (a deck a person built in Slides -> a beamer source, `adopt*.py`,
   docs/adopt-bench.md): absolute-first `slidebox` frames in a `slides.sty` vocabulary, a recovered
   theme, a label per frame from the slide's objectId, and a base so the source can be synced back
-  into that same deck (`adopt_sync.py`). deck_ir builds `TargetDeck` records (`target_json` its
+  into that same deck (`adopt_sync.py`). slides.sty draws a plain `\sliderect` and a table's
+  fills, rules and cells with pgf's system layer in TikZ's own order while nothing could make TikZ
+  draw them otherwise (`adopt_shapes.PLAIN_MACRO`; else TikZ), pinned to TikZ's pixels
+  (`test_what_slides_sty_draws_without_tikz_is_what_tikz_draws`). deck_ir builds `TargetDeck` records (`target_json` its
   one JSON writer); the thumbnail passes (deck_fills, deck_freeforms, deck_thumbs) take a slide's
   element records and hand back new ones (`replace`), never changing one; adopt parses the target
   once (`bootstrap`), `element_latex` matches each kind to `assert_never`; adopt_shapes,
