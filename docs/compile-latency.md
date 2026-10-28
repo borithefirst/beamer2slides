@@ -303,11 +303,14 @@ mtime. adopt copied the fonts into each tree with `shutil.copyfile`, so every tr
 mtimes and the first pass of every run rebuilt the cache of every font: ~6.5-7 s on talk.
 adopt and `scripts` now copy with `copy2`, which keeps the font store's mtime.
 
-| loop, 3 rounds, compiles' wall (A/B interleaved, 2 runs each) | cold | warm | |
+| loop, 3 rounds, whole wall (A/B interleaved, 2 runs each)     | cold | warm | |
 |-------------------------------------------------|------|------|------|
 | talk                                            | 17.1 s | 10.7 s | -37% |
 | water                                           | 39.7 s | 33.5 s | -16% |
 | bees                                            | 9.8 s  | 6.5 s  | -34% |
+| hashing                                         | 25.5 s | 16.1 s | -37% |
+| review                                          | 16.4 s | 12.0 s | -27% |
+| portfolio (converged at round 0: one compile)   | 3.7 s  | 2.6 s  | -29% |
 
 Both arms have the `copy2` fonts (talk's loop was 22.8 s in the table above, cold 17.1 s here:
 the font cache, though not measured in one sitting). Residuals per round are identical in every
