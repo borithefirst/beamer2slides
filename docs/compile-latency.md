@@ -159,3 +159,81 @@ Not worth it: SyncTeX, compression, draft mode, the PDF writer, Lua shaping call
   0.015-0.063 s a deck. Real Google Fonts through fontspec, and decks with many faces, were not
   measured.
 - Windows / MiKTeX was not measured.
+
+## Deeper: is the CPU justified? (2026-10-28)
+
+Same machine and method; this VM ran ~20% faster that day (water x8: 4.7 s a compile), so
+compare within this section only.
+
+### Compiles nobody needed (Python)
+
+- **Every edit round of `converge` compiles the same source twice.** After writing a round's
+  edits it compiles to check they build (`inverse.py:3098`) and keeps only the success flag;
+  the next round's `ws.build(..., compiled=ready)` has `ready = None` (3039) and compiles again
+  (756) - same text, options and build folder, unless a revert (3129-3148) wrote in between.
+  `build` already takes a `compiled=` handoff (pull's first round uses it). One compile of two
+  per round; a round of a 48-slide deck is ~2 x 4.7 s compile + 0.8 s extract/classify.
+  After a bisect whose last edit was kept, the next build is a third compile of the same text.
+- **adopt compiles its finished source again from an empty folder** to record the sync base
+  (`record_base` -> `adopt_sync.convert_source_of`, `Workspace(..., work / "compile", fresh=True)`,
+  `adopt_sync.py:658`): 2 passes, of the text the loop's last compile already built (with
+  `--apply`).
+
+### Idle cores
+
+A compile is one thread; the machine has four.
+
+| water x8 (48 slides), one compile 4.6-4.7 s | wall    | pages identical to one compile |
+|-------------------------------------------|---------|-------------------------------|
+| 2 / 3 / 4 `\includeonlyframes` pieces at once, merged | 2.98 / 2.55 / 2.29 s | 48/48 |
+| one pre-warmed engine (body sent after 3 s)            | 3.67 s  | 48/48 |
+| 2 / 3 / 4 pre-warmed pieces, merged                    | 1.98 / 1.43 / **1.14 s** | 48/48 |
+
+Pre-warmed: the engine is started on the preamble followed by the primitive `\input` of a FIFO
+(LaTeX's `\input` would open it twice to test it), and does start-up and preamble while the loop
+does something else; the body is written into the FIFO when it is ready. talk x8: 2.28 ->
+1.30 s; hashing (6 slides): 1.47 -> 0.47 s. A piece pays the fixed cost again, which is why
+pieces alone stop near 2x; pre-warmed they do not. A merge (pypdfium2 `import_pages`) takes
+4 ms. Not settled: SyncTeX per piece (inverse maps pages to frames by it; the labels would do),
+the preamble changing between rounds (`ensure_preamble`: start a new engine), outlines and
+links across pieces.
+
+### TikZ: ~150x the floor
+
+One filled rectangle, 400 of them in the water preamble, lualatex, ms each:
+
+| drawn with                                          | ms     |
+|-----------------------------------------------------|--------|
+| a PDF literal (`re f`)                              | 0.008  |
+| PGF's basic layer                                   | 0.76   |
+| `\tikz\fill`                                        | 1.2-1.3 |
+| textpos + `tikzpicture` + `\useasboundingbox`, as `slides.sty` | 2.18 |
+| `\sliderect`                                        | 2.24   |
+| `\slideline` (six `\fpeval`) / a TikZ arrow line    | 3.74 / 2.46 |
+| `\slideellipse` / `\tikz\fill ... ellipse`          | 2.26 / 1.53 |
+
+Trimming around TikZ does not pay: `baseline=0pt` for `(current bounding box.north)` and
+`\dimexpr` for `\slideline`'s `\fpeval` moved the whole water x8 deck by -1.4% to +0.5% (median of
+9, noise), and the `\dimexpr` one changed pixels on 16 of 48 pages. The cost is TikZ itself.
+
+`\slidetable` (water's: 25 cells, 137 ms): borders 15 ms, fills 26 ms, language switches 4 ms;
+with all three off, 89 ms, of which **TikZ `\node`s placing the finished cell boxes are 56 ms
+(2.25 ms a cell)** and the first-baseline `\vsplit` loop 2 ms. About 100 of the 137 ms is TikZ
+doing what a box placement (`\kern`/`\raise`) or a rule does in microseconds.
+
+Shapes in the six adopted showcase decks: rectangles 31 plain, 21 rounded, 3 rounded+turned;
+ellipses 24 plain, 7 turned; freeforms 10 (point lists); `\slideshape` 34; lines 30, every one
+with an arrow head. A turn is one `cm`; rounded corners are four curves; an arrow head is a
+triangle. Opacity (an ExtGState) and dash patterns are the parts needing more than geometry.
+
+### Verdict
+
+| cost                                   | justified? |
+|----------------------------------------|------------|
+| the second compile of every loop round | no: drop it (hand the check's PDF over) |
+| adopt's base compile from an empty folder | no: reuse the loop's PDF or its aux files |
+| the cold second pass for bookmarks     | no, for the converter (5 of 8 decks, no pixel moves) |
+| ~1.0-1.5 s fixed per lualatex process  | per process yes; hidden by pre-warming |
+| one thread out of four                 | no: pieces, pre-warmed: 4.2x on water x8 |
+| TikZ for every shape and table cell    | convenience, not need: 60-75% of an adopted body; table cell nodes and borders first |
+| Lua shaping, SyncTeX, compression, PDF writing | small or noise (part one) |
