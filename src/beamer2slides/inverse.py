@@ -708,6 +708,19 @@ class Workspace:
         self.engines = 0   # engines started, each in a folder of its own
         self.warm_failures_real = False   # a failure of a waiting engine was seen to fail cold too
 
+    def seed(self, build: Path) -> None:
+        """Start from the auxiliary files of another compile of this source (`build`, its build
+        folder), when this one has none: a first compile then runs in pieces from its first pass
+        (8.3 s -> 3.3 s on water x8). Only a guess - a pass in pieces is kept once its .aux
+        settles, so the pages are a whole compile's whatever it was given - but a guess compiled
+        with other options (notes shown) costs more than none: the caller says only a like one."""
+        if aux_files(self.build_dir):
+            return
+        for path, data in aux_files(build).items():
+            mine = self.build_dir / path.relative_to(build)
+            mine.parent.mkdir(parents=True, exist_ok=True)
+            mine.write_bytes(data)
+
     def reload(self) -> None:
         self.source = Source(self.main)
 
@@ -3749,7 +3762,7 @@ def converge(tex: Path, target: "JsonObject | Later", work: Path, max_iter: int,
         deck = target
     ctx = fresh_context(class_pt_option(ws.source))
     typed = typed_target(deck)
-    has_notes = any(s.get("notes") for s in as_objects(deck["slides"], "target: slides")) or uses_notes(ws.source)
+    has_notes = shows_notes(deck, ws.source)
     iterations: list[JsonObject] = []
     blocked: set[Signature] = set()
     attempts: dict[Signature, list[float]] = {}
@@ -4012,6 +4025,12 @@ def dedupe_unresolved(unresolved: Sequence[GivenUp], open_res: Sequence[Residual
 
 def uses_notes(source: Source) -> bool:
     return any(re.search(r"\\note\b", mask_comments(t)) for t in source.texts.values())
+
+
+def shows_notes(deck: JsonObject, source: Source) -> bool:
+    """Whether the loop compiles `source` with its notes shown: the deck has speaker notes, or the
+    source writes some."""
+    return any(s.get("notes") for s in as_objects(deck["slides"], "target: slides")) or uses_notes(source)
 
 
 def labelled_frames(source: Source) -> int:

@@ -44,8 +44,9 @@ from .deck_ir_types import (Absent, CellParagraph, PageGradient, TableBorder, Ta
                             recolor_json)
 from .ir_types import Point
 from .inverse import (NO_GLYPH_STREAMS, TEXTPOS, Picture, Result, TextStyle, colour_name, common_style, frame_latex,
-                      paragraphs_latex, picture_block, script_paragraph, target_picture)
+                      paragraphs_latex, picture_block, script_paragraph, shows_notes, target_picture)
 from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
+from .texmap import Source
 from .typing_compat import assert_never
 
 if TYPE_CHECKING:
@@ -4789,7 +4790,10 @@ def record_base(target: JsonObject, pres: JsonObject | None, tex: Path, work: Pa
         log("no sync base recorded: the deck was read from a file with no presentation beside it "
             "(a base needs the deck's own object ids)")
         return None
-    base, why = adopt_sync.record(tex, work / "sync-base", target, pres, engine, "last", log=log)
+    # the loop just compiled this source: its .aux is where the base's compile starts, unless the
+    # loop showed the notes (their pages move every page number, and a wrong start costs a pass)
+    seed = None if shows_notes(target, Source(tex)) else Path(work).resolve() / "loop" / "build"
+    base, why = adopt_sync.record(tex, work / "sync-base", target, pres, engine, "last", seed, log=log)
     if base is None:
         log(f"no sync base recorded: {why}")
         log("  `sync --deck <this folder>` will say there is none; `convert` would make a second deck.")

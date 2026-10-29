@@ -503,7 +503,7 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   the first too, `compile_whole(cut=)`; waiting engines at nice 10, `WARM_NICE`, three a piece as half the free memory allows,
   `WARM_PASSES`/`warm_room`; a register set to a
   page moves with the pages, `carried`; an unsettled pass whose bookmarks do not follow on merges
-  its .aux and joins nothing, `marks_apart`). A compile whose edit stays inside frames typesets only those
+  its .aux and joins nothing, `marks_apart`; adopt's base compile starts from the loop's .aux, `Workspace.seed`, only when the loop showed no notes, `shows_notes`). A compile whose edit stays inside frames typesets only those
   (`compile_patched`, `pieces.patches`: pages per frame from `\btwos@shipped`, kept only when the
   pieces wrote the last .aux lines again; `pieces.STRUCTURE` refuses before compiling; the join
   gives a name to its earliest page). Fonts go into a tree with `copy2`:

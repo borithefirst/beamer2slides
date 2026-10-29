@@ -730,6 +730,38 @@ def test_a_compile_in_pieces_is_the_pages_of_a_whole_one(tmp_path: Path, monkeyp
         ws.stop_warm()
 
 
+@pytest.mark.skipif(lualatex_missing() is not None, reason="lualatex not found")
+def test_a_seeded_first_compile_starts_in_pieces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """adopt's base compile starts from the .aux its loop just wrote (`Workspace.seed`): no whole
+    pass, one pass in pieces that settles at once, and the pages of a cold compile."""
+    main = tmp_path / "src" / "main.tex"
+    main.parent.mkdir()
+    main.write_text(PIECES_MAIN, encoding="utf-8")
+    loop = Workspace(main, tmp_path / "loop", handout=False, engine="lualatex", fresh=True)
+    loop.pieces = 3   # its .aux records where to cut
+    cold, error = loop.compile()
+    assert cold is not None, error
+    passes: list[str] = []
+    piece_pass, compile_whole = Workspace.piece_pass, Workspace.compile_whole
+
+    def in_pieces(self: Workspace, cmd: list[str], job: str, plan: list[pieces.Cut]) -> tuple[str, bool, bool]:
+        passes.append("pieces")
+        return piece_pass(self, cmd, job, plan)
+
+    def whole(self: Workspace, cmd: list[str], job: str, engines: int, cut: bool) -> tuple[str, bool]:
+        passes.append("whole")
+        return compile_whole(self, cmd, job, engines, cut)
+    monkeypatch.setattr(Workspace, "piece_pass", in_pieces)
+    monkeypatch.setattr(Workspace, "compile_whole", whole)
+    ws = Workspace(main, tmp_path / "base", handout=False, engine="lualatex", fresh=True)
+    ws.pieces = 3
+    ws.seed(loop.build_dir)
+    split, error = ws.compile()
+    assert split is not None, error
+    assert passes == ["pieces"], ws.split_refused
+    assert pages_of(split) == pages_of(cold)
+
+
 def stat_font() -> bytes:
     """A static font that keeps a STAT table, as every instance cut from a google/fonts variable
     font does (`fontfetch`): no fvar, so no axes."""

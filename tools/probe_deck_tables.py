@@ -139,7 +139,7 @@ def look(name: str, tag: str, work: Path, tally: Counter[str], detail: bool) -> 
     pres = presentation(as_object(json.loads((cache / "presentation.json").read_text(encoding="utf-8")), where), where)
     page_width = float(snapshot.page_size(pres)[0])
     folds = adopt_sync.deck_folds(target)
-    made, err = adopt_sync.convert_source_of(tex, work / name, None, page_width, folds)
+    made, err = adopt_sync.convert_source_of(tex, work / name, None, page_width, folds, None)
     if made is None:
         print(f"{name}: does not compile, skipped\n{err}")
         return

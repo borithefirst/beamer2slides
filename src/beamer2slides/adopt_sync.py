@@ -629,14 +629,14 @@ class ConvertedDict(TypedDict):
 def convert_source(tex: Path, work: Path, engine: str | None, *, page_width: float,
                    folds: Folds | None) -> tuple[ConvertedDict | None, str]:
     """`convert_source_of` as a dict ({"deck", "out", "pdf", "plan"}), for tools/probe_deck_tables.py."""
-    made, err = convert_source_of(tex, work, engine, page_width, folds)
+    made, err = convert_source_of(tex, work, engine, page_width, folds, None)
     if made is None:
         return None, err
     return {"deck": made.deck, "out": made.out, "pdf": made.pdf, "plan": made.plan}, ""
 
 
 def convert_source_of(tex: Path, work: Path, engine: str | None, page_width: float,
-                      folds: Folds | None) -> tuple[Converted | None, str]:
+                      folds: Folds | None, seed: Path | None) -> tuple[Converted | None, str]:
     """Compile the source tree at `tex` and convert it exactly as a later `sync` will
     (`sync.build_ours`'s first half): the base's IR side has to be what the *converter* makes of
     that source, not what adopt read from the deck, or every element would read as changed on the
@@ -646,6 +646,8 @@ def convert_source_of(tex: Path, work: Path, engine: str | None, page_width: flo
     as several (`fold_composites`) - applied after the backgrounds are rendered, so a fold changes
     what is *paired*, never what is painted. An element emit cannot plan is the picture of its
     region (`sync.planned`), as the sync's own conversion will make it: the plan's `contained`.
+    `seed`: the build folder of a compile of this source with the same options (adopt's loop), whose
+    .aux this first compile starts from (`Workspace.seed`), or None.
     Returns (the conversion, "") or (None, the compile error)."""
     from .classify import classify
     from .ir import deck_json
@@ -658,6 +660,8 @@ def convert_source_of(tex: Path, work: Path, engine: str | None, page_width: flo
 
     ws = Workspace(Path(tex), work / "compile", handout=False, engine=engine, fresh=True)
     ws.pieces = piece_count()   # the passes after the first on every core (docs/compile-latency.md)
+    if seed is not None:
+        ws.seed(seed)
     pdf, err = ws.compile()
     if pdf is None:
         return None, err
@@ -803,9 +807,10 @@ def labels_match(conv_deck: JsonMap, target: JsonObject) -> str | None:
 
 
 def record(tex: Path, work: Path, target: JsonObject, pres: JsonObject, engine: str | None, overlays: str,
-           *, log: Callable[[str], None]) -> tuple[JsonObject | None, str | None]:
+           seed: Path | None, *, log: Callable[[str], None]) -> tuple[JsonObject | None, str | None]:
     """The whole of it: compile the source adopt wrote, pair its conversion with the deck it was
-    written from, and return (base, None) or (None, why there is none). Never writes to Google."""
+    written from, and return (base, None) or (None, why there is none). Never writes to Google.
+    `seed`: as `convert_source_of`'s."""
     if not target.get("slides"):
         return None, "the deck has no slides"
     if not pres.get("slides"):
@@ -813,7 +818,7 @@ def record(tex: Path, work: Path, target: JsonObject, pres: JsonObject, engine: 
     log("recording a sync base for the adopted deck...")
     folds = deck_folds(target)
     width = snapshot.page_size(presentation(pres, "the adopted deck's presentations.get"))[0]
-    conv, err = convert_source_of(Path(tex), Path(work), engine, float(width), folds)
+    conv, err = convert_source_of(Path(tex), Path(work), engine, float(width), folds, seed)
     if conv is None:
         return None, f"the source does not compile:\n{err}"
     for c in conv.plan.contained:

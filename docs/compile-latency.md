@@ -790,3 +790,26 @@ preamble loads at `WARM_NICE` after an insert.
 
 **Not taken: skipping the third pass.** The second pass read .nav lines the first wrote stale.
 Whether its pages depend on them depends on the theme, and only the third pass can tell.
+
+## Done: adopt's base compile starts from the loop's .aux (2026-10-29)
+
+`adopt` compiles the source twice: the pull loop does (`work/loop`), and then the sync base does
+again (`work/sync-base/compile`, `adopt_sync.convert_source_of`), cold, from an empty build
+folder. A cold first compile runs its first pass whole, because there is no .aux to cut by.
+Now the base compile starts from the loop's .aux (`Workspace.seed`), so even its first pass runs
+in pieces. A wrong .aux only makes it slower, never wrong: a pass in pieces is kept once it
+settles, and the pages came out the same to the pixel on every deck below.
+
+| first compile, 4 cores (A/B interleaved) | cold | seeded |
+|---|---|---|
+| water x8 (48 pages), no notes      | 8.2-8.9 s | 3.2-3.9 s |
+| showcase hashing, no notes (whole `convert_source_of`) | 3.7-3.8 s | 2.6-2.9 s |
+| showcase talk, notes shown in the loop | 3.1-3.7 s | **10.5-11.8 s** |
+
+**The seed is taken only when the loop compiled without notes shown**
+(`inverse.shows_notes`: the deck has speaker notes or the source writes `\note`). With notes
+shown, every page number in the .aux is off. The passes in pieces never settle, then the
+compile goes whole with no cut. That is three times slower than cold (last row).
+
+**What it cannot see.** Whether the seed is close. The caller decides by options. A source the
+loop rewrote heavily before stopping still settles, but in more passes.
