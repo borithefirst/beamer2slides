@@ -24,7 +24,7 @@ from typing import Literal
 import numpy as np
 from PIL import Image
 
-from .arrays import Floats, Ints, Mask, Pixels, RGB, RGBA
+from .arrays import Floats, Ints, Mask, Pixels, RGB, RGBA, count
 from .json_types import Json, JsonArray, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
 from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, PdfError
 from .raw_types import RawDoc, RawImage, RawPage, RawSpan
@@ -536,7 +536,7 @@ def clear_in_place(eraser: Eraser, bbox: Sequence[float], zoom: float, opaque: R
         return opaque
     clear = (rgba[..., 3] == 0) & \
         (np.abs(opaque[..., :3].astype(int) - under[..., :3].astype(int)).max(axis=2) <= GROUND_FLAT)
-    if int(np.count_nonzero(clear)) < 20:
+    if count(clear) < 20:
         return opaque
     return np.dstack([opaque[..., :3], np.where(clear, 0, 255).astype(np.uint8)])
 
@@ -822,8 +822,8 @@ def _fill_fraction(page: Page, rect: Box, fill: str, avoid: list[Box]) -> float:
         rows = (a[:, 1, None] <= py) & (py <= a[:, 3, None])  # (box, sample row)
         cols = (a[:, 0, None] <= px) & (px <= a[:, 2, None])  # (box, sample column)
         counted = ~(rows[:, :, None] & cols[:, None, :]).any(axis=0)
-    total = int(np.count_nonzero(counted))
-    hits = int(np.count_nonzero(counted & (np.abs(img[np.ix_(ys, xs)] - target).max(axis=2) <= 12)))
+    total = count(counted)
+    hits = count(counted & (np.abs(img[np.ix_(ys, xs)] - target).max(axis=2) <= 12))
     return hits / total if total else 0.0
 
 
@@ -1106,7 +1106,7 @@ def theme_decoration(images: Iterable[RGB], ground: Ints) -> tuple[RGBA | None, 
     whole_first = next(rest)
     full = differs(whole_first, np.broadcast_to(np.asarray(ground, dtype=np.uint8), whole_first.shape),
                    DECORATION_TOLERANCE)
-    total = int(np.count_nonzero(full))
+    total = count(full)
     if total < DECORATION_MIN * full.size:
         return None, [False] * (1 + sum(1 for _ in rest)), False
     # Everything below is about pixels the first background shows decoration on, so it is worked
@@ -1126,8 +1126,8 @@ def theme_decoration(images: Iterable[RGB], ground: Ints) -> tuple[RGBA | None, 
     for whole in rest:
         img = sub(whole) if whole.shape == whole_first.shape else None
         same = None if img is None else ~differs(img, first, DECORATION_TOLERANCE)
-        ok = same is not None and np.count_nonzero(same & mask) >= DECORATION_AGREE * np.count_nonzero(mask)
-        inside.append(bool(ok))
+        ok = same is not None and count(same & mask) >= DECORATION_AGREE * count(mask)
+        inside.append(ok)
         if ok and img is not None and same is not None:
             mask &= same
             shown += differs(img, colour, DECORATION_TOLERANCE)
@@ -1136,7 +1136,7 @@ def theme_decoration(images: Iterable[RGB], ground: Ints) -> tuple[RGBA | None, 
     alpha = np.zeros(full.shape, dtype=np.uint8)
     alpha[np.ix_(rows, cols)] = np.where(mask, 255, 0)
     # (binary alpha: over a background showing the same pixels, any soft edge would change them)
-    return np.dstack([whole_first, alpha]), inside, int(np.count_nonzero(mask)) == total
+    return np.dstack([whole_first, alpha]), inside, count(mask) == total
 
 
 def differs(a: RGB, b: RGB, tolerance: int) -> Mask:

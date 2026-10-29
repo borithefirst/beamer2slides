@@ -5,6 +5,7 @@ type parameters no defaults (2.2, the newest with a Python 3.10 wheel), nothing 
 either. These aliases say the element type; the name says the shape and the meaning. Aliases of
 one dtype are the same type to the checker: the name is for the reader."""
 
+import operator
 from typing import TypeAlias
 
 import numpy as np
@@ -54,3 +55,10 @@ Int32: TypeAlias = npt.NDArray[np.int32]
 
 UInt32: TypeAlias = npt.NDArray[np.uint32]
 """Uint32 words: a pixel packed 0xAARRGGBB, or sums that wrap as C's unsigned arithmetic does."""
+
+
+def count(mask: npt.ArrayLike) -> int:
+    """How many pixels `mask` holds. numpy 2.2's stubs (Python 3.10) type count_nonzero's answer
+    `int`, later ones `intp`: `int()` of it is needless to the checker on the one and a must on the
+    other, and `operator.index` is an int on both."""
+    return operator.index(np.count_nonzero(mask))

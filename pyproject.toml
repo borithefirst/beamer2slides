@@ -9,7 +9,9 @@ license = "MIT"
 # 3.10: Google's monorepo builds some targets with it (tests/test_python310.py, workflow python310)
 requires-python = ">=3.10"
 dependencies = [
-    "pypdfium2>=5.0",
+    # Below 5.14: its PDFium reads ActualText and draws transfer functions otherwise, and the pure
+    # backend (pdf/pure/), byte-identical to 5.13, does not follow yet (test_pure_pdf on 5.14)
+    "pypdfium2>=5.0,<5.14",
     "numpy>=2.0",
     "pillow>=10.1",
     "python-pptx>=1.0",
