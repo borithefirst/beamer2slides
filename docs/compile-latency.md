@@ -813,3 +813,8 @@ compile goes whole with no cut. That is three times slower than cold (last row).
 
 **What it cannot see.** Whether the seed is close. The caller decides by options. A source the
 loop rewrote heavily before stopping still settles, but in more passes.
+
+**Not taken: remembering which glyphs are hidden.** `spans` reads every page twice: the glyphs
+shown, then the hidden ones. Each reading asks `Visibility.hidden` of every glyph. A cache per
+glyph took read_with_notes on water x8 from 0.578 to 0.565 s of CPU (min of 8, A/B interleaved,
+raw identical). That is 2%, inside the noise, and not worth the code.
