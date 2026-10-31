@@ -424,6 +424,8 @@ python -m beamer2slides docs push|sync|adopt ...
 python -m beamer2slides playground
 ```
 Outputs go to `out/<pdf stem>/`. Diff PNGs: red = only in PDF, blue = only in Slides, black = both.
+Releases: bump `version` in pyproject.toml, write `docs/releases/<version>.md`, push to main; the
+`release` workflow tags the commit and publishes the GitHub release (a cloud session cannot push tags).
 Debugging classification locally: `debug/slide-NNN.png` (element boxes over the page).
 
 ## Sync, pull, labels, adopt (docs/sync.md, docs/labels.md; history in docs/project-notes.md "Usage")

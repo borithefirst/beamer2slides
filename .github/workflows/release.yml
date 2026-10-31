@@ -1,0 +1,49 @@
+# A release is a commit, not a tag push: bump `version` in pyproject.toml, write the notes in
+# docs/releases/<version>.md, push to main. This job then tags that commit v<version> (annotated,
+# "beamer2slides <version>" and the notes) and publishes the GitHub release with the same notes.
+# A version already tagged is left alone, so every other push to these paths does nothing. Cloud
+# sessions can push branches but not tags; GITHUB_TOKEN can.
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [pyproject.toml, "docs/releases/**", .github/workflows/release.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        id: version
+        run: |
+          v=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$v" > /dev/null; then
+            echo "v$v is already tagged: nothing to release"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Tag and release
+        if: steps.version.outputs.new == 'true'
+        env:
+          V: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="docs/releases/$V.md"
+          if [ ! -s "$notes" ]; then
+            echo "::error::version $V has no notes: write $notes"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          { echo "beamer2slides $V"; echo; cat "$notes"; } > "$RUNNER_TEMP/tag.txt"
+          git tag -a "v$V" -F "$RUNNER_TEMP/tag.txt"
+          git push origin "v$V"
+          gh release create "v$V" --verify-tag --title "beamer2slides $V" --notes-file "$notes"
